@@ -32,7 +32,7 @@ pnpm test:browser
 # Or run both suites with: pnpm test:all
 ```
 
-The integration and protocol suite runs the complete creation, PIN unlock, provider validation, Cinemeta search, approval, encrypted storage, manifest, and catalog flow inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta and Torrentio are stubbed only at outbound `fetch`; deterministic tests contain no real credentials or signed media URLs. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
+The integration and protocol suite runs the complete creation, PIN unlock, provider validation, Cinemeta search, approval, encrypted storage, and catalog-to-current-episode stream flow inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta and Torrentio are stubbed only at outbound `fetch`; deterministic tests contain no real credentials or signed media URLs. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
 A credential-safe real-provider check is documented separately in [`docs/torrentio-contract-probe.md`](docs/torrentio-contract-probe.md). It is optional and never runs in CI.
 
@@ -67,3 +67,5 @@ The Worker never places the Parent PIN or provider credentials in installation U
 - `GET /addons/:secret/manifest.json` — Household Stremio manifest
 - `GET /addons/:secret/catalog/tv/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
+- `GET /addons/:secret/meta/tv/kids-channels:tv.json` — the TV Channel's Current Programme metadata
+- `GET /addons/:secret/stream/tv/:canonicalEpisodeId.json` — exactly one acceptable cached stream for the Current Programme

@@ -1,5 +1,8 @@
+import type { TvCurrentProgramme } from "./current-programme";
+
 export const TV_CATALOG_ID = "kids-tv-channel";
 export const MOVIE_CATALOG_ID = "kids-movie-channel";
+export const TV_CHANNEL_ID = "kids-channels:tv";
 
 export interface HouseholdIdentity {
   id: string;
@@ -12,7 +15,7 @@ export function manifestFor(household: HouseholdIdentity) {
     version: "0.1.0",
     name: "Kids Channels",
     description: "Two parent-curated Channels for the household.",
-    resources: ["catalog"],
+    resources: ["catalog", "meta", "stream"],
     types: ["tv", "movie"],
     catalogs: [
       { type: "tv", id: TV_CATALOG_ID, name: "Kids Channels - TV" },
@@ -25,12 +28,36 @@ export function manifestFor(household: HouseholdIdentity) {
   };
 }
 
+export function tvChannelMetadata(current: TvCurrentProgramme | null) {
+  if (!current) return { meta: null };
+  return {
+    meta: {
+      id: TV_CHANNEL_ID,
+      type: "tv",
+      name: "TV Channel",
+      description: current.description ?? `Current Programme: ${current.showTitle}`,
+      poster: current.poster,
+      background: current.background,
+      videos: [
+        {
+          id: current.episode.id,
+          title: `${current.showTitle} — ${current.episode.title}`,
+          released: current.episode.released,
+          season: current.episode.season,
+          episode: current.episode.episode,
+          overview: current.episode.overview,
+        },
+      ],
+    },
+  };
+}
+
 export function catalogFor(type: string, id: string, origin: string) {
   if (type === "tv" && id === TV_CATALOG_ID) {
     return {
       metas: [
         {
-          id: "kids-channels:tv",
+          id: TV_CHANNEL_ID,
           type: "tv",
           name: "TV Channel",
           description: "Your household's approved shows, in episode order.",

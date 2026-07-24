@@ -36,7 +36,12 @@ beforeEach(async () => {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_progress (
     programme_id TEXT PRIMARY KEY NOT NULL, next_video_id TEXT NOT NULL
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS current_programmes (
+    household_id TEXT NOT NULL, channel TEXT NOT NULL, programme_id TEXT NOT NULL,
+    video_id TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY (household_id, channel)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM current_programmes").run();
   await env.DB.prepare("DELETE FROM show_progress").run();
   await env.DB.prepare("DELETE FROM show_episodes").run();
   await env.DB.prepare("DELETE FROM approved_programmes").run();
@@ -352,6 +357,102 @@ describe("Cinemeta Approved Library", () => {
   });
 });
 
+describe("TV Channel Current Programme playback", () => {
+  const providerPath = "/providers=family/realdebrid=TEST-CREDENTIAL";
+  const manifestUrl = `https://torrentio.example${providerPath}/manifest.json`;
+  const canonicalEpisodeId = "tt2468101:1:1";
+  const selectedStream = { name: "Torrentio\nRD+", title: "First acceptable 1080p", url: "https://media.example/selected?token=SIGNED" };
+  const alternativeStream = { name: "Torrentio\nRD+", title: "Alternative 1080p", url: "https://media.example/alternative?token=OTHER" };
+  const showMeta = {
+    id: "tt2468101", imdb_id: "tt2468101", type: "series", name: "Playback Show",
+    description: "The approved family show.", poster: "https://images.example/playback.jpg",
+    videos: [
+      { id: canonicalEpisodeId, season: 1, episode: 1, title: "Beginning", released: "2020-01-01T00:00:00.000Z" },
+      { id: "tt2468101:1:2", season: 1, episode: 2, title: "Later", released: "2020-01-08T00:00:00.000Z" },
+    ],
+  };
+
+  async function arrangePlayback(playbackFailure = false) {
+    const providerRequests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const path = decodeURIComponent(new URL(input instanceof Request ? input.url : input.toString()).pathname);
+      if (path === `${providerPath}/manifest.json`) return Response.json({ id: "org.example.torrentio", resources: ["stream"] });
+      if (path === `${providerPath}/stream/movie/tt0111161.json`) return Response.json({ streams: [selectedStream] });
+      if (path === "/meta/series/tt2468101.json") return Response.json({ meta: showMeta });
+      if (path === `${providerPath}/stream/series/${canonicalEpisodeId}.json`) {
+        providerRequests.push(path);
+        return playbackFailure
+          ? Response.json({}, { status: 503 })
+          : Response.json({ streams: [
+            { name: "Torrentio\nRD+", title: "Unsuitable 2160p", url: "https://media.example/unsuitable" },
+            selectedStream,
+            alternativeStream,
+          ] });
+      }
+      throw new Error(`unexpected outbound request: ${path}`);
+    });
+
+    const created = await create();
+    const secret = secretFrom(created);
+    const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await unlocked.json<{ parentToken: string }>();
+    const authorization = `Bearer ${parentToken}`;
+    const configured = await SELF.fetch(`https://kids.test/api/households/${secret}/provider`, {
+      method: "PUT", headers: { "content-type": "application/json", authorization }, body: JSON.stringify({ manifestUrl }),
+    });
+    expect(configured.status).toBe(200);
+    const approved = await SELF.fetch(`https://kids.test/api/households/${secret}/library`, {
+      method: "POST", headers: { "content-type": "application/json", authorization },
+      body: JSON.stringify({ type: "show", imdbId: "tt2468101" }),
+    });
+    expect(approved.status).toBe(201);
+    return { created, secret, providerRequests };
+  }
+
+  it("drives the catalog-to-stream path with canonical identity and exactly the first acceptable stream", async () => {
+    const { created, providerRequests } = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+
+    const catalog = await (await SELF.fetch(`${base}/catalog/tv/kids-tv-channel.json`)).json<any>();
+    expect(catalog.metas).toHaveLength(1);
+    const metadata = await (await SELF.fetch(`${base}/meta/tv/${encodeURIComponent(catalog.metas[0].id)}.json`)).json<any>();
+    expect(metadata.meta).toMatchObject({ id: "kids-channels:tv", type: "tv", videos: [{
+      id: canonicalEpisodeId, season: 1, episode: 1, title: "Playback Show — Beginning",
+    }] });
+    expect(metadata.meta.videos).toHaveLength(1);
+
+    const before = await env.DB.prepare("SELECT next_video_id FROM show_progress").first<{ next_video_id: string }>();
+    const response = await SELF.fetch(`${base}/stream/tv/${encodeURIComponent(metadata.meta.videos[0].id)}.json`);
+    const text = await response.text();
+    expect(response.status).toBe(200);
+    expect(JSON.parse(text).streams).toEqual([selectedStream]);
+    expect(text).not.toContain(alternativeStream.url);
+    expect(providerRequests).toEqual([`${providerPath}/stream/series/${canonicalEpisodeId}.json`]);
+
+    const after = await env.DB.prepare("SELECT next_video_id FROM show_progress").first<{ next_video_id: string }>();
+    const current = await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first<{ video_id: string }>();
+    expect(before?.next_video_id).toBe(canonicalEpisodeId);
+    expect(after).toEqual(before);
+    expect(current?.video_id).toBe(canonicalEpisodeId);
+  });
+
+  it("returns a protocol-safe empty result and preserves Current Programme when Torrentio fails", async () => {
+    const { created } = await arrangePlayback(true);
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    const metadata = await (await SELF.fetch(`${base}/meta/tv/${encodeURIComponent("kids-channels:tv")}.json`)).json<any>();
+    const currentBefore = await env.DB.prepare("SELECT * FROM current_programmes WHERE channel = 'tv'").first<Record<string, unknown>>();
+    const progressBefore = await env.DB.prepare("SELECT * FROM show_progress").first<Record<string, unknown>>();
+
+    const response = await SELF.fetch(`${base}/stream/tv/${encodeURIComponent(metadata.meta.videos[0].id)}.json`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ streams: [] });
+    expect(await env.DB.prepare("SELECT * FROM current_programmes WHERE channel = 'tv'").first()).toEqual(currentBefore);
+    expect(await env.DB.prepare("SELECT * FROM show_progress").first()).toEqual(progressBefore);
+  });
+});
+
 describe("Stremio protocol", () => {
   it("serves a configurable household-specific manifest", async () => {
     const created = await create();
@@ -362,7 +463,7 @@ describe("Stremio protocol", () => {
     expect(manifest).toMatchObject({
       version: "0.1.0",
       name: "Kids Channels",
-      resources: ["catalog"],
+      resources: ["catalog", "meta", "stream"],
       types: ["tv", "movie"],
       behaviorHints: { configurable: true, configurationRequired: false },
     });
