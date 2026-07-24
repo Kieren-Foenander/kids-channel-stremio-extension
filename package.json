@@ -12,6 +12,8 @@
     "probe:torrentio": "node scripts/probe-torrentio.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:browser": "playwright test",
+    "test:all": "pnpm test && pnpm test:browser",
     "typecheck": "tsc"
   },
   "keywords": [
@@ -22,6 +24,7 @@
   "license": "MIT",
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "~0.18.8",
+    "@playwright/test": "^1.61.1",
     "typescript": "^7.0.2",
     "vitest": "~4.1.10",
     "wrangler": "^4.114.0"

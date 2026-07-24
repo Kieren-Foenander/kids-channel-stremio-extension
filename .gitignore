@@ -5,3 +5,5 @@ npm-debug.log*
 .dev.vars
 .DS_Store
 .pi/
+playwright-report/
+test-results/

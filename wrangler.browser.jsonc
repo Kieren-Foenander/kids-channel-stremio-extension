@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "kids-channels-browser-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-24",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "kids-channels-browser",
+      "database_id": "11111111-1111-1111-1111-111111111111",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "CONFIG_SECRET": "browser-test-config-secret-at-least-32-characters",
+    "CINEMETA_ORIGIN": "http://127.0.0.1:8791"
+  }
+}

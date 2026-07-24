@@ -22,7 +22,24 @@ beforeEach(async () => {
     torrentio_validation_status TEXT,
     torrentio_configured_at TEXT
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS approved_programmes (
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
+    content_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT, background TEXT,
+    release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL,
+    UNIQUE (household_id, content_type, imdb_id)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_episodes (
+    programme_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL,
+    title TEXT NOT NULL, released_at TEXT NOT NULL, overview TEXT,
+    PRIMARY KEY (programme_id, video_id), UNIQUE (programme_id, season, episode)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_progress (
+    programme_id TEXT PRIMARY KEY NOT NULL, next_video_id TEXT NOT NULL
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM show_progress").run();
+  await env.DB.prepare("DELETE FROM show_episodes").run();
+  await env.DB.prepare("DELETE FROM approved_programmes").run();
   await env.DB.prepare("DELETE FROM households").run();
   vi.restoreAllMocks();
 });
@@ -229,6 +246,109 @@ describe("Torrentio configuration", () => {
     expect(firstAcceptableCachedStream([
       { name: "Torrentio\nRD+", title: "Unsuitable 2160p", url: "https://media.example/4k" }, first, second,
     ])).toBe(first);
+  });
+});
+
+describe("Cinemeta Approved Library", () => {
+  const showMeta = {
+    id: "tt1234567", imdb_id: "tt1234567", type: "series", name: "The Example",
+    description: "A recognisable family show.", poster: "https://images.example/show.jpg",
+    background: "https://images.example/show-background.jpg", releaseInfo: "2020–", genres: ["Family", "Animation"], imdbRating: "8.4",
+    videos: [
+      { id: "tt1234567:0:1", season: 0, episode: 1, title: "Special", released: "2019-12-01T00:00:00.000Z" },
+      { id: "tt1234567:1:1", season: 1, episode: 1, title: "First", released: "2020-01-01T00:00:00.000Z" },
+      { id: "tt1234567:1:2", season: 1, episode: 2, title: "Second", released: "2020-01-08T00:00:00.000Z" },
+      { id: "tt1234567:1:3", season: 1, episode: 3, title: "Unreleased", released: "2999-01-01T00:00:00.000Z" },
+    ],
+  };
+  const movieMeta = {
+    id: "tt7654321", imdb_id: "tt7654321", type: "movie", name: "Example: The Movie",
+    description: "A family film.", poster: "https://images.example/movie.jpg", releaseInfo: "2022", genres: ["Family"], imdbRating: "7.1",
+  };
+
+  function mockCinemeta() {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      const path = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+      if (path.startsWith("/catalog/series/top/search=")) return Response.json({ metas: [showMeta, { ...showMeta, id: "tt1111111", imdb_id: "tt1111111", name: "The Example (1990)", releaseInfo: "1990" }] });
+      if (path.startsWith("/catalog/movie/top/search=")) return Response.json({ metas: [movieMeta] });
+      if (path === "/meta/series/tt1234567.json") return Response.json({ meta: showMeta });
+      if (path === "/meta/movie/tt7654321.json") return Response.json({ meta: movieMeta });
+      return Response.json({}, { status: 404 });
+    });
+  }
+
+  async function parentAccess(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await response.json<{ parentToken: string }>();
+    return { authorization: `Bearer ${parentToken}` };
+  }
+
+  it("searches shows and movies with distinguishing metadata and artwork", async () => {
+    const created = await create();
+    const denied = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/cinemeta/search?q=Example`);
+    expect(denied.status).toBe(401);
+
+    mockCinemeta();
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/cinemeta/search?q=Example`, { headers: await parentAccess(created) });
+    const body = await response.json<any>();
+    expect(response.status).toBe(200);
+    expect(body.results).toHaveLength(3);
+    expect(body.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "tt1234567", type: "show", title: "The Example", poster: "https://images.example/show.jpg", releaseInfo: "2020–", genres: ["Family", "Animation"] }),
+      expect.objectContaining({ id: "tt7654321", type: "movie", title: "Example: The Movie", description: "A family film." }),
+    ]));
+  });
+
+  it("approves a show with regular released episodes and defaults Show Progress to S01E01", async () => {
+    const created = await create(); const headers = await parentAccess(created); mockCinemeta();
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ type: "show", imdbId: "tt1234567" }),
+    });
+    const approved = await response.json<any>();
+    expect(response.status).toBe(201);
+    expect(approved.programme).toMatchObject({ imdbId: "tt1234567", type: "show", showProgress: { id: "tt1234567:1:1", season: 1, episode: 1 } });
+
+    const library = await (await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, { headers })).json<any>();
+    expect(library.programmes).toHaveLength(1);
+    expect(library.programmes[0].episodes.map((episode: any) => episode.id)).toEqual(["tt1234567:1:1", "tt1234567:1:2"]);
+    expect(library.programmes[0].showProgress.id).toBe("tt1234567:1:1");
+  });
+
+  it("accepts another valid starting episode and rejects specials, unreleased, and unknown episodes", async () => {
+    mockCinemeta();
+    const choices = ["tt1234567:0:1", "tt1234567:1:3", "tt1234567:9:9"];
+    for (const startingEpisodeId of choices) {
+      const created = await create(); const headers = await parentAccess(created);
+      const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {
+        method: "POST", headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({ type: "show", imdbId: "tt1234567", startingEpisodeId }),
+      });
+      expect(response.status).toBe(400);
+    }
+
+    const created = await create(); const headers = await parentAccess(created);
+    const accepted = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ type: "show", imdbId: "tt1234567", startingEpisodeId: "tt1234567:1:2" }),
+    });
+    expect(await accepted.json<any>()).toMatchObject({ programme: { showProgress: { id: "tt1234567:1:2" } } });
+  });
+
+  it("approves a movie once and reports a duplicate without another Cinemeta request", async () => {
+    const created = await create(); const headers = await parentAccess(created); mockCinemeta();
+    const request = () => SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ type: "movie", imdbId: "tt7654321" }),
+    });
+    expect((await request()).status).toBe(201);
+    const duplicate = await request();
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({ error: expect.stringContaining("already") });
+    const library = await (await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, { headers })).json<any>();
+    expect(library.programmes).toHaveLength(1);
+    expect(library.programmes[0]).toMatchObject({ imdbId: "tt7654321", type: "movie" });
   });
 });
 

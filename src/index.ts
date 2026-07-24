@@ -1,3 +1,5 @@
+import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
+import { CinemetaClient, type ContentType } from "./cinemeta";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
 import { providerConfiguration, saveProviderConfiguration } from "./provider-config";
 import { issueParentToken, verifyParentToken } from "./secrets";
@@ -7,6 +9,7 @@ import { catalogFor, manifestFor } from "./stremio";
 export interface Env {
   DB: D1Database;
   CONFIG_SECRET?: string;
+  CINEMETA_ORIGIN?: string;
 }
 
 const jsonHeaders = {
@@ -23,7 +26,7 @@ function html(body: string, status = 200): Response {
     status,
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "content-security-policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+      "content-security-policy": "default-src 'self'; img-src 'self' https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
       "x-content-type-options": "nosniff",
     },
   });
@@ -42,14 +45,19 @@ function shell(content: string, title = "Kids Channels"): string {
     main { width: min(34rem, calc(100% - 2rem)); background: #1b2140; border: 1px solid #343c69; border-radius: 1rem; padding: clamp(1.25rem, 5vw, 2.5rem); box-shadow: 0 1.5rem 5rem #080a14; }
     h1 { margin-top: 0; } p { line-height: 1.55; color: #cbd0ea; }
     label { display: block; font-weight: 700; margin: 1.5rem 0 .5rem; }
-    input, button, .button { box-sizing: border-box; width: 100%; min-height: 3rem; border-radius: .6rem; border: 1px solid #566098; padding: .7rem 1rem; font: inherit; }
-    input { background: #0e1224; color: white; font-size: 1.25rem; }
+    input, select, button, .button { box-sizing: border-box; width: 100%; min-height: 3rem; border-radius: .6rem; border: 1px solid #566098; padding: .7rem 1rem; font: inherit; }
+    input, select { background: #0e1224; color: white; font-size: 1.1rem; }
     input[name="pin"] { letter-spacing: .2em; }
     button, .button { display: block; cursor: pointer; background: #725cff; border-color: #8c7aff; color: white; font-weight: 800; text-align: center; text-decoration: none; margin-top: 1rem; }
     .secondary { background: transparent; }
     .notice { border-left: .25rem solid #ffca5c; padding-left: 1rem; }
     .error { color: #ff9292; min-height: 1.5rem; }
     code { overflow-wrap: anywhere; color: #aeb8ff; }
+    .programme { display: grid; grid-template-columns: 5rem 1fr; gap: 1rem; margin: 1rem 0; padding: 1rem; border: 1px solid #343c69; border-radius: .75rem; }
+    .programme img { width: 5rem; min-height: 7rem; object-fit: cover; border-radius: .35rem; background: #0e1224; }
+    .programme h3 { margin: 0; } .programme p { margin: .35rem 0; }
+    .programme button { width: auto; min-height: 2.5rem; margin-top: .5rem; }
+    .eyebrow { color: #65d6ad; font-size: .8rem; font-weight: 800; text-transform: uppercase; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -119,6 +127,15 @@ function parentPage(secret: string): string {
       <h2>Household unlocked</h2>
       <a id="install" class="button" href="#">Install in Stremio</a>
       <p>Manifest: <code id="manifest"></code></p>
+      <form id="search-form">
+        <label for="search">Search Cinemeta for shows and movies</label>
+        <input id="search" name="query" type="search" minlength="2" maxlength="100" placeholder="Bluey, Paddington…" required>
+        <button type="submit">Search</button>
+        <p id="search-status" role="status"></p>
+      </form>
+      <div id="search-results"></div>
+      <h2>Approved Library</h2>
+      <div id="library"><p>No programmes approved yet.</p></div>
       <form id="provider-form">
         <label for="manifest-url">Torrentio manifest URL</label>
         <input id="manifest-url" name="manifestUrl" type="url" placeholder="https://…/manifest.json" autocomplete="off" required>
@@ -129,35 +146,80 @@ function parentPage(secret: string): string {
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
+      const headers = () => ({authorization: 'Bearer ' + parentToken});
       let parentToken = '';
+      function programmeCard(programme, approved) {
+        const card = document.createElement('article'); card.className = 'programme';
+        const image = document.createElement('img'); image.alt = ''; if (programme.poster) image.src = programme.poster;
+        const details = document.createElement('div');
+        const kind = document.createElement('div'); kind.className = 'eyebrow'; kind.textContent = programme.type === 'show' ? 'Show' : 'Movie';
+        const heading = document.createElement('h3'); heading.textContent = programme.title;
+        const metadata = document.createElement('p'); metadata.textContent = [programme.releaseInfo, (programme.genres || []).join(', '), programme.imdbRating ? 'IMDb ' + programme.imdbRating : ''].filter(Boolean).join(' · ');
+        const description = document.createElement('p'); description.textContent = programme.description || 'No description available.';
+        details.append(kind, heading, metadata, description);
+        if (approved && programme.showProgress) {
+          const progress = document.createElement('p'); progress.textContent = 'Starts at S' + String(programme.showProgress.season).padStart(2, '0') + 'E' + String(programme.showProgress.episode).padStart(2, '0') + ' — ' + programme.showProgress.title;
+          details.append(progress);
+        }
+        card.append(image, details); return {card, details};
+      }
+      async function loadLibrary() {
+        const response = await fetch('/api/households/${secret}/library', {headers: headers()});
+        const result = await response.json(); const output = document.querySelector('#library'); output.replaceChildren();
+        if (!result.programmes.length) { const empty = document.createElement('p'); empty.textContent = 'No programmes approved yet.'; output.append(empty); return; }
+        result.programmes.forEach(programme => output.append(programmeCard(programme, true).card));
+      }
+      async function approve(programme, startingEpisodeId, button) {
+        button.disabled = true;
+        const response = await fetch('/api/households/${secret}/library', {
+          method: 'POST', headers: {...headers(), 'content-type': 'application/json'},
+          body: JSON.stringify({type: programme.type, imdbId: programme.id, startingEpisodeId})
+        });
+        const result = await response.json();
+        if (!response.ok) { button.disabled = false; button.textContent = result.error; return; }
+        button.textContent = 'Approved'; await loadLibrary();
+      }
+      function showSearchResult(programme) {
+        const built = programmeCard(programme, false); const button = document.createElement('button');
+        button.type = 'button'; button.textContent = programme.type === 'show' ? 'Choose starting episode' : 'Approve movie';
+        button.addEventListener('click', async () => {
+          if (programme.type === 'movie') return approve(programme, undefined, button);
+          button.disabled = true; button.textContent = 'Loading episodes…';
+          const response = await fetch('/api/households/${secret}/cinemeta/title/show/' + encodeURIComponent(programme.id), {headers: headers()});
+          const result = await response.json();
+          if (!response.ok) { button.disabled = false; button.textContent = result.error; return; }
+          const select = document.createElement('select'); select.setAttribute('aria-label', 'Starting episode for ' + programme.title);
+          result.title.episodes.forEach(episode => { const option = document.createElement('option'); option.value = episode.id; option.textContent = 'S' + String(episode.season).padStart(2, '0') + 'E' + String(episode.episode).padStart(2, '0') + ' — ' + episode.title; select.append(option); });
+          button.disabled = false; button.textContent = 'Approve show'; button.replaceWith(select, button);
+          button.addEventListener('click', () => approve(programme, select.value, button), {once: true});
+        }, {once: programme.type === 'show'});
+        built.details.append(button); return built.card;
+      }
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const response = await fetch('/api/households/${secret}/unlock', {
-          method: 'POST', headers: {'content-type': 'application/json'},
-          body: JSON.stringify({pin: new FormData(form).get('pin')})
+          method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({pin: new FormData(form).get('pin')})
         });
         const result = await response.json();
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
-        parentToken = result.parentToken;
-        document.querySelector('#install').href = result.installUrl;
+        parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
-        document.querySelector('#provider-result').textContent = result.provider.configured
-          ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'Torrentio is not configured.';
-        form.hidden = true;
-        document.querySelector('#result').hidden = false;
+        document.querySelector('#provider-result').textContent = result.provider.configured ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'Torrentio is not configured.';
+        form.hidden = true; document.querySelector('#result').hidden = false; await loadLibrary();
+      });
+      document.querySelector('#search-form').addEventListener('submit', async (event) => {
+        event.preventDefault(); const status = document.querySelector('#search-status'); status.textContent = 'Searching Cinemeta…';
+        const query = new FormData(event.currentTarget).get('query');
+        const response = await fetch('/api/households/${secret}/cinemeta/search?q=' + encodeURIComponent(query), {headers: headers()});
+        const result = await response.json(); const output = document.querySelector('#search-results'); output.replaceChildren();
+        if (!response.ok) { status.textContent = result.error; return; }
+        status.textContent = result.results.length ? result.results.length + ' results' : 'No matching shows or movies.';
+        result.results.forEach(programme => output.append(showSearchResult(programme)));
       });
       document.querySelector('#provider-form').addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const output = document.querySelector('#provider-result');
-        output.textContent = 'Checking Torrentio manifest and a representative stream…';
-        const response = await fetch('/api/households/${secret}/provider', {
-          method: 'PUT',
-          headers: {'content-type': 'application/json', authorization: 'Bearer ' + parentToken},
-          body: JSON.stringify({manifestUrl: new FormData(event.currentTarget).get('manifestUrl')})
-        });
-        const result = await response.json();
-        output.textContent = response.ok ? result.validation.message : result.error;
-        if (response.ok) event.currentTarget.reset();
+        event.preventDefault(); const output = document.querySelector('#provider-result'); output.textContent = 'Checking Torrentio manifest and a representative stream…';
+        const response = await fetch('/api/households/${secret}/provider', { method: 'PUT', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({manifestUrl: new FormData(event.currentTarget).get('manifestUrl')}) });
+        const result = await response.json(); output.textContent = response.ok ? result.validation.message : result.error; if (response.ok) event.currentTarget.reset();
       });
     </script>`);
 }
@@ -237,6 +299,66 @@ export default {
       const validation = await new TorrentioProvider(manifestUrl).validate();
       const saved = await saveProviderConfiguration(env.DB, household.id, manifestUrl.toString(), env.CONFIG_SECRET, validation);
       return json(saved);
+    }
+
+    const searchMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/search$/);
+    if (request.method === "GET" && searchMatch) {
+      const household = await findHousehold(env.DB, searchMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      const query = url.searchParams.get("q")?.trim();
+      if (!query || query.length < 2 || query.length > 100) return json({ error: "Search must contain between 2 and 100 characters." }, 400);
+      try {
+        return json({ results: await new CinemetaClient(env.CINEMETA_ORIGIN).search(query) });
+      } catch {
+        return json({ error: "Cinemeta search is temporarily unavailable." }, 502);
+      }
+    }
+
+    const titleMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/title\/(show|movie)\/(tt\d+)$/);
+    if (request.method === "GET" && titleMatch) {
+      const household = await findHousehold(env.DB, titleMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      try {
+        const title = await new CinemetaClient(env.CINEMETA_ORIGIN).title(titleMatch[2] as ContentType, titleMatch[3]);
+        if (!title) return json({ error: "Programme was not found in Cinemeta." }, 404);
+        return json({ title });
+      } catch {
+        return json({ error: "Cinemeta metadata is temporarily unavailable." }, 502);
+      }
+    }
+
+    const libraryMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library$/);
+    if (libraryMatch && (request.method === "GET" || request.method === "POST")) {
+      const household = await findHousehold(env.DB, libraryMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      if (request.method === "GET") return json({ programmes: await approvedLibrary(env.DB, household.id) });
+      let input: { type?: unknown; imdbId?: unknown; startingEpisodeId?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if ((input.type !== "show" && input.type !== "movie") || typeof input.imdbId !== "string" || !/^tt\d+$/.test(input.imdbId)
+        || (input.startingEpisodeId !== undefined && typeof input.startingEpisodeId !== "string")) {
+        return json({ error: "Choose a valid Cinemeta show or movie." }, 400);
+      }
+      if (await hasApprovedProgramme(env.DB, household.id, input.type, input.imdbId)) {
+        return json({ error: "This programme is already in the Approved Library." }, 409);
+      }
+      try {
+        const title = await new CinemetaClient(env.CINEMETA_ORIGIN).title(input.type, input.imdbId);
+        if (!title) return json({ error: "Programme was not found in Cinemeta." }, 404);
+        const programme = await approveProgramme(env.DB, household.id, title, input.startingEpisodeId);
+        return json({ programme }, 201);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message === "starting episode is invalid") return json({ error: "Choose a valid regular released starting episode." }, 400);
+        if (message === "show has no regular released episodes") return json({ error: "This show has no regular released episodes to approve." }, 400);
+        if (message.includes("UNIQUE")) return json({ error: "This programme is already in the Approved Library." }, 409);
+        return json({ error: "Cinemeta metadata is temporarily unavailable." }, 502);
+      }
     }
 
     const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);
