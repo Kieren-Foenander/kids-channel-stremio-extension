@@ -1,0 +1,20 @@
+{
+  "name": "stremio-extension",
+  "version": "0.1.0",
+  "description": "A Stremio addon starter project.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": [
+    "stremio",
+    "addon"
+  ],
+  "author": "Kieren Foenander",
+  "license": "MIT",
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10"
+  }
+}
