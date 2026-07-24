@@ -252,6 +252,15 @@ describe("Torrentio configuration", () => {
       { name: "Torrentio\nRD+", title: "Unsuitable 2160p", url: "https://media.example/4k" }, first, second,
     ])).toBe(first);
   });
+
+  it("recognizes Torrentio's bracketed cached Real-Debrid marker", () => {
+    const cached = {
+      name: "Torrentio RD",
+      title: "[RD+] Example.Release.1080p.WEB-DL",
+      url: "https://media.example/cached",
+    };
+    expect(firstAcceptableCachedStream([cached])).toBe(cached);
+  });
 });
 
 describe("Cinemeta Approved Library", () => {

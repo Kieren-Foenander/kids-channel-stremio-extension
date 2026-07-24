@@ -19,7 +19,7 @@ if (!manifestValue) {
 
     const cached = body.streams.filter((stream) => {
       const label = `${stream?.name ?? ""}\n${stream?.title ?? ""}`;
-      return typeof stream?.url === "string" && /(?:^|\s|\n)RD\+(?:\s|$)/i.test(label) && !/download/i.test(label);
+      return typeof stream?.url === "string" && /(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label);
     });
     const acceptable = cached.filter((stream) => /\b1080p?\b/i.test(`${stream?.name ?? ""}\n${stream?.title ?? ""}`));
     console.log(`Probe succeeded: manifest valid; cached direct results=${cached.length}; acceptable 1080p results=${acceptable.length}.`);

@@ -37,7 +37,7 @@ function direct(stream: ProviderStream): boolean {
 
 function cached(stream: ProviderStream): boolean {
   const label = `${stream.name ?? ""}\n${stream.title ?? ""}`;
-  return direct(stream) && /(?:^|\s|\n)RD\+(?:\s|$)/i.test(label) && !/download/i.test(label);
+  return direct(stream) && /(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label);
 }
 
 function suitable(stream: ProviderStream): boolean {
