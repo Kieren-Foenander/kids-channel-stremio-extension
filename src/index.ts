@@ -1,10 +1,11 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
+import { tvCurrentProgramme } from "./current-programme";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
-import { providerConfiguration, saveProviderConfiguration } from "./provider-config";
+import { decryptedManifestUrl, providerConfiguration, saveProviderConfiguration } from "./provider-config";
 import { issueParentToken, verifyParentToken } from "./secrets";
 import { parseTorrentioManifestUrl, TorrentioProvider } from "./stream-provider";
-import { catalogFor, manifestFor } from "./stremio";
+import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 
 export interface Env {
   DB: D1Database;
@@ -247,6 +248,10 @@ async function authorizedParent(request: Request, householdId: string, deploymen
   return verifyParentToken(authorization.slice(7), householdId, deploymentSecret);
 }
 
+function decodedPathSegment(value: string): string | null {
+  try { return decodeURIComponent(value); } catch { return null; }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
@@ -385,6 +390,33 @@ export default {
       if (!(await findHousehold(env.DB, catalogMatch[1]))) return json({ error: "Household not found." }, 404);
       const catalog = catalogFor(catalogMatch[2], catalogMatch[3], url.origin);
       return catalog ? json(catalog) : json({ metas: [] });
+    }
+
+    const metaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/tv\/([^/]+)\.json$/);
+    if (request.method === "GET" && metaMatch) {
+      const household = await findHousehold(env.DB, metaMatch[1]);
+      if (!household) return json({ error: "Household not found." }, 404);
+      if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return json({ meta: null });
+      return json(tvChannelMetadata(await tvCurrentProgramme(env.DB, household.id)));
+    }
+
+    const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/tv\/([^/]+)\.json$/);
+    if (request.method === "GET" && streamMatch) {
+      const household = await findHousehold(env.DB, streamMatch[1]);
+      if (!household) return json({ error: "Household not found." }, 404);
+      const current = await tvCurrentProgramme(env.DB, household.id);
+      const episodeId = decodedPathSegment(streamMatch[2]);
+      if (!current || current.episode.id !== episodeId || !env.CONFIG_SECRET) return json({ streams: [] });
+
+      try {
+        const manifestUrl = await decryptedManifestUrl(env.DB, household.id, env.CONFIG_SECRET);
+        if (!manifestUrl) return json({ streams: [] });
+        const provider = new TorrentioProvider(new URL(manifestUrl));
+        const selected = provider.firstAcceptable(await provider.streams("series", current.episode.id));
+        return json({ streams: selected ? [selected] : [] });
+      } catch {
+        return json({ streams: [] });
+      }
     }
 
     return json({ error: "Not found." }, 404);
