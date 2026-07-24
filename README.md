@@ -5,8 +5,8 @@ Starter Stremio addon project.
 ## Run locally
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 The addon manifest will be available at:
@@ -19,8 +19,8 @@ Paste that URL into Stremio's addon search/install box while the server is runni
 
 ## Scripts
 
-- `npm start` - run once
-- `npm run dev` - run with Node watch mode
+- `pnpm start` - run once
+- `pnpm dev` - run with Node watch mode
 
 ## Next steps
 

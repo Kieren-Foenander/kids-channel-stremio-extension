@@ -4,6 +4,7 @@
   "description": "A Stremio addon starter project.",
   "main": "server.js",
   "type": "commonjs",
+  "packageManager": "pnpm@10.28.0",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js"
