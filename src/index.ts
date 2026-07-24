@@ -1,8 +1,12 @@
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
+import { providerConfiguration, saveProviderConfiguration } from "./provider-config";
+import { issueParentToken, verifyParentToken } from "./secrets";
+import { parseTorrentioManifestUrl, TorrentioProvider } from "./stream-provider";
 import { catalogFor, manifestFor } from "./stremio";
 
 export interface Env {
   DB: D1Database;
+  CONFIG_SECRET?: string;
 }
 
 const jsonHeaders = {
@@ -39,7 +43,8 @@ function shell(content: string, title = "Kids Channels"): string {
     h1 { margin-top: 0; } p { line-height: 1.55; color: #cbd0ea; }
     label { display: block; font-weight: 700; margin: 1.5rem 0 .5rem; }
     input, button, .button { box-sizing: border-box; width: 100%; min-height: 3rem; border-radius: .6rem; border: 1px solid #566098; padding: .7rem 1rem; font: inherit; }
-    input { background: #0e1224; color: white; font-size: 1.25rem; letter-spacing: .2em; }
+    input { background: #0e1224; color: white; font-size: 1.25rem; }
+    input[name="pin"] { letter-spacing: .2em; }
     button, .button { display: block; cursor: pointer; background: #725cff; border-color: #8c7aff; color: white; font-weight: 800; text-align: center; text-decoration: none; margin-top: 1rem; }
     .secondary { background: transparent; }
     .notice { border-left: .25rem solid #ffca5c; padding-left: 1rem; }
@@ -114,9 +119,17 @@ function parentPage(secret: string): string {
       <h2>Household unlocked</h2>
       <a id="install" class="button" href="#">Install in Stremio</a>
       <p>Manifest: <code id="manifest"></code></p>
+      <form id="provider-form">
+        <label for="manifest-url">Torrentio manifest URL</label>
+        <input id="manifest-url" name="manifestUrl" type="url" placeholder="https://…/manifest.json" autocomplete="off" required>
+        <p class="notice">This URL contains credentials. It is encrypted when saved and will not be shown again.</p>
+        <button type="submit">Save and validate Torrentio</button>
+        <p id="provider-result" role="status"></p>
+      </form>
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
+      let parentToken = '';
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const response = await fetch('/api/households/${secret}/unlock', {
@@ -125,10 +138,26 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
+        parentToken = result.parentToken;
         document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
+        document.querySelector('#provider-result').textContent = result.provider.configured
+          ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'Torrentio is not configured.';
         form.hidden = true;
         document.querySelector('#result').hidden = false;
+      });
+      document.querySelector('#provider-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const output = document.querySelector('#provider-result');
+        output.textContent = 'Checking Torrentio manifest and a representative stream…';
+        const response = await fetch('/api/households/${secret}/provider', {
+          method: 'PUT',
+          headers: {'content-type': 'application/json', authorization: 'Bearer ' + parentToken},
+          body: JSON.stringify({manifestUrl: new FormData(event.currentTarget).get('manifestUrl')})
+        });
+        const result = await response.json();
+        output.textContent = response.ok ? result.validation.message : result.error;
+        if (response.ok) event.currentTarget.reset();
       });
     </script>`);
 }
@@ -150,13 +179,19 @@ async function parsePin(request: Request): Promise<unknown> {
   }
 }
 
+async function authorizedParent(request: Request, householdId: string, deploymentSecret: string): Promise<boolean> {
+  const authorization = request.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return false;
+  return verifyParentToken(authorization.slice(7), householdId, deploymentSecret);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...jsonHeaders, "access-control-allow-methods": "GET, POST, OPTIONS", "access-control-allow-headers": "content-type" } });
+      return new Response(null, { status: 204, headers: { ...jsonHeaders, "access-control-allow-methods": "GET, POST, PUT, OPTIONS", "access-control-allow-headers": "content-type, authorization" } });
     }
 
     if (request.method === "GET" && path === "/") return html(homePage());
@@ -175,7 +210,33 @@ export default {
       const pin = await parsePin(request);
       if (!validPin(pin)) return json({ error: "PIN must contain exactly six digits." }, 400);
       if (!(await verifyPin(env.DB, unlockMatch[1], pin))) return json({ error: "Household or PIN is incorrect." }, 401);
-      return json(installDetails(url.origin, unlockMatch[1]));
+      const household = await findHousehold(env.DB, unlockMatch[1]);
+      if (!household) return json({ error: "Household or PIN is incorrect." }, 401);
+      if (!env.CONFIG_SECRET) return json({ error: "Provider configuration is unavailable." }, 503);
+      return json({
+        ...installDetails(url.origin, unlockMatch[1]),
+        parentToken: await issueParentToken(household.id, env.CONFIG_SECRET),
+        provider: await providerConfiguration(env.DB, household.id),
+      });
+    }
+
+    const providerMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/provider$/);
+    if (request.method === "PUT" && providerMatch) {
+      const household = await findHousehold(env.DB, providerMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      let manifestValue: unknown;
+      try {
+        manifestValue = ((await request.json()) as { manifestUrl?: unknown }).manifestUrl;
+      } catch {
+        // Invalid JSON is handled as an invalid endpoint without reflecting request content.
+      }
+      const manifestUrl = parseTorrentioManifestUrl(manifestValue);
+      if (!manifestUrl) return json({ error: "Enter a valid HTTPS Torrentio manifest URL ending in /manifest.json." }, 400);
+      const validation = await new TorrentioProvider(manifestUrl).validate();
+      const saved = await saveProviderConfiguration(env.DB, household.id, manifestUrl.toString(), env.CONFIG_SECRET, validation);
+      return json(saved);
     }
 
     const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);

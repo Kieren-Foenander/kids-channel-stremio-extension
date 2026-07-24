@@ -1,17 +1,17 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "kids-channels",
+  "name": "kids-channels-test",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-24",
+  "vars": {
+    "CONFIG_SECRET": "test-only-configuration-secret-at-least-32-characters"
+  },
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "kids-channels",
+      "database_name": "kids-channels-test",
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
-  ],
-  "observability": {
-    "enabled": false
-  }
+  ]
 }

@@ -2,5 +2,6 @@ node_modules/
 .wrangler/
 npm-debug.log*
 .env
+.dev.vars
 .DS_Store
 .pi/
