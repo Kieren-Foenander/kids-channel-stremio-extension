@@ -1,13 +1,17 @@
 {
   "name": "stremio-extension",
   "version": "0.1.0",
-  "description": "A Stremio addon starter project.",
-  "main": "server.js",
-  "type": "commonjs",
+  "description": "Parent-curated TV and Movie Channels for Stremio.",
+  "type": "module",
   "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply kids-channels --local",
+    "db:migrate:remote": "wrangler d1 migrations apply kids-channels --remote",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc"
   },
   "keywords": [
     "stremio",
@@ -15,7 +19,10 @@
   ],
   "author": "Kieren Foenander",
   "license": "MIT",
-  "dependencies": {
-    "stremio-addon-sdk": "^1.6.10"
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "~0.18.8",
+    "typescript": "^7.0.2",
+    "vitest": "~4.1.10",
+    "wrangler": "^4.114.0"
   }
 }
