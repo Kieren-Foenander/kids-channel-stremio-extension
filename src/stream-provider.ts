@@ -60,7 +60,11 @@ export function parseTorrentioManifestUrl(value: unknown): URL | null {
 }
 
 export class TorrentioProvider implements StreamProvider {
-  constructor(private readonly manifestUrl: URL, private readonly request: typeof fetch = fetch) {}
+  constructor(private readonly manifestUrl: URL, private readonly request?: typeof fetch) {}
+
+  private fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    return this.request ? this.request.call(globalThis, input, init) : fetch(input, init);
+  }
 
   private streamUrl(type: "movie" | "series", id: string): URL {
     const url = new URL(this.manifestUrl);
@@ -69,7 +73,7 @@ export class TorrentioProvider implements StreamProvider {
   }
 
   async streams(type: "movie" | "series", id: string): Promise<ProviderStream[]> {
-    const response = await this.request(this.streamUrl(type, id), {
+    const response = await this.fetch(this.streamUrl(type, id), {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });
@@ -85,7 +89,7 @@ export class TorrentioProvider implements StreamProvider {
 
   async validate(): Promise<ValidationResult> {
     try {
-      const manifestResponse = await this.request(this.manifestUrl, {
+      const manifestResponse = await this.fetch(this.manifestUrl, {
         headers: { accept: "application/json" },
         signal: AbortSignal.timeout(10_000),
       });

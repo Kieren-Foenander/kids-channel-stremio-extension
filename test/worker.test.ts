@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { decryptedManifestUrl } from "../src/provider-config";
-import { firstAcceptableCachedStream } from "../src/stream-provider";
+import { firstAcceptableCachedStream, TorrentioProvider } from "../src/stream-provider";
 
 interface CreatedHousehold {
   householdId: string;
@@ -108,7 +108,7 @@ describe("Torrentio configuration", () => {
   const providerOrigin = "https://torrentio.example";
   const providerPath = "/providers=test/realdebrid=REDACTED";
   const manifestUrl = `${providerOrigin}${providerPath}/manifest.json`;
-  const deploymentSecret = "test-only-configuration-secret-at-least-32-characters";
+  const deploymentSecret = (env as typeof env & { CONFIG_SECRET: string }).CONFIG_SECRET;
 
   function mockTorrentio(streams: unknown[], manifestStatus = 200, streamStatus = 200) {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
@@ -206,6 +206,21 @@ describe("Torrentio configuration", () => {
     const body = await unlocked.text();
     expect(JSON.parse(body)).toMatchObject({ provider: { configured: true, validation: { status: "acceptable_cached" } } });
     expect(body).not.toContain("REDACTED");
+  });
+
+  it("invokes an injected outbound fetch with the Worker global receiver", async () => {
+    let requests = 0;
+    const strictFetch = async function (this: unknown): Promise<Response> {
+      if (this !== globalThis) throw new TypeError("fetch called with the wrong receiver");
+      requests += 1;
+      return requests === 1
+        ? Response.json({ id: "org.example.torrentio", resources: ["stream"] })
+        : Response.json({ streams: [] });
+    } as typeof fetch;
+
+    const result = await new TorrentioProvider(new URL(manifestUrl), strictFetch).validate();
+    expect(result.status).toBe("no_cached_result");
+    expect(requests).toBe(2);
   });
 
   it("preserves provider ordering when selecting the first acceptable cached direct stream", () => {
