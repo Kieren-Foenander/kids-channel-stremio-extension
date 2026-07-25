@@ -21,6 +21,8 @@ pnpm dev
 
 Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `http://localhost:8787`, choose a six-digit Parent PIN, and create a Household. The page returns the opaque manifest URL and a `stremio://` installation action. Open the Parent Page, unlock it, then search Cinemeta to approve shows and movies. Shows default to S01E01; choose another regular released episode before approval when needed. Approved shows can be paused without losing Show Progress, programmes can be removed from future Channel selections, and upcoming TV selections can be regenerated without changing the Current Programme.
 
+Stremio retains loaded addon metadata in memory even when responses use `Cache-Control: no-store`. After a Parent changes the Approved Library or regenerates selections, fully close and reopen Stremio to load the updated Channel. The Worker state changes immediately and does not interrupt media already playing.
+
 Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN recovery.
 
 ## Test

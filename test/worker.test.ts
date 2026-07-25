@@ -138,6 +138,7 @@ describe("Parent Page Household creation", () => {
     const parentHtml = await parentPage.text();
     expect(parentHtml).toContain("Enter your six-digit PIN");
     expect(parentHtml).toContain("Stremio resolves streams on your device");
+    expect(parentHtml).toContain("fully close and reopen Stremio");
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST",
@@ -467,6 +468,7 @@ describe("Approved Library changes while Channels are active", () => {
       method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ paused: true }),
     });
     expect(pause.status).toBe(200);
+    expect(await pause.json()).toMatchObject({ message: expect.stringContaining("Restart Stremio") });
     const whilePaused = await (await SELF.fetch(tvUrl)).json<any>();
     expect(whilePaused.meta.behaviorHints.defaultVideoId).not.toBe(initialVideoId);
     expect(whilePaused.meta.videos.every((video: any) => !video.id.startsWith(initialVideoId.split(":")[0]))).toBe(true);

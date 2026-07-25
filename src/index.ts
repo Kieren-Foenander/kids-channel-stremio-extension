@@ -141,6 +141,7 @@ function parentPage(secret: string): string {
       </form>
       <div id="search-results"></div>
       <h2>Approved Library</h2>
+      <p class="notice">Stremio keeps Channel details in memory. After changing the Approved Library or regenerating selections, fully close and reopen Stremio to load the updated Channel.</p>
       <button id="regenerate-tv" type="button" class="secondary">Regenerate upcoming TV selections</button>
       <p id="library-status" role="status"></p>
       <div id="library"><p>No programmes approved yet.</p></div>
@@ -396,7 +397,7 @@ export default {
         await env.DB.prepare("UPDATE approved_programmes SET paused_at = ? WHERE id = ? AND household_id = ?")
           .bind(pausedAt, programme.id, household.id).run();
         await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
-        return json({ message: input.paused ? "Show paused without changing Show Progress." : "Show resumed." });
+        return json({ message: `${input.paused ? "Show paused without changing Show Progress." : "Show resumed."} Restart Stremio to refresh the Channel.` });
       }
 
       if (programme.content_type === "show") {
@@ -416,7 +417,7 @@ export default {
         ]);
         await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
       }
-      return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections.` });
+      return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
     }
 
     const regenerateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/regenerate$/);
@@ -426,7 +427,7 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       await refreshTvChannelSchedule(env.DB, household.id, true, env.TV_SCHEDULE_SEED);
-      return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress." });
+      return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress. Restart Stremio to refresh the Channel." });
     }
 
     const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);

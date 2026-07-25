@@ -15,6 +15,7 @@ async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();
   await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+  await expect(page.getByText("fully close and reopen Stremio")).toBeVisible();
 }
 
 test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
@@ -74,6 +75,7 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
 
   await page.getByRole("button", { name: "Regenerate upcoming TV selections" }).click();
   await expect(page.locator("#library-status")).toContainText("without changing the Current Programme or Show Progress");
+  await expect(page.locator("#library-status")).toContainText("Restart Stremio");
   expect((await channelMetadata()).tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
 
   await page.locator("#library .programme").filter({ hasText: "The Example" })
