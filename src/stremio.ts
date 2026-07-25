@@ -13,7 +13,7 @@ export interface HouseholdIdentity {
 export function manifestFor(household: HouseholdIdentity) {
   return {
     id: `community.kids-channels.${household.id}`,
-    version: "0.4.0",
+    version: "0.4.1",
     name: "Kids Channels",
     description: "Two parent-curated Channels for the household.",
     resources: ["catalog", "meta", "stream"],
@@ -56,7 +56,7 @@ export function tvChannelMetadata(schedule: TvScheduledProgramme[], origin: stri
   };
 }
 
-export function movieChannelMetadata(programme: MovieProgramme | null, origin: string) {
+export function movieChannelMetadata(programme: MovieProgramme | null, origin: string, installationSecret: string) {
   if (!programme) return { meta: null };
   return {
     meta: {
@@ -85,6 +85,14 @@ export function movieChannelMetadata(programme: MovieProgramme | null, origin: s
           season: 1,
           episode: 2,
           overview: "A five-second sign-off. Playback stops when it finishes.",
+          // Inline streams are exclusive in Stremio, so installed providers are not asked to
+          // resolve this synthetic video and the child does not see another source picker.
+          streams: [{
+            url: `${origin}/addons/${installationSecret}/media/movie-sign-off/${programme.cycle}/${programme.position}.mp4`,
+            behaviorHints: {
+              filename: "kids-channels-sign-off.mp4",
+            },
+          }],
         },
       ],
     },

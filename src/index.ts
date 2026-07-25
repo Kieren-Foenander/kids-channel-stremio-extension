@@ -257,7 +257,7 @@ export default {
     if (request.method === "GET" && path === "/") return html(homePage());
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
     if (request.method === "GET" && path === "/assets/movie-channel.svg") return channelPoster("movie");
-    if (request.method === "GET" && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
+    if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
 
     if (request.method === "POST" && path === "/api/households") {
       const pin = await parsePin(request);
@@ -381,7 +381,15 @@ export default {
       if (!household) return json({ error: "Household not found." }, 404);
       if (decodedPathSegment(movieMetaMatch[2]) !== MOVIE_CHANNEL_ID) return json({ meta: null });
       const programme = await movieChannelProgramme(env.DB, household.id, env.MOVIE_ROTATION_SEED);
-      return json(movieChannelMetadata(programme, url.origin), 200, { "cache-control": "no-store" });
+      return json(movieChannelMetadata(programme, url.origin, household.secret), 200, { "cache-control": "no-store" });
+    }
+
+    const movieSignOffMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/media\/movie-sign-off\/(\d+)\/(\d+)\.mp4$/);
+    if ((request.method === "GET" || request.method === "HEAD") && movieSignOffMatch) {
+      const household = await findHousehold(env.DB, movieSignOffMatch[1]);
+      if (!household) return json({ error: "Household not found." }, 404);
+      await requestMovieSignOff(env.DB, household.id, Number(movieSignOffMatch[2]), Number(movieSignOffMatch[3]));
+      return movieSignOff(request);
     }
 
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);

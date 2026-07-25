@@ -450,13 +450,17 @@ describe("Movie Channel rotation and sign-off", () => {
       const before = await metadata(base);
       selected.push(before.meta.behaviorHints.defaultVideoId);
       const signOff = before.meta.videos[1];
-      expect(signOff).toMatchObject({ title: "Kids Channels sign-off", episode: 2 });
-      const response = await SELF.fetch(`${base}/stream/movie/${encodeURIComponent(signOff.id)}.json`);
-      const body = await response.json<any>();
-      expect(body.streams[0]).toMatchObject({
-        url: "https://kids.test/assets/movie-sign-off.mp4",
-        behaviorHints: { filename: "kids-channels-sign-off.mp4" },
+      expect(signOff).toMatchObject({
+        title: "Kids Channels sign-off",
+        episode: 2,
+        streams: [{
+          url: expect.stringMatching(/^https:\/\/kids\.test\/addons\/[^/]+\/media\/movie-sign-off\/\d+\/\d+\.mp4$/),
+          behaviorHints: { filename: "kids-channels-sign-off.mp4" },
+        }],
       });
+      const response = await SELF.fetch(signOff.streams[0].url);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("video/mp4");
     }
     expect(new Set(selected).size).toBe(3);
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toMatch(/^tt800000[1-3]$/);
@@ -476,7 +480,7 @@ describe("Movie Channel rotation and sign-off", () => {
     for (let index = 0; index < 3; index += 1) {
       const current = index === 0 ? first : await metadata(base);
       selected.push(current.meta.behaviorHints.defaultVideoId);
-      await SELF.fetch(`${base}/stream/movie/${encodeURIComponent(current.meta.videos[1].id)}.json`);
+      await SELF.fetch(current.meta.videos[1].streams[0].url);
     }
     expect(new Set(selected)).toEqual(new Set(["tt8000001", "tt8000002", "tt8000003"]));
   });
@@ -485,9 +489,8 @@ describe("Movie Channel rotation and sign-off", () => {
     const { base } = await arrangeMovies();
     const before = await metadata(base);
     const currentId = before.meta.behaviorHints.defaultVideoId;
-    const signOffId = before.meta.videos[1].id;
-    const responses = await Promise.all(Array.from({ length: 8 }, () =>
-      SELF.fetch(`${base}/stream/movie/${encodeURIComponent(signOffId)}.json`)));
+    const signOffUrl = before.meta.videos[1].streams[0].url;
+    const responses = await Promise.all(Array.from({ length: 8 }, () => SELF.fetch(signOffUrl)));
     expect(responses.every((response) => response.status === 200)).toBe(true);
 
     const after = await metadata(base);
@@ -498,16 +501,29 @@ describe("Movie Channel rotation and sign-off", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE consumed_at IS NOT NULL").first()).toMatchObject({ count: 1 });
   });
 
-  it("serves an approximately five-second H.264 sign-off with silent AAC audio and byte ranges", async () => {
-    const full = await SELF.fetch("https://kids.test/assets/movie-sign-off.mp4");
+  it("serves an approximately five-second H.264 sign-off with Android-compatible HTTP semantics", async () => {
+    const url = "https://kids.test/assets/movie-sign-off.mp4";
+    const full = await SELF.fetch(url);
     expect(full.status).toBe(200);
     expect(full.headers.get("content-type")).toBe("video/mp4");
-    expect(Number(full.headers.get("content-length"))).toBeGreaterThan(10_000);
+    expect(full.headers.get("accept-ranges")).toBe("bytes");
+    expect(full.headers.get("etag")).toBeTruthy();
+    const length = Number(full.headers.get("content-length"));
+    expect(length).toBeGreaterThan(10_000);
 
-    const range = await SELF.fetch("https://kids.test/assets/movie-sign-off.mp4", { headers: { range: "bytes=0-99" } });
-    expect(range.status).toBe(206);
-    expect(range.headers.get("content-range")).toMatch(/^bytes 0-99\/\d+$/);
-    expect((await range.arrayBuffer()).byteLength).toBe(100);
+    const head = await SELF.fetch(url, { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(Number(head.headers.get("content-length"))).toBe(length);
+    expect((await head.arrayBuffer()).byteLength).toBe(0);
+
+    const suffix = await SELF.fetch(url, { headers: { range: "bytes=-100" } });
+    expect(suffix.status).toBe(206);
+    expect(suffix.headers.get("content-range")).toBe(`bytes ${length - 100}-${length - 1}/${length}`);
+    expect((await suffix.arrayBuffer()).byteLength).toBe(100);
+
+    const clamped = await SELF.fetch(url, { headers: { range: "bytes=100-999999" } });
+    expect(clamped.status).toBe(206);
+    expect(clamped.headers.get("content-range")).toBe(`bytes 100-${length - 1}/${length}`);
   });
 });
 
@@ -519,7 +535,7 @@ describe("Stremio protocol", () => {
 
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(manifest).toMatchObject({
-      version: "0.4.0",
+      version: "0.4.1",
       name: "Kids Channels",
       resources: ["catalog", "meta", "stream"],
       types: ["series", "movie"],
