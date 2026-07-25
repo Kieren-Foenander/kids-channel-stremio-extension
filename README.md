@@ -70,5 +70,6 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
 - `GET /addons/:secret/stream/series/:episodeId.json` — observe Current/later programme requests, atomically advance when needed, and delegate playable streams to installed client addons
 - `GET /addons/:secret/meta/movie/kids-channels:movie.json` — the canonical Current Programme followed only by its final sign-off
-- `GET /addons/:secret/stream/movie/:videoId.json` — delegate canonical movies to installed addons or consume the movie and return the five-second sign-off
-- `GET /assets/movie-sign-off.mp4` — branded H.264 still with a five-second silent AAC track and byte-range support
+- `GET /addons/:secret/stream/movie/:videoId.json` — delegate canonical movies to installed addons, with a compatibility fallback for sign-off requests
+- `GET|HEAD /addons/:secret/media/movie-sign-off/:cycle/:position.mp4` — atomically consume the movie and directly serve its inline five-second sign-off without another source picker
+- `GET|HEAD /assets/movie-sign-off.mp4` — branded H.264 Constrained Baseline still with a five-second silent AAC-LC track and Android-compatible byte-range support
