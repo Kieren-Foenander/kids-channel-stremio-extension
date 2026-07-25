@@ -12,6 +12,7 @@ export interface ApprovedProgramme {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
+  pausedAt?: string;
   episodes?: CinemetaEpisode[];
   showProgress?: CinemetaEpisode;
 }
@@ -28,6 +29,7 @@ interface StoredProgramme {
   genres_json: string;
   imdb_rating: string | null;
   approved_at: string;
+  paused_at: string | null;
   next_video_id: string | null;
 }
 
@@ -55,6 +57,7 @@ function programmeFromRow(row: StoredProgramme): ApprovedProgramme {
     genres: JSON.parse(row.genres_json) as string[],
     imdbRating: row.imdb_rating ?? undefined,
     approvedAt: row.approved_at,
+    pausedAt: row.paused_at ?? undefined,
   };
 }
 

@@ -1,11 +1,11 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
-import { movieChannelProgramme, MOVIE_CHANNEL_ID, parseSignOffId, requestMovieSignOff } from "./movie-channel";
+import { movieChannelProgramme, MOVIE_CHANNEL_ID, parseSignOffId, reconcileMovieChannel, requestMovieSignOff } from "./movie-channel";
 import { issueParentToken, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
-import { requestTvProgramme, tvChannelSchedule } from "./tv-channel";
+import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "./tv-channel";
 
 export interface Env {
   DB: D1Database;
@@ -141,6 +141,8 @@ function parentPage(secret: string): string {
       </form>
       <div id="search-results"></div>
       <h2>Approved Library</h2>
+      <button id="regenerate-tv" type="button" class="secondary">Regenerate upcoming TV selections</button>
+      <p id="library-status" role="status"></p>
       <div id="library"><p>No programmes approved yet.</p></div>
       <p class="notice">Install and configure a stream addon such as Comet in Stremio. Kids Channels selects the programme; Stremio resolves streams on your device.</p>
     </section>
@@ -161,6 +163,17 @@ function parentPage(secret: string): string {
           const progress = document.createElement('p'); progress.textContent = 'Starts at S' + String(programme.showProgress.season).padStart(2, '0') + 'E' + String(programme.showProgress.episode).padStart(2, '0') + ' — ' + programme.showProgress.title;
           details.append(progress);
         }
+        if (approved) {
+          if (programme.type === 'show') {
+            const pause = document.createElement('button'); pause.type = 'button';
+            pause.textContent = programme.pausedAt ? 'Resume show' : 'Pause show';
+            pause.addEventListener('click', () => changeProgramme(programme.id, {paused: !programme.pausedAt}, pause));
+            details.append(pause);
+          }
+          const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary';
+          remove.textContent = 'Remove ' + (programme.type === 'show' ? 'show' : 'movie');
+          remove.addEventListener('click', () => removeProgramme(programme.id, remove)); details.append(remove);
+        }
         card.append(image, details); return {card, details};
       }
       async function loadLibrary() {
@@ -168,6 +181,22 @@ function parentPage(secret: string): string {
         const result = await response.json(); const output = document.querySelector('#library'); output.replaceChildren();
         if (!result.programmes.length) { const empty = document.createElement('p'); empty.textContent = 'No programmes approved yet.'; output.append(empty); return; }
         result.programmes.forEach(programme => output.append(programmeCard(programme, true).card));
+      }
+      async function changeProgramme(programmeId, body, button) {
+        button.disabled = true;
+        const response = await fetch('/api/households/${secret}/library/' + encodeURIComponent(programmeId), {
+          method: 'PATCH', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify(body)
+        });
+        const result = await response.json();
+        if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
+        document.querySelector('#library-status').textContent = result.message; await loadLibrary();
+      }
+      async function removeProgramme(programmeId, button) {
+        button.disabled = true;
+        const response = await fetch('/api/households/${secret}/library/' + encodeURIComponent(programmeId), {method: 'DELETE', headers: headers()});
+        const result = await response.json();
+        if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
+        document.querySelector('#library-status').textContent = result.message; await loadLibrary();
       }
       async function approve(programme, startingEpisodeId, button) {
         button.disabled = true;
@@ -205,6 +234,12 @@ function parentPage(secret: string): string {
         parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
         form.hidden = true; document.querySelector('#result').hidden = false; await loadLibrary();
+      });
+      document.querySelector('#regenerate-tv').addEventListener('click', async (event) => {
+        const button = event.currentTarget; button.disabled = true;
+        const response = await fetch('/api/households/${secret}/tv-schedule/regenerate', {method: 'POST', headers: headers()});
+        const result = await response.json(); button.disabled = false;
+        document.querySelector('#library-status').textContent = response.ok ? result.message : result.error;
       });
       document.querySelector('#search-form').addEventListener('submit', async (event) => {
         event.preventDefault(); const status = document.querySelector('#search-status'); status.textContent = 'Searching Cinemeta…';
@@ -338,6 +373,60 @@ export default {
         if (message.includes("UNIQUE")) return json({ error: "This programme is already in the Approved Library." }, 409);
         return json({ error: "Cinemeta metadata is temporarily unavailable." }, 502);
       }
+    }
+
+    const libraryProgrammeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)$/);
+    if (libraryProgrammeMatch && (request.method === "PATCH" || request.method === "DELETE")) {
+      const household = await findHousehold(env.DB, libraryProgrammeMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      const programme = await env.DB.prepare(`SELECT id, content_type FROM approved_programmes
+        WHERE id = ? AND household_id = ?`).bind(libraryProgrammeMatch[2], household.id)
+        .first<{ id: string; content_type: ContentType }>();
+      if (!programme) return json({ error: "Programme was not found in the Approved Library." }, 404);
+
+      if (request.method === "PATCH") {
+        let input: { paused?: unknown } = {};
+        try { input = await request.json() as typeof input; } catch { /* handled below */ }
+        if (programme.content_type !== "show" || typeof input.paused !== "boolean") {
+          return json({ error: "Choose whether to pause or resume an approved show." }, 400);
+        }
+        const pausedAt = input.paused ? new Date().toISOString() : null;
+        await env.DB.prepare("UPDATE approved_programmes SET paused_at = ? WHERE id = ? AND household_id = ?")
+          .bind(pausedAt, programme.id, household.id).run();
+        await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
+        return json({ message: input.paused ? "Show paused without changing Show Progress." : "Show resumed." });
+      }
+
+      if (programme.content_type === "show") {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM show_progress WHERE programme_id = ?").bind(programme.id),
+          env.DB.prepare("DELETE FROM show_episodes WHERE programme_id = ?").bind(programme.id),
+          env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
+        ]);
+        await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
+      } else {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
+        ]);
+        await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+      }
+      return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections.` });
+    }
+
+    const regenerateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/regenerate$/);
+    if (request.method === "POST" && regenerateMatch) {
+      const household = await findHousehold(env.DB, regenerateMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      await refreshTvChannelSchedule(env.DB, household.id, true, env.TV_SCHEDULE_SEED);
+      return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress." });
     }
 
     const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);

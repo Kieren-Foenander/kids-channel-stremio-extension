@@ -19,7 +19,7 @@ pnpm db:migrate:local
 pnpm dev
 ```
 
-Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `http://localhost:8787`, choose a six-digit Parent PIN, and create a Household. The page returns the opaque manifest URL and a `stremio://` installation action. Open the Parent Page, unlock it, then search Cinemeta to approve shows and movies. Shows default to S01E01; choose another regular released episode before approval when needed.
+Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `http://localhost:8787`, choose a six-digit Parent PIN, and create a Household. The page returns the opaque manifest URL and a `stremio://` installation action. Open the Parent Page, unlock it, then search Cinemeta to approve shows and movies. Shows default to S01E01; choose another regular released episode before approval when needed. Approved shows can be paused without losing Show Progress, programmes can be removed from future Channel selections, and upcoming TV selections can be regenerated without changing the Current Programme.
 
 Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN recovery.
 
@@ -64,6 +64,8 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /api/households/:secret/cinemeta/search?q=…` — search Cinemeta shows and movies (Parent bearer token required)
 - `GET /api/households/:secret/cinemeta/title/:type/:imdbId` — retrieve canonical title and released episode metadata (Parent bearer token required)
 - `GET|POST /api/households/:secret/library` — view or add to the Approved Library (Parent bearer token required)
+- `PATCH|DELETE /api/households/:secret/library/:programmeId` — pause/resume a show or remove a programme and reconcile its active Channel (Parent bearer token required)
+- `POST /api/households/:secret/tv-schedule/regenerate` — regenerate future TV selections without advancing Show Progress (Parent bearer token required)
 - `GET /addons/:secret/manifest.json` — Household Stremio manifest
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile

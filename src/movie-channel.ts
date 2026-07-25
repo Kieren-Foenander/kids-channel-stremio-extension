@@ -137,14 +137,80 @@ async function current(db: D1Database, householdId: string): Promise<MovieProgra
   return row ? programmeFromRow(row) : null;
 }
 
-export async function movieChannelProgramme(
+export async function reconcileMovieChannel(
   db: D1Database,
   householdId: string,
   configuredSeed?: string,
 ): Promise<MovieProgramme | null> {
   await initialize(db, householdId, configuredSeed);
   await synchronizeRotation(db, householdId);
+  const state = await db.prepare(`SELECT cycle, current_position, selection_seed
+    FROM movie_channel_state WHERE household_id = ?`).bind(householdId).first<MovieStateRow>();
+  if (!state) return null;
+
+  const movies = await approvedMovies(db, householdId);
+  if (movies.length === 0) {
+    await db.batch([
+      db.prepare("DELETE FROM current_programmes WHERE household_id = ? AND channel = 'movie'").bind(householdId),
+      db.prepare("DELETE FROM movie_advancements WHERE household_id = ?").bind(householdId),
+      db.prepare("DELETE FROM movie_rotation WHERE household_id = ?").bind(householdId),
+      db.prepare("DELETE FROM movie_channel_state WHERE household_id = ?").bind(householdId),
+    ]);
+    return null;
+  }
+
+  const existing = await current(db, householdId);
+  if (existing) return existing;
+
+  const next = await db.prepare(`SELECT rotation.position, rotation.programme_id
+    FROM movie_rotation rotation
+    JOIN approved_programmes programme ON programme.id = rotation.programme_id
+    WHERE rotation.household_id = ? AND rotation.cycle = ? AND rotation.position > ?
+      AND rotation.consumed_at IS NULL AND programme.content_type = 'movie'
+    ORDER BY rotation.position LIMIT 1`).bind(householdId, state.cycle, state.current_position)
+    .first<{ position: number; programme_id: string }>();
+  const now = new Date().toISOString();
+  if (next) {
+    const nextMovie = movies.find((movie) => movie.programme_id === next.programme_id);
+    if (!nextMovie) return null;
+    await db.batch([
+      db.prepare("UPDATE movie_channel_state SET current_position = ? WHERE household_id = ?")
+        .bind(next.position, householdId),
+      db.prepare(`INSERT INTO current_programmes (household_id, channel, programme_id, video_id, selected_at)
+        VALUES (?, 'movie', ?, ?, ?)
+        ON CONFLICT(household_id, channel) DO UPDATE SET programme_id = excluded.programme_id,
+          video_id = excluded.video_id, selected_at = excluded.selected_at`)
+        .bind(householdId, nextMovie.programme_id, nextMovie.imdb_id, now),
+    ]);
+    return current(db, householdId);
+  }
+
+  const nextCycle = state.cycle + 1;
+  const rotation = shuffled(movies, state.selection_seed, nextCycle);
+  const statements: D1PreparedStatement[] = [
+    db.prepare("UPDATE movie_channel_state SET cycle = ?, current_position = 0 WHERE household_id = ?")
+      .bind(nextCycle, householdId),
+  ];
+  for (const [position, movie] of rotation.entries()) {
+    statements.push(db.prepare(`INSERT OR IGNORE INTO movie_rotation
+      (household_id, cycle, position, programme_id) VALUES (?, ?, ?, ?)`)
+      .bind(householdId, nextCycle, position, movie.programme_id));
+  }
+  statements.push(db.prepare(`INSERT INTO current_programmes
+    (household_id, channel, programme_id, video_id, selected_at) VALUES (?, 'movie', ?, ?, ?)
+    ON CONFLICT(household_id, channel) DO UPDATE SET programme_id = excluded.programme_id,
+      video_id = excluded.video_id, selected_at = excluded.selected_at`)
+    .bind(householdId, rotation[0].programme_id, rotation[0].imdb_id, now));
+  await db.batch(statements);
   return current(db, householdId);
+}
+
+export async function movieChannelProgramme(
+  db: D1Database,
+  householdId: string,
+  configuredSeed?: string,
+): Promise<MovieProgramme | null> {
+  return reconcileMovieChannel(db, householdId, configuredSeed);
 }
 
 export function parseSignOffId(videoId: string): { cycle: number; position: number } | null {

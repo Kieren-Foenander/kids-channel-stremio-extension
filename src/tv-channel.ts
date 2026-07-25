@@ -91,7 +91,7 @@ async function loadShows(db: D1Database, householdId: string): Promise<Show[]> {
       progress.next_video_id
     FROM approved_programmes programme
     JOIN show_progress progress ON progress.programme_id = programme.id
-    WHERE programme.household_id = ? AND programme.content_type = 'show'
+    WHERE programme.household_id = ? AND programme.content_type = 'show' AND programme.paused_at IS NULL
     ORDER BY programme.approved_at, programme.id`).bind(householdId).all<ShowRow>();
 
   const episodeRows = await db.prepare(`SELECT episode.programme_id, episode.video_id, episode.season,
@@ -313,6 +313,78 @@ async function advanceOnce(
       .bind(householdId, programme.position, programme.programmeId, programme.episode.id, now, ...ownership));
   }
   await db.batch(statements);
+}
+
+export async function refreshTvChannelSchedule(
+  db: D1Database,
+  householdId: string,
+  regenerate = false,
+  configuredSeed?: string,
+): Promise<TvScheduledProgramme[]> {
+  const currentState = await state(db, householdId);
+  if (!currentState) {
+    await initializeSchedule(db, householdId, configuredSeed);
+    return scheduleRows(db, householdId);
+  }
+
+  const shows = await loadShows(db, householdId);
+  if (shows.length === 0) {
+    await db.batch([
+      db.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND channel = 'tv'").bind(householdId),
+      db.prepare("DELETE FROM current_programmes WHERE household_id = ? AND channel = 'tv'").bind(householdId),
+      db.prepare("DELETE FROM channel_advancements WHERE household_id = ? AND channel = 'tv'").bind(householdId),
+      db.prepare("DELETE FROM channel_state WHERE household_id = ? AND channel = 'tv'").bind(householdId),
+    ]);
+    return [];
+  }
+
+  const storedCurrent = await db.prepare(`SELECT programme_id, video_id FROM current_programmes
+    WHERE household_id = ? AND channel = 'tv'`).bind(householdId)
+    .first<{ programme_id: string; video_id: string }>();
+  const currentShow = storedCurrent
+    ? shows.find((show) => show.programmeId === storedCurrent.programme_id
+      && show.episodes.some((episode) => episode.id === storedCurrent.video_id))
+    : undefined;
+  const currentEpisode = currentShow?.episodes.find((episode) => episode.id === storedCurrent?.video_id);
+  const seed = regenerate ? crypto.randomUUID() : currentState.selection_seed;
+  const position = currentState.current_position;
+  const programmes: TvScheduledProgramme[] = currentShow && currentEpisode
+    ? [{
+      position,
+      programmeId: currentShow.programmeId,
+      imdbId: currentShow.imdbId,
+      showTitle: currentShow.title,
+      description: currentShow.description,
+      poster: currentShow.poster,
+      background: currentShow.background,
+      episode: currentEpisode,
+    }, ...project(shows, seed, position + 1, TV_SCHEDULE_LENGTH - 1, [{
+      programmeId: currentShow.programmeId,
+      videoId: currentEpisode.id,
+    }])]
+    : project(shows, seed, position, TV_SCHEDULE_LENGTH);
+
+  if (programmes.length === 0) return [];
+  const now = new Date().toISOString();
+  const first = programmes[0];
+  const statements: D1PreparedStatement[] = [
+    db.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND channel = 'tv'").bind(householdId),
+    db.prepare(`UPDATE channel_state SET selection_seed = ?
+      WHERE household_id = ? AND channel = 'tv'`).bind(seed, householdId),
+    db.prepare(`INSERT INTO current_programmes (household_id, channel, programme_id, video_id, selected_at)
+      VALUES (?, 'tv', ?, ?, ?)
+      ON CONFLICT(household_id, channel) DO UPDATE SET programme_id = excluded.programme_id,
+        video_id = excluded.video_id, selected_at = excluded.selected_at`)
+      .bind(householdId, first.programmeId, first.episode.id, now),
+  ];
+  for (const programme of programmes) {
+    statements.push(db.prepare(`INSERT INTO channel_schedule
+      (household_id, channel, position, programme_id, video_id, scheduled_at)
+      VALUES (?, 'tv', ?, ?, ?, ?)`)
+      .bind(householdId, programme.position, programme.programmeId, programme.episode.id, now));
+  }
+  await db.batch(statements);
+  return scheduleRows(db, householdId);
 }
 
 export async function requestTvProgramme(

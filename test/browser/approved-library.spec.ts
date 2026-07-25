@@ -1,5 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+interface ChannelMetadata {
+  meta: null | { behaviorHints: { defaultVideoId: string } };
+}
+
 async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByLabel("Choose a six-digit Parent PIN").fill("123456");
@@ -44,4 +48,41 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
 
   const approvedShow = page.locator("#library .programme").filter({ hasText: "The Example" });
   await expect(approvedShow).toContainText("Starts at S01E02 — Second");
+
+  const manifestUrl = await page.locator("#manifest").textContent();
+  expect(manifestUrl).toBeTruthy();
+  const addonBase = manifestUrl!.replace(/\/manifest\.json$/, "");
+  const channelMetadata = () => page.evaluate(async (base) => {
+    const [tv, movie] = await Promise.all([
+      fetch(base + "/meta/series/" + encodeURIComponent("kids-channels:tv") + ".json").then(async (response) => await response.json() as ChannelMetadata),
+      fetch(base + "/meta/movie/" + encodeURIComponent("kids-channels:movie") + ".json").then(async (response) => await response.json() as ChannelMetadata),
+    ]);
+    return { tv, movie };
+  }, addonBase);
+
+  const active = await channelMetadata();
+  expect(active.tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
+  expect(active.movie.meta?.behaviorHints.defaultVideoId).toBe("tt7654321");
+
+  await approvedShow.getByRole("button", { name: "Pause show" }).click();
+  await expect(page.locator("#library-status")).toContainText("Show paused");
+  expect((await channelMetadata()).tv.meta).toBeNull();
+  const pausedShow = page.locator("#library .programme").filter({ hasText: "The Example" });
+  await pausedShow.getByRole("button", { name: "Resume show" }).click();
+  await expect(page.locator("#library-status")).toContainText("Show resumed");
+  expect((await channelMetadata()).tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
+
+  await page.getByRole("button", { name: "Regenerate upcoming TV selections" }).click();
+  await expect(page.locator("#library-status")).toContainText("without changing the Current Programme or Show Progress");
+  expect((await channelMetadata()).tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
+
+  await page.locator("#library .programme").filter({ hasText: "The Example" })
+    .getByRole("button", { name: "Remove show" }).click();
+  await expect(page.locator("#library-status")).toContainText("Show removed");
+  expect((await channelMetadata()).tv.meta).toBeNull();
+
+  await page.locator("#library .programme").filter({ hasText: "Example: The Movie" })
+    .getByRole("button", { name: "Remove movie" }).click();
+  await expect(page.locator("#library-status")).toContainText("Movie removed");
+  expect((await channelMetadata()).movie.meta).toBeNull();
 });
