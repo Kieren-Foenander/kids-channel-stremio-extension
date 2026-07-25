@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-24",
   "vars": {
-    "CONFIG_SECRET": "test-only-configuration-secret-at-least-32-characters"
+    "CONFIG_SECRET": "test-only-configuration-secret-at-least-32-characters",
+    "TV_SCHEDULE_SEED": "deterministic-test-seed"
   },
   "d1_databases": [
     {

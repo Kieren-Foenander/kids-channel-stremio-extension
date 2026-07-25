@@ -1,14 +1,15 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
-import { tvCurrentProgramme } from "./current-programme";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
 import { issueParentToken, verifyParentToken } from "./secrets";
-import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { catalogFor, manifestFor, TV_BINGE_GROUP, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { requestTvProgramme, tvChannelSchedule } from "./tv-channel";
 
 export interface Env {
   DB: D1Database;
   CONFIG_SECRET?: string;
   CINEMETA_ORIGIN?: string;
+  TV_SCHEDULE_SEED?: string;
 }
 
 const jsonHeaders = {
@@ -363,9 +364,20 @@ export default {
       const household = await findHousehold(env.DB, metaMatch[1]);
       if (!household) return json({ error: "Household not found." }, 404);
       if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return json({ meta: null });
-      return json(tvChannelMetadata(await tvCurrentProgramme(env.DB, household.id)));
+      const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
+      return json(tvChannelMetadata(schedule, url.origin));
     }
 
+    const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/series\/([^/]+)\.json$/);
+    if (request.method === "GET" && streamMatch) {
+      const household = await findHousehold(env.DB, streamMatch[1]);
+      if (!household) return json({ error: "Household not found." }, 404);
+      const episodeId = decodedPathSegment(streamMatch[2]);
+      if (episodeId) await requestTvProgramme(env.DB, household.id, episodeId, env.TV_SCHEDULE_SEED);
+      // Kids Channels observes schedule movement here. A separately installed provider supplies
+      // the playable stream and its matching bingeGroup in the Stremio client context.
+      return json({ streams: [], behaviorHints: { bingeGroup: TV_BINGE_GROUP } });
+    }
 
     return json({ error: "Not found." }, 404);
   },

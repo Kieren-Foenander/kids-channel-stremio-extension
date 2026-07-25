@@ -33,7 +33,7 @@ pnpm test:browser
 # Or run both suites with: pnpm test:all
 ```
 
-The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, and catalog-to-canonical-episode metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
+The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, deterministic rolling scheduling, concurrent advancement, and catalog-to-canonical-episode metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
 ## Deploy
 
@@ -65,4 +65,5 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /addons/:secret/manifest.json` — Household Stremio manifest
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
-- `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme metadata with a canonical default episode
+- `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
+- `GET /addons/:secret/stream/series/:episodeId.json` — observe Current/later programme requests, atomically advance when needed, and delegate playable streams to installed client addons
