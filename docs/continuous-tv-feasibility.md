@@ -28,7 +28,7 @@ Automatic source selection is no longer an MVP requirement. The TV Channel choos
 
 A timer that selects the first source cannot be implemented by a Stremio addon: addons return protocol data and cannot inspect another addon's results, delay and control the client UI, or simulate remote input. An Android Accessibility/ADB automation layer would be a separate, brittle client application and is intentionally out of scope.
 
-Dynamic metadata and the observer stream response explicitly return `Cache-Control: no-store`. This prevents HTTP caches from hiding a replenished schedule or suppressing observer requests.
+Dynamic metadata and the observer stream response explicitly return `Cache-Control: no-store`. This prevents HTTP intermediary caches from hiding a replenished schedule or suppressing observer requests, but it does not invalidate metadata already retained in Stremio's in-memory resource model. A July 2026 Parent-change validation confirmed that Stremio reuses the identical loaded metadata request until the client fully closes and reopens. The Parent has accepted this protocol limitation for the MVP; the Parent Page must instruct them to restart Stremio after Approved Library or regeneration changes.
 
 ## Fire TV completion run
 
@@ -41,7 +41,7 @@ Record pass/fail for each step without retaining private URLs or credentials:
 3. Let that episode finish naturally. The following cross-show programme must be selected, with the same accepted source-selection step if required.
 4. Continue through several programmes and confirm each transition selects the scheduled canonical programme.
 5. Reopen TV Channel and confirm the Current Programme moved forward and approximately twenty programmes remain visible. Confirm the Worker observer recorded advancement.
-6. Trigger a Parent schedule change once issue #12's controls exist, then reopen TV Channel on Fire TV. The changed schedule must appear without reinstalling the addon.
+6. Trigger a Parent schedule change once issue #12's controls exist, fully close and reopen Stremio, then reopen TV Channel on Fire TV. The changed schedule must appear without reinstalling the addon.
 7. On two household devices, request the same next programme as close together as possible. Reopen TV Channel on both and confirm one shared Current Programme with no duplicate advancement or schedule corruption.
 8. Select a visible programme several entries ahead. It must play, become Current Programme, and treat every bypassed programme as skipped.
 
@@ -53,7 +53,7 @@ Record pass/fail for each step without retaining private URLs or credentials:
 | Natural cross-show autoplay | Accepted exception | Stremio may pause at provider-source selection before playback continues |
 | Several automatic programmes | Removed from MVP | Continuous scheduling remains; unattended provider selection is not guaranteed |
 | Interrupted Current Programme resumes | Supported | Canonical resume passed on Fire TV in issue #6 and canonical identity is unchanged |
-| Replenishment and cache behavior | Supported with follow-up coverage | Worker tests replenish to twenty and dynamic protocol responses are `no-store`; Parent controls receive end-to-end coverage in issue #12 |
+| Replenishment and cache behavior | Accepted exception | Worker tests replenish to twenty and dynamic responses are `no-store`, but Stremio retains loaded metadata in memory; a full client restart is required after Parent changes |
 | Shared two-device Current Programme | Supported with follow-up coverage | Concurrent Worker requests advance exactly once; final household-device certification remains in issue #16 |
 | Distant visible programme skip | Supported | Worker protocol test proves documented skip behavior; schedule remains visible on Fire TV |
 | Protocol adjustments documented | Passed | Provider owns playable streams and `bingeGroup`; manual source selection is accepted; fake top-level hint was removed |

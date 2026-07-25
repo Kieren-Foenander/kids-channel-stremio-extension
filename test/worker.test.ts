@@ -20,7 +20,7 @@ beforeEach(async () => {
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
     content_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT, background TEXT,
     release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL,
-    UNIQUE (household_id, content_type, imdb_id)
+    paused_at TEXT, UNIQUE (household_id, content_type, imdb_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_episodes (
     programme_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL,
@@ -138,6 +138,7 @@ describe("Parent Page Household creation", () => {
     const parentHtml = await parentPage.text();
     expect(parentHtml).toContain("Enter your six-digit PIN");
     expect(parentHtml).toContain("Stremio resolves streams on your device");
+    expect(parentHtml).toContain("fully close and reopen Stremio");
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST",
@@ -410,6 +411,130 @@ describe("rolling TV Channel Schedule", () => {
       expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
         .bind(`programme-${show}`).first()).toMatchObject({ next_video_id: `tt900000${show}:1:${expected}` });
     }
+  });
+});
+
+describe("Approved Library changes while Channels are active", () => {
+  async function arrangeActiveChannels() {
+    const created = await create();
+    const now = new Date().toISOString();
+    const statements: D1PreparedStatement[] = [];
+    for (let show = 1; show <= 2; show += 1) {
+      statements.push(env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+        VALUES (?, ?, ?, 'show', ?, '[]', ?)`)
+        .bind(`active-show-${show}`, created.householdId, `tt700000${show}`, `Active Show ${show}`, `${now}-${show}`));
+      for (let episode = 1; episode <= 25; episode += 1) {
+        statements.push(env.DB.prepare(`INSERT INTO show_episodes
+          (programme_id, video_id, season, episode, title, released_at) VALUES (?, ?, 1, ?, ?, ?)`)
+          .bind(`active-show-${show}`, `tt700000${show}:1:${episode}`, episode, `Episode ${episode}`, now));
+      }
+      statements.push(env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)")
+        .bind(`active-show-${show}`, `tt700000${show}:1:1`));
+    }
+    for (let movie = 1; movie <= 3; movie += 1) {
+      statements.push(env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+        VALUES (?, ?, ?, 'movie', ?, '[]', ?)`)
+        .bind(`active-movie-${movie}`, created.householdId, `tt600000${movie}`, `Active Movie ${movie}`, `${now}-${movie}`));
+    }
+    await env.DB.batch(statements);
+
+    const secret = secretFrom(created);
+    const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await unlocked.json<{ parentToken: string }>();
+    const headers = { authorization: `Bearer ${parentToken}` };
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    const tvUrl = `${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`;
+    const movieUrl = `${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`;
+    expect((await (await SELF.fetch(tvUrl)).json<any>()).meta).not.toBeNull();
+    expect((await (await SELF.fetch(movieUrl)).json<any>()).meta).not.toBeNull();
+    return { created, secret, headers, base, tvUrl, movieUrl };
+  }
+
+  it("pauses, resumes, regenerates, and removes shows without falsely advancing Show Progress", async () => {
+    const { created, secret, headers, base, tvUrl } = await arrangeActiveChannels();
+    const initial = await (await SELF.fetch(tvUrl)).json<any>();
+    const initialVideoId = initial.meta.behaviorHints.defaultVideoId as string;
+    const current = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'tv'")
+      .bind(created.householdId).first<{ programme_id: string }>();
+    expect(current).toBeTruthy();
+    const progressBefore = await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
+      .all<{ programme_id: string; next_video_id: string }>();
+
+    const pause = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${current!.programme_id}`, {
+      method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ paused: true }),
+    });
+    expect(pause.status).toBe(200);
+    expect(await pause.json()).toMatchObject({ message: expect.stringContaining("Restart Stremio") });
+    const whilePaused = await (await SELF.fetch(tvUrl)).json<any>();
+    expect(whilePaused.meta.behaviorHints.defaultVideoId).not.toBe(initialVideoId);
+    expect(whilePaused.meta.videos.every((video: any) => !video.id.startsWith(initialVideoId.split(":")[0]))).toBe(true);
+    expect(await env.DB.prepare("SELECT paused_at FROM approved_programmes WHERE id = ?").bind(current!.programme_id).first<string>("paused_at"))
+      .toBeTruthy();
+
+    const resume = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${current!.programme_id}`, {
+      method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ paused: false }),
+    });
+    expect(resume.status).toBe(200);
+    expect(await env.DB.prepare("SELECT paused_at FROM approved_programmes WHERE id = ?").bind(current!.programme_id).first<string>("paused_at"))
+      .toBeNull();
+    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
+      .all()).results).toEqual(progressBefore.results);
+
+    const beforeRegenerate = await (await SELF.fetch(tvUrl)).json<any>();
+    const seedBefore = await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel = 'tv'")
+      .bind(created.householdId).first<string>("selection_seed");
+    const regenerate = await SELF.fetch(`https://kids.test/api/households/${secret}/tv-schedule/regenerate`, { method: "POST", headers });
+    expect(regenerate.status).toBe(200);
+    const afterRegenerate = await (await SELF.fetch(tvUrl)).json<any>();
+    expect(afterRegenerate.meta.behaviorHints.defaultVideoId).toBe(beforeRegenerate.meta.behaviorHints.defaultVideoId);
+    expect(await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel = 'tv'")
+      .bind(created.householdId).first<string>("selection_seed")).not.toBe(seedBefore);
+    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
+      .all()).results).toEqual(progressBefore.results);
+
+    const currentProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'tv'")
+      .bind(created.householdId).first<string>("programme_id");
+    const futureProgrammeId = currentProgrammeId === "active-show-1" ? "active-show-2" : "active-show-1";
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${futureProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
+    const oneShow = await (await SELF.fetch(tvUrl)).json<any>();
+    expect(oneShow.meta.videos).toHaveLength(20);
+    expect(oneShow.meta.videos.every((video: any) => video.id.startsWith(currentProgrammeId === "active-show-1" ? "tt7000001:" : "tt7000002:"))).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_schedule WHERE programme_id = ?").bind(futureProgrammeId).first())
+      .toMatchObject({ count: 0 });
+
+    const removedVideoId = oneShow.meta.behaviorHints.defaultVideoId;
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${currentProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
+    expect((await (await SELF.fetch(tvUrl)).json<any>()).meta).toBeNull();
+    expect((await SELF.fetch(`${base}/stream/series/${encodeURIComponent(removedVideoId)}.json`)).status).toBe(200);
+  });
+
+  it("removes movies from the remaining rotation and keeps one-item and empty Channel states valid", async () => {
+    const { created, secret, headers, movieUrl } = await arrangeActiveChannels();
+    const before = await (await SELF.fetch(movieUrl)).json<any>();
+    const removedVideoId = before.meta.behaviorHints.defaultVideoId;
+    const removedProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'movie'")
+      .bind(created.householdId).first<string>("programme_id");
+
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${removedProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
+    const after = await (await SELF.fetch(movieUrl)).json<any>();
+    expect(after.meta.behaviorHints.defaultVideoId).not.toBe(removedVideoId);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE household_id = ? AND programme_id = ?")
+      .bind(created.householdId, removedProgrammeId).first()).toMatchObject({ count: 0 });
+
+    const remaining = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ? AND content_type = 'movie' ORDER BY id")
+      .bind(created.householdId).all<{ id: string }>();
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${remaining.results[0].id}`, { method: "DELETE", headers })).status).toBe(200);
+    const onlyMovie = await (await SELF.fetch(movieUrl)).json<any>();
+    expect(onlyMovie.meta).not.toBeNull();
+
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${remaining.results[1].id}`, { method: "DELETE", headers })).status).toBe(200);
+    expect((await (await SELF.fetch(movieUrl)).json<any>()).meta).toBeNull();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_channel_state WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ count: 0 });
   });
 });
 
