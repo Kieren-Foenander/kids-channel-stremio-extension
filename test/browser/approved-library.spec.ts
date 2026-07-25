@@ -48,7 +48,7 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
   await show.getByRole("button", { name: "Approve show" }).click();
 
   const approvedShow = page.locator("#library .programme").filter({ hasText: "The Example" });
-  await expect(approvedShow).toContainText("Starts at S01E02 — Second");
+  await expect(approvedShow).toContainText("Show Progress: S01E02 — Second");
 
   const manifestUrl = await page.locator("#manifest").textContent();
   expect(manifestUrl).toBeTruthy();
@@ -77,6 +77,24 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
   await expect(page.locator("#library-status")).toContainText("without changing the Current Programme or Show Progress");
   await expect(page.locator("#library-status")).toContainText("Restart Stremio");
   expect((await channelMetadata()).tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
+  await expect(page.locator("#tv-current")).toContainText("The Example — S01E02 — Second");
+  await expect(page.locator("#tv-schedule li").first()).toContainText("The Example — S01E02 — Second");
+
+  const progressShow = page.locator("#library .programme").filter({ hasText: "The Example" });
+  await progressShow.getByRole("combobox", { name: "Next episode for The Example" }).selectOption("tt1234567:1:1");
+  await progressShow.getByRole("button", { name: "Set Show Progress" }).click();
+  await expect(page.locator("#library-status")).toContainText("incompatible future selections repaired");
+  await expect(page.locator("#tv-current")).toContainText("S01E02 — Second");
+  await expect(page.locator("#tv-schedule li").nth(1)).toContainText("S01E01 — First");
+
+  await page.evaluate(async (base) => {
+    await fetch(base + "/stream/series/" + encodeURIComponent("tt1234567:1:1") + ".json");
+    await (globalThis as unknown as { loadTvState(): Promise<void> }).loadTvState();
+  }, addonBase);
+  await expect(page.locator("#tv-history")).toContainText("S01E02 — Second");
+  await page.getByRole("button", { name: "Undo most recent advancement" }).click();
+  await expect(page.locator("#tv-status")).toContainText("Most recent advancement undone");
+  await expect(page.locator("#tv-current")).toContainText("S01E02 — Second");
 
   await page.locator("#library .programme").filter({ hasText: "The Example" })
     .getByRole("button", { name: "Remove show" }).click();

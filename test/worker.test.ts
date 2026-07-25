@@ -50,6 +50,12 @@ beforeEach(async () => {
     target_position INTEGER NOT NULL, owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
     PRIMARY KEY (household_id, channel, from_position)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_advancement_history (
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, from_position INTEGER NOT NULL,
+    target_position INTEGER NOT NULL, previous_programme_id TEXT NOT NULL, previous_video_id TEXT NOT NULL,
+    target_programme_id TEXT NOT NULL, target_video_id TEXT NOT NULL, progress_before_json TEXT NOT NULL,
+    progress_after_json TEXT NOT NULL, advanced_at TEXT NOT NULL, undone_at TEXT, undo_owner_token TEXT
+  )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_state (
     household_id TEXT PRIMARY KEY NOT NULL, cycle INTEGER NOT NULL, current_position INTEGER NOT NULL,
     selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL
@@ -68,6 +74,7 @@ beforeEach(async () => {
   await env.DB.prepare("DELETE FROM movie_advancements").run();
   await env.DB.prepare("DELETE FROM movie_rotation").run();
   await env.DB.prepare("DELETE FROM movie_channel_state").run();
+  await env.DB.prepare("DELETE FROM tv_advancement_history").run();
   await env.DB.prepare("DELETE FROM channel_advancements").run();
   await env.DB.prepare("DELETE FROM channel_schedule").run();
   await env.DB.prepare("DELETE FROM channel_state").run();
@@ -346,6 +353,14 @@ describe("rolling TV Channel Schedule", () => {
     return (await SELF.fetch(`${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`)).json<any>();
   }
 
+  async function parentHeaders(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await response.json<{ parentToken: string }>();
+    return { authorization: `Bearer ${parentToken}` };
+  }
+
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
     const { base } = await arrangeShows(3);
     const metadataResponse = await SELF.fetch(`${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`);
@@ -390,6 +405,83 @@ describe("rolling TV Channel Schedule", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
     expect(await env.DB.prepare("SELECT COUNT(DISTINCT video_id) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
+  });
+
+  it("displays Current Programme, Channel Schedule, and recent playback only to the Parent", async () => {
+    const { created, base } = await arrangeShows(2);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-state`)).status).toBe(401);
+    const before = await metadata(base);
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(before.meta.videos[1].id)}.json`);
+
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-state`, {
+      headers: await parentHeaders(created),
+    });
+    const state = await response.json<any>();
+    expect(state.current.episode.id).toBe(before.meta.videos[1].id);
+    expect(state.schedule).toHaveLength(20);
+    expect(state.recentPlayback[0]).toMatchObject({ showTitle: expect.stringMatching(/^Show /), episode: { id: before.meta.videos[0].id } });
+    expect(state.canUndo).toBe(true);
+    expect(JSON.stringify(state)).not.toContain(secretFrom(created));
+  });
+
+  it("corrects Show Progress, repairs incompatible future entries, and preserves the Current Programme", async () => {
+    const { created, base } = await arrangeShows(2, 8);
+    const before = await metadata(base);
+    const currentId = before.meta.behaviorHints.defaultVideoId;
+    const headers = await parentHeaders(created);
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/programme-1/progress`, {
+      method: "PATCH", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ videoId: "tt9000001:1:5" }),
+    });
+    expect(response.status).toBe(200);
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(currentId);
+    const futureShowOne = after.meta.videos.slice(1).filter((video: any) => video.id.startsWith("tt9000001:"));
+    expect(futureShowOne.length).toBeGreaterThan(0);
+    expect(futureShowOne.every((video: any) => Number(video.id.split(":")[2]) >= 5)).toBe(true);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = 'programme-1'").first())
+      .toMatchObject({ next_video_id: "tt9000001:1:5" });
+  });
+
+  it("undoes only the latest advancement and does not overwrite another show's later correction", async () => {
+    const { created, base } = await arrangeShows(2, 8);
+    const before = await metadata(base);
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(before.meta.videos[1].id)}.json`);
+    const headers = await parentHeaders(created);
+    const priorShow = before.meta.videos[0].id.startsWith("tt9000001:") ? "programme-1" : "programme-2";
+    const otherShow = priorShow === "programme-1" ? "programme-2" : "programme-1";
+    const otherImdb = otherShow === "programme-1" ? "tt9000001" : "tt9000002";
+    await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/${otherShow}/progress`, {
+      method: "PATCH", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ videoId: `${otherImdb}:1:6` }),
+    });
+    const undo = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-schedule/undo`, { method: "POST", headers });
+    expect(undo.status).toBe(200);
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(before.meta.videos[0].id);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?").bind(otherShow).first())
+      .toMatchObject({ next_video_id: `${otherImdb}:1:6` });
+    expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-schedule/undo`, { method: "POST", headers })).status).toBe(409);
+  });
+
+  it("marks exhausted shows Finished and lets the Parent restart them", async () => {
+    const { created, base } = await arrangeShows(2, 2);
+    const before = await metadata(base);
+    const lastShowOne = before.meta.videos.findIndex((video: any) => video.id === "tt9000001:1:2");
+    expect(lastShowOne).toBeGreaterThanOrEqual(0);
+    const target = before.meta.videos[lastShowOne + 1];
+    expect(target).toBeTruthy();
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(target.id)}.json`);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = 'programme-1'").first()).toBeNull();
+    const exhausted = await metadata(base);
+    expect(exhausted.meta.videos.slice(1).every((video: any) => !video.id.startsWith("tt9000001:"))).toBe(true);
+
+    const headers = await parentHeaders(created);
+    const restart = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/programme-1/progress`, {
+      method: "PATCH", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ videoId: "tt9000001:1:1" }),
+    });
+    expect(restart.status).toBe(200);
+    expect((await metadata(base)).meta.videos.slice(1).some((video: any) => video.id === "tt9000001:1:1")).toBe(true);
   });
 
   it("plays a distant visible programme and treats every bypassed programme as skipped", async () => {
