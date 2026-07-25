@@ -64,6 +64,17 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
   const active = await channelMetadata();
   expect(active.tv.meta?.behaviorHints.defaultVideoId).toBe("tt1234567:1:2");
   expect(active.movie.meta?.behaviorHints.defaultVideoId).toBe("tt7654321");
+  await expect(page.locator("#movie-current")).toHaveText("Example: The Movie");
+  await expect(page.locator("#movie-rotation")).toHaveText("No movies remaining.");
+
+  await page.evaluate(async (base) => {
+    const metadata = await fetch(base + "/meta/movie/" + encodeURIComponent("kids-channels:movie") + ".json").then(response => response.json()) as any;
+    await fetch(metadata.meta.videos[1].streams[0].url);
+    await (globalThis as unknown as { loadMovieState(): Promise<void> }).loadMovieState();
+  }, addonBase);
+  await expect(page.locator("#movie-history")).toContainText("Example: The Movie");
+  await page.getByRole("button", { name: "Reset movie rotation" }).click();
+  await expect(page.locator("#movie-status")).toContainText("without interrupting the Current Programme");
 
   await approvedShow.getByRole("button", { name: "Pause show" }).click();
   await expect(page.locator("#library-status")).toContainText("Show paused");

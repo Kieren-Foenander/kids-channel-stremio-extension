@@ -1,7 +1,16 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
-import { movieChannelProgramme, MOVIE_CHANNEL_ID, parseSignOffId, reconcileMovieChannel, requestMovieSignOff } from "./movie-channel";
+import {
+  movieChannelProgramme,
+  MOVIE_CHANNEL_ID,
+  parentMovieChannelState,
+  parseSignOffId,
+  reconcileMovieChannel,
+  removeApprovedMovie,
+  requestMovieSignOff,
+  resetMovieRotation,
+} from "./movie-channel";
 import { issueParentToken, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
@@ -156,6 +165,14 @@ function parentPage(secret: string): string {
       <h3>Recently played</h3>
       <ol id="tv-history" class="channel-list"><li>No recent playback.</li></ol>
       <p id="tv-status" role="status"></p>
+      <h2>Movie Channel</h2>
+      <p id="movie-current">No Current Programme.</p>
+      <h3>Remaining rotation</h3>
+      <ol id="movie-rotation" class="channel-list"><li>No movies remaining.</li></ol>
+      <h3>Recently played</h3>
+      <ol id="movie-history" class="channel-list"><li>No recent playback.</li></ol>
+      <button id="reset-movies" type="button" class="secondary">Reset movie rotation</button>
+      <p id="movie-status" role="status"></p>
       <h2>Approved Library</h2>
       <p class="notice">Stremio keeps Channel details in memory. After changing the Approved Library or regenerating selections, fully close and reopen Stremio to load the updated Channel.</p>
       <button id="regenerate-tv" type="button" class="secondary">Regenerate upcoming TV selections</button>
@@ -221,6 +238,21 @@ function parentPage(secret: string): string {
         });
         document.querySelector('#undo-tv').hidden = !result.canUndo;
       }
+      async function loadMovieState() {
+        const response = await fetch('/api/households/${secret}/movie-state', {headers: headers()});
+        const result = await response.json(); if (!response.ok) return;
+        document.querySelector('#movie-current').textContent = result.current
+          ? result.current.title
+          : 'No Current Programme.';
+        const rotation = document.querySelector('#movie-rotation'); rotation.replaceChildren();
+        (result.remaining.length ? result.remaining : [{empty: 'No movies remaining.'}]).forEach(item => {
+          const row = document.createElement('li'); row.textContent = item.empty || item.title; rotation.append(row);
+        });
+        const history = document.querySelector('#movie-history'); history.replaceChildren();
+        (result.recentPlayback.length ? result.recentPlayback : [{empty: 'No recent playback.'}]).forEach(item => {
+          const row = document.createElement('li'); row.textContent = item.empty || item.title; history.append(row);
+        });
+      }
       async function loadLibrary() {
         const response = await fetch('/api/households/${secret}/library', {headers: headers()});
         const result = await response.json(); const output = document.querySelector('#library'); output.replaceChildren();
@@ -234,7 +266,7 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
-        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState()]);
+        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
       }
       async function correctProgress(programmeId, videoId, button) {
         button.disabled = true;
@@ -250,7 +282,7 @@ function parentPage(secret: string): string {
         const response = await fetch('/api/households/${secret}/library/' + encodeURIComponent(programmeId), {method: 'DELETE', headers: headers()});
         const result = await response.json();
         if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
-        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState()]);
+        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
       }
       async function approve(programme, startingEpisodeId, button) {
         button.disabled = true;
@@ -260,7 +292,7 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { button.disabled = false; button.textContent = result.error; return; }
-        button.textContent = 'Approved'; await Promise.all([loadLibrary(), loadTvState()]);
+        button.textContent = 'Approved'; await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
       }
       function showSearchResult(programme) {
         const built = programmeCard(programme, false); const button = document.createElement('button');
@@ -287,7 +319,7 @@ function parentPage(secret: string): string {
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
         parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
-        form.hidden = true; document.querySelector('#result').hidden = false; await Promise.all([loadLibrary(), loadTvState()]);
+        form.hidden = true; document.querySelector('#result').hidden = false; await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
       });
       document.querySelector('#regenerate-tv').addEventListener('click', async (event) => {
         const button = event.currentTarget; button.disabled = true;
@@ -295,6 +327,13 @@ function parentPage(secret: string): string {
         const result = await response.json(); button.disabled = false;
         document.querySelector('#library-status').textContent = response.ok ? result.message : result.error;
         if (response.ok) await loadTvState();
+      });
+      document.querySelector('#reset-movies').addEventListener('click', async (event) => {
+        const button = event.currentTarget; button.disabled = true;
+        const response = await fetch('/api/households/${secret}/movie-rotation/reset', {method: 'POST', headers: headers()});
+        const result = await response.json(); button.disabled = false;
+        document.querySelector('#movie-status').textContent = response.ok ? result.message : result.error;
+        if (response.ok) await loadMovieState();
       });
       document.querySelector('#undo-tv').addEventListener('click', async (event) => {
         const button = event.currentTarget; button.disabled = true;
@@ -427,6 +466,7 @@ export default {
         const title = await new CinemetaClient(env.CINEMETA_ORIGIN).title(input.type, input.imdbId);
         if (!title) return json({ error: "Programme was not found in Cinemeta." }, 404);
         const programme = await approveProgramme(env.DB, household.id, title, input.startingEpisodeId);
+        if (programme.type === "movie") await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
         return json({ programme }, 201);
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
@@ -471,12 +511,7 @@ export default {
         ]);
         await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
       } else {
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
-          env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
-          env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
-        ]);
-        await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+        await removeApprovedMovie(env.DB, household.id, programme.id, env.MOVIE_ROTATION_SEED);
       }
       return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
     }
@@ -488,6 +523,25 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       return json(await parentTvChannelState(env.DB, household.id, env.TV_SCHEDULE_SEED));
+    }
+
+    const movieStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-state$/);
+    if (request.method === "GET" && movieStateMatch) {
+      const household = await findHousehold(env.DB, movieStateMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      return json(await parentMovieChannelState(env.DB, household.id, env.MOVIE_ROTATION_SEED));
+    }
+
+    const resetMoviesMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-rotation\/reset$/);
+    if (request.method === "POST" && resetMoviesMatch) {
+      const household = await findHousehold(env.DB, resetMoviesMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      await resetMovieRotation(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+      return json({ message: "Movie rotation reset without interrupting the Current Programme. Restart Stremio to refresh the Channel." });
     }
 
     const progressMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)\/progress$/);
