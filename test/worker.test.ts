@@ -293,7 +293,8 @@ describe("TV Channel client-side stream resolution", () => {
 
     const stream = await SELF.fetch(`${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`);
     expect(stream.status).toBe(200);
-    expect(await stream.json()).toEqual({ streams: [], behaviorHints: { bingeGroup: "kids-channels-tv" } });
+    expect(stream.headers.get("cache-control")).toBe("no-store");
+    expect(await stream.json()).toEqual({ streams: [] });
     expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
     expect(await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first()).toMatchObject({ video_id: canonicalEpisodeId });
   });
@@ -329,7 +330,9 @@ describe("rolling TV Channel Schedule", () => {
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
     const { base } = await arrangeShows(3);
-    const first = await metadata(base);
+    const metadataResponse = await SELF.fetch(`${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`);
+    expect(metadataResponse.headers.get("cache-control")).toBe("no-store");
+    const first = await metadataResponse.json<any>();
     const second = await metadata(base);
     expect(first).toEqual(second);
     expect(first.meta.videos).toHaveLength(20);
@@ -401,7 +404,7 @@ describe("Stremio protocol", () => {
 
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(manifest).toMatchObject({
-      version: "0.3.0",
+      version: "0.3.1",
       name: "Kids Channels",
       resources: ["catalog", "meta", "stream"],
       types: ["series", "movie"],
