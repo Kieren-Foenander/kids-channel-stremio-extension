@@ -34,7 +34,26 @@ beforeEach(async () => {
     household_id TEXT NOT NULL, channel TEXT NOT NULL, programme_id TEXT NOT NULL,
     video_id TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY (household_id, channel)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_state (
+    household_id TEXT NOT NULL, channel TEXT NOT NULL, current_position INTEGER NOT NULL,
+    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL, PRIMARY KEY (household_id, channel)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_schedule (
+    household_id TEXT NOT NULL, channel TEXT NOT NULL, position INTEGER NOT NULL,
+    programme_id TEXT NOT NULL, video_id TEXT NOT NULL, scheduled_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, channel, position)
+  )`).run();
+  await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS channel_schedule_video_idx
+    ON channel_schedule (household_id, channel, video_id)`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_advancements (
+    household_id TEXT NOT NULL, channel TEXT NOT NULL, from_position INTEGER NOT NULL,
+    target_position INTEGER NOT NULL, owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, channel, from_position)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM channel_advancements").run();
+  await env.DB.prepare("DELETE FROM channel_schedule").run();
+  await env.DB.prepare("DELETE FROM channel_state").run();
   await env.DB.prepare("DELETE FROM current_programmes").run();
   await env.DB.prepare("DELETE FROM show_progress").run();
   await env.DB.prepare("DELETE FROM show_episodes").run();
@@ -266,14 +285,111 @@ describe("TV Channel client-side stream resolution", () => {
       id: "kids-channels:tv",
       type: "series",
       behaviorHints: { defaultVideoId: canonicalEpisodeId },
-      videos: [{ id: canonicalEpisodeId, season: 1, episode: 1, title: "Playback Show — Beginning" }],
     });
-    expect(metadata.meta.videos).toHaveLength(1);
+    expect(metadata.meta.videos).toEqual([
+      expect.objectContaining({ id: canonicalEpisodeId, season: 1, episode: 1, title: "Playback Show — Beginning" }),
+      expect.objectContaining({ id: "tt2468101:1:2", season: 1, episode: 2, title: "Playback Show — Later" }),
+    ]);
 
     const stream = await SELF.fetch(`${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`);
-    expect(stream.status).toBe(404);
+    expect(stream.status).toBe(200);
+    expect(await stream.json()).toEqual({ streams: [], behaviorHints: { bingeGroup: "kids-channels-tv" } });
     expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
     expect(await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first()).toMatchObject({ video_id: canonicalEpisodeId });
+  });
+});
+
+describe("rolling TV Channel Schedule", () => {
+  async function arrangeShows(showCount: number, episodeCount = 30) {
+    const created = await create();
+    const now = new Date().toISOString();
+    const statements: D1PreparedStatement[] = [];
+    for (let show = 1; show <= showCount; show += 1) {
+      const programmeId = `programme-${show}`;
+      statements.push(env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+        VALUES (?, ?, ?, 'show', ?, '[]', ?)`)
+        .bind(programmeId, created.householdId, `tt900000${show}`, `Show ${show}`, `${now}-${show}`));
+      for (let episode = 1; episode <= episodeCount; episode += 1) {
+        statements.push(env.DB.prepare(`INSERT INTO show_episodes
+          (programme_id, video_id, season, episode, title, released_at)
+          VALUES (?, ?, 1, ?, ?, ?)`)
+          .bind(programmeId, `tt900000${show}:1:${episode}`, episode, `Episode ${episode}`, now));
+      }
+      statements.push(env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)")
+        .bind(programmeId, `tt900000${show}:1:1`));
+    }
+    await env.DB.batch(statements);
+    return { created, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
+  }
+
+  async function metadata(base: string) {
+    return (await SELF.fetch(`${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`)).json<any>();
+  }
+
+  it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
+    const { base } = await arrangeShows(3);
+    const first = await metadata(base);
+    const second = await metadata(base);
+    expect(first).toEqual(second);
+    expect(first.meta.videos).toHaveLength(20);
+    expect(first.meta.videos.map((video: any) => video.episode)).toEqual(Array.from({ length: 20 }, (_, index) => index + 1));
+
+    const showIds = first.meta.videos.map((video: any) => video.id.split(":")[0]);
+    for (let index = 1; index < showIds.length; index += 1) expect(showIds[index]).not.toBe(showIds[index - 1]);
+    const progress = await env.DB.prepare("SELECT next_video_id FROM show_progress ORDER BY programme_id").all<{ next_video_id: string }>();
+    expect(progress.results.map((row) => row.next_video_id)).toEqual([
+      "tt9000001:1:1", "tt9000002:1:1", "tt9000003:1:1",
+    ]);
+  });
+
+  it("schedules one eligible show's regular episodes consecutively in order", async () => {
+    const { base } = await arrangeShows(1, 25);
+    const result = await metadata(base);
+    expect(result.meta.videos.map((video: any) => video.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `tt9000001:1:${index + 1}`),
+    );
+  });
+
+  it("advances naturally or through Next exactly once and replenishes the shared schedule", async () => {
+    const { base } = await arrangeShows(2);
+    const before = await metadata(base);
+    const currentId = before.meta.videos[0].id;
+    const nextId = before.meta.videos[1].id;
+
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(currentId)}.json`);
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(currentId);
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      SELF.fetch(`${base}/stream/series/${encodeURIComponent(nextId)}.json`)));
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
+    expect(after.meta.videos).toHaveLength(20);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
+    expect(await env.DB.prepare("SELECT COUNT(DISTINCT video_id) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
+  });
+
+  it("plays a distant visible programme and treats every bypassed programme as skipped", async () => {
+    const { base } = await arrangeShows(3);
+    const before = await metadata(base);
+    const target = before.meta.videos[8];
+    const bypassed = before.meta.videos.slice(0, 8).map((video: any) => video.id);
+
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(target.id)}.json`);
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(target.id);
+    expect(after.meta.videos).toHaveLength(20);
+
+    for (let show = 1; show <= 3; show += 1) {
+      const skippedEpisodes = bypassed
+        .filter((id: string) => id.startsWith(`tt900000${show}:`))
+        .map((id: string) => Number(id.split(":")[2]));
+      const expected = skippedEpisodes.length === 0 ? 1 : Math.max(...skippedEpisodes) + 1;
+      expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+        .bind(`programme-${show}`).first()).toMatchObject({ next_video_id: `tt900000${show}:1:${expected}` });
+    }
   });
 });
 
@@ -285,9 +401,9 @@ describe("Stremio protocol", () => {
 
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(manifest).toMatchObject({
-      version: "0.2.0",
+      version: "0.3.0",
       name: "Kids Channels",
-      resources: ["catalog", "meta"],
+      resources: ["catalog", "meta", "stream"],
       types: ["series", "movie"],
       behaviorHints: { configurable: true, configurationRequired: false },
     });
