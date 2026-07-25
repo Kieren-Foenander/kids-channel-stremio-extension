@@ -19,14 +19,14 @@ A Parent can:
 
 - Create a Household and install its secret addon URL.
 - Protect changes with a six-digit PIN.
-- enter and validate a configured Comet manifest URL.
+- See guidance to install and configure a separate stream addon such as Comet in Stremio.
 - Search Cinemeta for shows and movies.
 - Manage the Approved Library.
 - Choose a show's starting episode, defaulting to S01E01.
 - See Current Programmes, recently played items, failures, finished shows, and upcoming schedules.
 - Correct Show Progress, undo advancement, restart or pause a show, reset movie rotation, and regenerate upcoming selections.
 - Change the PIN after entering the current PIN.
-- Permanently delete the Household and its credentials.
+- Permanently delete the Household and its state.
 
 There is no account, discovery, recovery, or forgotten-PIN workflow.
 
@@ -42,7 +42,7 @@ There is no account, discovery, recovery, or forgotten-PIN workflow.
 - Mark an exhausted show Finished and pause it until the Parent restarts, repositions, or removes it.
 - Removing approved content immediately removes upcoming entries. A removed Current Programme may finish playing but cannot be launched again.
 
-If an expected episode has no acceptable cached stream, leave it as the show's next episode and try other approved shows once each. If none are playable, preserve Channel state, report an error, and record the failures. Retry the episode when its show is selected later; the MVP has no timed retry scheduler.
+If installed stream addons return no results for the current episode, preserve Channel and Show Progress state. Provider availability and retries remain Stremio client concerns.
 
 ## Movie Channel
 
@@ -57,20 +57,19 @@ If an expected episode has no acceptable cached stream, leave it as the show's n
 
 - Cinemeta supplies title search, canonical IMDb IDs, posters, seasons, and episodes.
 - Canonical video IDs are preserved so Stremio can associate Viewing Progress and subtitle results.
-- The Household's configured Comet endpoint is the recommended MVP stream provider.
-- Comet remains behind an internal Stremio stream-provider boundary.
-- Request only cached Real-Debrid results and return exactly one stream to Stremio.
-- Trust the Parent's Comet quality and ordering configuration, choosing its first acceptable result. The initial target is 1080p Fire TV playback.
-- Comet configuration controls release and language preferences; subtitle preferences remain Stremio's responsibility.
-- If the configured provider fails, preserve the Current Programme and report the provider failure rather than advancing the schedule.
+- Expose Channels through standard Stremio `series` and `movie` types.
+- Set the canonical Current Programme video ID as `behaviorHints.defaultVideoId`.
+- Let Stremio request streams from separately installed addons on the playback device.
+- Recommend configuring Comet for cached-only 1080p results and preferred release/language ordering.
+- Kids Channels does not inspect, filter, rank, resolve, or proxy provider streams.
+- Subtitle preferences and stream-provider failures remain Stremio client concerns.
 
 ## Deployment and security
 
 - Target Cloudflare Workers and D1 from the outset.
 - Identify each Household with a long opaque random secret.
 - Store only opaque Household identity in installation URLs.
-- Encrypt the configured provider URL using a Worker secret before storing it in D1.
-- Never return or log provider credentials.
+- Never collect, return, or log stream-provider credentials.
 - Rate-limit failed Parent PIN attempts.
 - Real-Debrid media flows directly to Stremio, not through Cloudflare.
 
@@ -79,7 +78,7 @@ If an expected episode has no acceptable cached stream, leave it as the show's n
 Before polishing the Parent Page, prove on Fire TV that:
 
 1. A Channel tile can start with no interaction beyond a protocol-imposed Play action.
-2. A single selected Comet/Real-Debrid stream avoids the stream picker.
+2. A separately installed Comet addon limited to one cached 1080p result avoids or minimizes the stream picker.
 3. Canonical IDs preserve resume positions.
 4. Next moves to a programme from another show.
 5. Natural completion autoplays a programme from another show.
@@ -96,6 +95,5 @@ Any failed criterion requires redesign before the remaining Parent Page is built
 - Weighted or favourite show selection
 - Parent accounts and recovery
 - Multiple independent profiles within a Household
-- Additional stream providers
-- Advanced stream filtering beyond configured provider ordering
+- Provider-specific stream filtering or ordering
 - Restricting access to Stremio's ordinary catalogs and addons

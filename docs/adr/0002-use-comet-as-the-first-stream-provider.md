@@ -1,5 +1,7 @@
 # Use Comet as the first stream provider
 
+Superseded by ADR 0004 after client playback exposed IP-bound provider resolution.
+
 The addon will query each Household's configured Comet endpoint and return exactly its first acceptable cached 1080p Real-Debrid stream, rather than implementing torrent discovery or Real-Debrid resolution itself.
 
 The first deployed feasibility run found that hosted Torrentio returns HTTP 403 to Cloudflare Worker-originated requests while Comet accepts the same egress and identifies cached Real-Debrid streams in its standard Stremio response. Comet therefore replaces Torrentio as the recommended MVP provider.
