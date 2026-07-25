@@ -49,7 +49,7 @@ Copy the returned `database_id` into `wrangler.jsonc`, replacing the all-zero pl
 ```bash
 openssl rand -base64 32 | pnpm exec wrangler secret put CONFIG_SECRET
 pnpm db:migrate:remote
-pnpm deploy
+pnpm run deploy
 ```
 
 The Worker never places the Parent PIN or provider credentials in installation URLs. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Torrentio manifest URLs are AES-GCM encrypted with Household-bound authenticated data and the deployment secret, and are never returned after saving.

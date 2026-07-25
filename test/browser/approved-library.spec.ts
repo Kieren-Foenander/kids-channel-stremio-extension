@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
+async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByLabel("Choose a six-digit Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Create Household" }).click();
@@ -11,6 +11,29 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();
   await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+}
+
+test("a Parent saves a provider endpoint without a browser error", async ({ page }) => {
+  const pageErrors: Error[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error));
+  await unlockHousehold(page);
+  await page.route("**/provider", async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ validation: { message: "Cached 1080p stream found." } }),
+  }));
+
+  const endpoint = page.getByLabel("Torrentio manifest URL");
+  await endpoint.fill("https://torrentio.example/config/manifest.json");
+  await page.getByRole("button", { name: "Save and validate Torrentio" }).click();
+
+  await expect(page.locator("#provider-result")).toHaveText("Cached 1080p stream found.");
+  await expect(endpoint).toHaveValue("");
+  expect(pageErrors).toEqual([]);
+});
+
+test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
+  await unlockHousehold(page);
 
   const search = async () => {
     await page.getByLabel("Search Cinemeta for shows and movies").fill("Example");

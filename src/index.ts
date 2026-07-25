@@ -218,9 +218,9 @@ function parentPage(secret: string): string {
         result.results.forEach(programme => output.append(showSearchResult(programme)));
       });
       document.querySelector('#provider-form').addEventListener('submit', async (event) => {
-        event.preventDefault(); const output = document.querySelector('#provider-result'); output.textContent = 'Checking Torrentio manifest and a representative stream…';
-        const response = await fetch('/api/households/${secret}/provider', { method: 'PUT', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({manifestUrl: new FormData(event.currentTarget).get('manifestUrl')}) });
-        const result = await response.json(); output.textContent = response.ok ? result.validation.message : result.error; if (response.ok) event.currentTarget.reset();
+        event.preventDefault(); const form = event.currentTarget; const output = document.querySelector('#provider-result'); output.textContent = 'Checking Torrentio manifest and a representative stream…';
+        const response = await fetch('/api/households/${secret}/provider', { method: 'PUT', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({manifestUrl: new FormData(form).get('manifestUrl')}) });
+        const result = await response.json(); output.textContent = response.ok ? result.validation.message : result.error; if (response.ok) form.reset();
       });
     </script>`);
 }
