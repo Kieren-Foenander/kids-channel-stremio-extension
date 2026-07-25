@@ -58,7 +58,7 @@ beforeEach(async () => {
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_state (
     household_id TEXT PRIMARY KEY NOT NULL, cycle INTEGER NOT NULL, current_position INTEGER NOT NULL,
-    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL
+    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_rotation (
     household_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
@@ -70,7 +70,18 @@ beforeEach(async () => {
     owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
     PRIMARY KEY (household_id, cycle, position)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_mutations (
+    household_id TEXT NOT NULL, revision INTEGER NOT NULL, owner_token TEXT NOT NULL, claimed_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, revision)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_playback_history (
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, programme_id TEXT NOT NULL,
+    imdb_id TEXT NOT NULL, title TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
+    played_at TEXT NOT NULL
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM movie_playback_history").run();
+  await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
   await env.DB.prepare("DELETE FROM movie_advancements").run();
   await env.DB.prepare("DELETE FROM movie_rotation").run();
   await env.DB.prepare("DELETE FROM movie_channel_state").run();
@@ -646,6 +657,14 @@ describe("Movie Channel rotation and sign-off", () => {
     return (await SELF.fetch(`${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`)).json<any>();
   }
 
+  async function parentHeaders(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await response.json<{ parentToken: string }>();
+    return { authorization: `Bearer ${parentToken}` };
+  }
+
   it("keeps an interrupted canonical movie current and delegates its streams and subtitles to installed addons", async () => {
     const { base } = await arrangeMovies();
     const first = await metadata(base);
@@ -693,6 +712,15 @@ describe("Movie Channel rotation and sign-off", () => {
       (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
       VALUES ('movie-3', ?, 'tt8000003', 'movie', 'Movie 3', '[]', ?)`).bind(created.householdId, now).run();
 
+    await Promise.all(Array.from({ length: 6 }, () => metadata(base)));
+    const insertedRotation = await env.DB.prepare(`SELECT COUNT(*) AS count,
+      COUNT(DISTINCT rotation.programme_id) AS distinct_count
+      FROM movie_rotation rotation JOIN movie_channel_state state
+        ON state.household_id = rotation.household_id AND state.cycle = rotation.cycle
+      WHERE rotation.household_id = ?`).bind(created.householdId)
+      .first<{ count: number; distinct_count: number }>();
+    expect(insertedRotation).toMatchObject({ count: 3, distinct_count: 3 });
+
     const selected: string[] = [];
     for (let index = 0; index < 3; index += 1) {
       const current = index === 0 ? first : await metadata(base);
@@ -700,6 +728,84 @@ describe("Movie Channel rotation and sign-off", () => {
       await SELF.fetch(current.meta.videos[1].streams[0].url);
     }
     expect(new Set(selected)).toEqual(new Set(["tt8000001", "tt8000002", "tt8000003"]));
+  });
+
+  it("shows the Current Programme, remaining rotation, and snapshot history only to the Parent", async () => {
+    const { created, base } = await arrangeMovies();
+    expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/movie-state`)).status).toBe(401);
+    const before = await metadata(base);
+    const playedTitle = before.meta.videos[0].title;
+    await SELF.fetch(before.meta.videos[1].streams[0].url);
+
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/movie-state`, {
+      headers: await parentHeaders(created),
+    });
+    const channelState = await response.json<any>();
+    expect(response.status).toBe(200);
+    expect(channelState.current.title).not.toBe(playedTitle);
+    expect(channelState.remaining).toHaveLength(1);
+    expect(channelState.recentPlayback[0]).toMatchObject({ title: playedTitle, imdbId: expect.stringMatching(/^tt/) });
+    expect(JSON.stringify(channelState)).not.toContain(secretFrom(created));
+
+    const removal = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/${channelState.recentPlayback[0].programmeId}`, {
+      method: "DELETE", headers: await parentHeaders(created),
+    });
+    expect(removal.status).toBe(200);
+    const afterRemoval = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/movie-state`, {
+      headers: await parentHeaders(created),
+    }).then((result) => result.json<any>());
+    expect(afterRemoval.recentPlayback[0].title).toBe(playedTitle);
+  });
+
+  it("resets every approved movie exactly once without changing the active programme or sign-off", async () => {
+    const { created, base } = await arrangeMovies();
+    const first = await metadata(base);
+    await SELF.fetch(first.meta.videos[1].streams[0].url);
+    const active = await metadata(base);
+    const activeId = active.meta.behaviorHints.defaultVideoId;
+    const activeSignOff = active.meta.videos[1].streams[0].url;
+    const headers = await parentHeaders(created);
+
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/movie-rotation/reset`, {
+      method: "POST", headers,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ message: expect.stringContaining("without interrupting") });
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(activeId);
+    expect(after.meta.videos[1].streams[0].url).toBe(activeSignOff);
+
+    const rotation = await env.DB.prepare(`SELECT rotation.programme_id, rotation.consumed_at
+      FROM movie_rotation rotation JOIN movie_channel_state state
+        ON state.household_id = rotation.household_id AND state.cycle = rotation.cycle
+      WHERE rotation.household_id = ? ORDER BY rotation.position`).bind(created.householdId)
+      .all<{ programme_id: string; consumed_at: string | null }>();
+    expect(rotation.results).toHaveLength(3);
+    expect(new Set(rotation.results.map((item) => item.programme_id)).size).toBe(3);
+    expect(rotation.results.every((item) => item.consumed_at === null)).toBe(true);
+  });
+
+  it("serializes a Parent reset with playback advancement without consuming or duplicating a movie", async () => {
+    const { created, base } = await arrangeMovies();
+    const before = await metadata(base);
+    const headers = await parentHeaders(created);
+    const [signOff, reset] = await Promise.all([
+      SELF.fetch(before.meta.videos[1].streams[0].url),
+      SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/movie-rotation/reset`, { method: "POST", headers }),
+    ]);
+    expect(signOff.status).toBe(200);
+    expect(reset.status).toBe(200);
+
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).not.toBe(before.meta.behaviorHints.defaultVideoId);
+    const activeRotation = await env.DB.prepare(`SELECT rotation.programme_id
+      FROM movie_rotation rotation JOIN movie_channel_state state
+        ON state.household_id = rotation.household_id AND state.cycle = rotation.cycle
+      WHERE rotation.household_id = ?`).bind(created.householdId).all<{ programme_id: string }>();
+    expect(activeRotation.results).toHaveLength(3);
+    expect(new Set(activeRotation.results.map((item) => item.programme_id)).size).toBe(3);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_playback_history WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ count: 1 });
   });
 
   it("advances a shared rotation only once under concurrent sign-off requests and leaves sign-off final", async () => {
