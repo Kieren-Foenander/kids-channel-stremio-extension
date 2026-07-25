@@ -1,8 +1,10 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
+import { movieChannelProgramme, MOVIE_CHANNEL_ID, parseSignOffId, requestMovieSignOff } from "./movie-channel";
 import { issueParentToken, verifyParentToken } from "./secrets";
-import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { movieSignOff } from "./sign-off-media";
+import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import { requestTvProgramme, tvChannelSchedule } from "./tv-channel";
 
 export interface Env {
@@ -10,6 +12,7 @@ export interface Env {
   CONFIG_SECRET?: string;
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
+  MOVIE_ROTATION_SEED?: string;
 }
 
 const jsonHeaders = {
@@ -254,6 +257,7 @@ export default {
     if (request.method === "GET" && path === "/") return html(homePage());
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
     if (request.method === "GET" && path === "/assets/movie-channel.svg") return channelPoster("movie");
+    if (request.method === "GET" && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
 
     if (request.method === "POST" && path === "/api/households") {
       const pin = await parsePin(request);
@@ -371,15 +375,42 @@ export default {
       return json(tvChannelMetadata(schedule, url.origin), 200, { "cache-control": "no-store" });
     }
 
-    const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/series\/([^/]+)\.json$/);
+    const movieMetaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/movie\/([^/]+)\.json$/);
+    if (request.method === "GET" && movieMetaMatch) {
+      const household = await findHousehold(env.DB, movieMetaMatch[1]);
+      if (!household) return json({ error: "Household not found." }, 404);
+      if (decodedPathSegment(movieMetaMatch[2]) !== MOVIE_CHANNEL_ID) return json({ meta: null });
+      const programme = await movieChannelProgramme(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+      return json(movieChannelMetadata(programme, url.origin), 200, { "cache-control": "no-store" });
+    }
+
+    const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);
     if (request.method === "GET" && streamMatch) {
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return json({ error: "Household not found." }, 404);
-      const episodeId = decodedPathSegment(streamMatch[2]);
-      if (episodeId) await requestTvProgramme(env.DB, household.id, episodeId, env.TV_SCHEDULE_SEED);
-      // Kids Channels observes schedule movement here. A separately installed provider supplies
-      // the playable stream and must place bingeGroup on that stream object.
-      return json({ streams: [] }, 200, { "cache-control": "no-store" });
+      const videoId = decodedPathSegment(streamMatch[3]);
+      if (streamMatch[2] === "series") {
+        if (videoId) await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+        // Kids Channels observes schedule movement here. A separately installed provider supplies
+        // the playable stream and must place bingeGroup on that stream object.
+        return json({ streams: [] }, 200, { "cache-control": "no-store" });
+      }
+
+      const signOff = videoId ? parseSignOffId(videoId) : null;
+      if (!signOff) {
+        // Canonical IMDb identity lets installed providers own movie playback and subtitles.
+        return json({ streams: [] }, 200, { "cache-control": "no-store" });
+      }
+      await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
+      return json({ streams: [{
+        name: "Kids Channels",
+        description: "Five-second sign-off",
+        url: `${url.origin}/assets/movie-sign-off.mp4`,
+        behaviorHints: {
+          bingeGroup: "kids-channels-movie-sign-off",
+          filename: "kids-channels-sign-off.mp4",
+        },
+      }] }, 200, { "cache-control": "no-store" });
     }
 
     return json({ error: "Not found." }, 404);

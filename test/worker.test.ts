@@ -50,7 +50,24 @@ beforeEach(async () => {
     target_position INTEGER NOT NULL, owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
     PRIMARY KEY (household_id, channel, from_position)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_state (
+    household_id TEXT PRIMARY KEY NOT NULL, cycle INTEGER NOT NULL, current_position INTEGER NOT NULL,
+    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_rotation (
+    household_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
+    programme_id TEXT NOT NULL, consumed_at TEXT,
+    PRIMARY KEY (household_id, cycle, position), UNIQUE (household_id, cycle, programme_id)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_advancements (
+    household_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
+    owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, cycle, position)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM movie_advancements").run();
+  await env.DB.prepare("DELETE FROM movie_rotation").run();
+  await env.DB.prepare("DELETE FROM movie_channel_state").run();
   await env.DB.prepare("DELETE FROM channel_advancements").run();
   await env.DB.prepare("DELETE FROM channel_schedule").run();
   await env.DB.prepare("DELETE FROM channel_state").run();
@@ -396,6 +413,104 @@ describe("rolling TV Channel Schedule", () => {
   });
 });
 
+describe("Movie Channel rotation and sign-off", () => {
+  async function arrangeMovies(count = 3) {
+    const created = await create();
+    const now = new Date().toISOString();
+    await env.DB.batch(Array.from({ length: count }, (_, index) => env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, description, poster, genres_json, approved_at)
+      VALUES (?, ?, ?, 'movie', ?, ?, ?, '[]', ?)`)
+      .bind(`movie-${index + 1}`, created.householdId, `tt800000${index + 1}`, `Movie ${index + 1}`,
+        `Approved movie ${index + 1}.`, `https://images.example/movie-${index + 1}.jpg`, `${now}-${index}`)));
+    return { created, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
+  }
+
+  async function metadata(base: string) {
+    return (await SELF.fetch(`${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`)).json<any>();
+  }
+
+  it("keeps an interrupted canonical movie current and delegates its streams and subtitles to installed addons", async () => {
+    const { base } = await arrangeMovies();
+    const first = await metadata(base);
+    const currentId = first.meta.behaviorHints.defaultVideoId;
+    expect(currentId).toMatch(/^tt800000[1-3]$/);
+    expect(first.meta).toMatchObject({ id: "kids-channels:movie", type: "movie" });
+    expect(first.meta.videos[0]).toMatchObject({ id: currentId, title: expect.stringMatching(/^Movie/) });
+
+    const observer = await SELF.fetch(`${base}/stream/movie/${currentId}.json`);
+    expect(await observer.json()).toEqual({ streams: [] });
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(currentId);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_advancements").first()).toMatchObject({ count: 0 });
+  });
+
+  it("consumes each movie once through Next/sign-off requests, then begins a new shuffled cycle", async () => {
+    const { base } = await arrangeMovies();
+    const selected: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const before = await metadata(base);
+      selected.push(before.meta.behaviorHints.defaultVideoId);
+      const signOff = before.meta.videos[1];
+      expect(signOff).toMatchObject({ title: "Kids Channels sign-off", episode: 2 });
+      const response = await SELF.fetch(`${base}/stream/movie/${encodeURIComponent(signOff.id)}.json`);
+      const body = await response.json<any>();
+      expect(body.streams[0]).toMatchObject({
+        url: "https://kids.test/assets/movie-sign-off.mp4",
+        behaviorHints: { filename: "kids-channels-sign-off.mp4" },
+      });
+    }
+    expect(new Set(selected).size).toBe(3);
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toMatch(/^tt800000[1-3]$/);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE cycle = 0 AND consumed_at IS NOT NULL").first())
+      .toMatchObject({ count: 3 });
+  });
+
+  it("adds a newly approved movie to the unplayed rotation before any movie repeats", async () => {
+    const { created, base } = await arrangeMovies(2);
+    const first = await metadata(base);
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+      VALUES ('movie-3', ?, 'tt8000003', 'movie', 'Movie 3', '[]', ?)`).bind(created.householdId, now).run();
+
+    const selected: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const current = index === 0 ? first : await metadata(base);
+      selected.push(current.meta.behaviorHints.defaultVideoId);
+      await SELF.fetch(`${base}/stream/movie/${encodeURIComponent(current.meta.videos[1].id)}.json`);
+    }
+    expect(new Set(selected)).toEqual(new Set(["tt8000001", "tt8000002", "tt8000003"]));
+  });
+
+  it("advances a shared rotation only once under concurrent sign-off requests and leaves sign-off final", async () => {
+    const { base } = await arrangeMovies();
+    const before = await metadata(base);
+    const currentId = before.meta.behaviorHints.defaultVideoId;
+    const signOffId = before.meta.videos[1].id;
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      SELF.fetch(`${base}/stream/movie/${encodeURIComponent(signOffId)}.json`)));
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).not.toBe(currentId);
+    expect(after.meta.videos).toHaveLength(2);
+    expect(after.meta.videos[1].title).toBe("Kids Channels sign-off");
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_advancements").first()).toMatchObject({ count: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE consumed_at IS NOT NULL").first()).toMatchObject({ count: 1 });
+  });
+
+  it("serves an approximately five-second H.264 sign-off with silent AAC audio and byte ranges", async () => {
+    const full = await SELF.fetch("https://kids.test/assets/movie-sign-off.mp4");
+    expect(full.status).toBe(200);
+    expect(full.headers.get("content-type")).toBe("video/mp4");
+    expect(Number(full.headers.get("content-length"))).toBeGreaterThan(10_000);
+
+    const range = await SELF.fetch("https://kids.test/assets/movie-sign-off.mp4", { headers: { range: "bytes=0-99" } });
+    expect(range.status).toBe(206);
+    expect(range.headers.get("content-range")).toMatch(/^bytes 0-99\/\d+$/);
+    expect((await range.arrayBuffer()).byteLength).toBe(100);
+  });
+});
+
 describe("Stremio protocol", () => {
   it("serves a configurable household-specific manifest", async () => {
     const created = await create();
@@ -404,7 +519,7 @@ describe("Stremio protocol", () => {
 
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(manifest).toMatchObject({
-      version: "0.3.1",
+      version: "0.4.0",
       name: "Kids Channels",
       resources: ["catalog", "meta", "stream"],
       types: ["series", "movie"],

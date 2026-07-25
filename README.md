@@ -33,7 +33,7 @@ pnpm test:browser
 # Or run both suites with: pnpm test:all
 ```
 
-The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, deterministic rolling scheduling, concurrent advancement, and catalog-to-canonical-episode metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
+The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, deterministic rolling scheduling, shuffled movie rotation, concurrent advancement, sign-off delivery, and canonical programme metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
 Manual protocol-gate results are recorded in [`docs/first-playback-feasibility.md`](docs/first-playback-feasibility.md) and [`docs/continuous-tv-feasibility.md`](docs/continuous-tv-feasibility.md).
 
@@ -69,3 +69,6 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
 - `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
 - `GET /addons/:secret/stream/series/:episodeId.json` — observe Current/later programme requests, atomically advance when needed, and delegate playable streams to installed client addons
+- `GET /addons/:secret/meta/movie/kids-channels:movie.json` — the canonical Current Programme followed only by its final sign-off
+- `GET /addons/:secret/stream/movie/:videoId.json` — delegate canonical movies to installed addons or consume the movie and return the five-second sign-off
+- `GET /assets/movie-sign-off.mp4` — branded H.264 still with a five-second silent AAC track and byte-range support

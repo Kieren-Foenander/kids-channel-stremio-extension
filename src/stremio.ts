@@ -1,3 +1,4 @@
+import { MOVIE_CHANNEL_ID, type MovieProgramme } from "./movie-channel";
 import type { TvScheduledProgramme } from "./tv-channel";
 
 export const TV_CATALOG_ID = "kids-tv-channel";
@@ -12,7 +13,7 @@ export interface HouseholdIdentity {
 export function manifestFor(household: HouseholdIdentity) {
   return {
     id: `community.kids-channels.${household.id}`,
-    version: "0.3.1",
+    version: "0.4.0",
     name: "Kids Channels",
     description: "Two parent-curated Channels for the household.",
     resources: ["catalog", "meta", "stream"],
@@ -55,6 +56,41 @@ export function tvChannelMetadata(schedule: TvScheduledProgramme[], origin: stri
   };
 }
 
+export function movieChannelMetadata(programme: MovieProgramme | null, origin: string) {
+  if (!programme) return { meta: null };
+  return {
+    meta: {
+      id: MOVIE_CHANNEL_ID,
+      type: "movie",
+      name: "Movie Channel",
+      description: `Current Programme: ${programme.title}. The Channel stops after a short sign-off.`,
+      poster: programme.poster ?? `${origin}/assets/movie-channel.svg`,
+      posterShape: programme.poster ? "poster" : "square",
+      background: programme.background,
+      releaseInfo: programme.releaseInfo,
+      behaviorHints: { defaultVideoId: programme.imdbId },
+      videos: [
+        {
+          id: programme.imdbId,
+          title: programme.title,
+          released: programme.approvedAt,
+          season: 1,
+          episode: 1,
+          overview: programme.description,
+        },
+        {
+          id: programme.signOffId,
+          title: "Kids Channels sign-off",
+          released: programme.approvedAt,
+          season: 1,
+          episode: 2,
+          overview: "A five-second sign-off. Playback stops when it finishes.",
+        },
+      ],
+    },
+  };
+}
+
 export function catalogFor(type: string, id: string, origin: string) {
   if (type === "series" && id === TV_CATALOG_ID) {
     return {
@@ -75,7 +111,7 @@ export function catalogFor(type: string, id: string, origin: string) {
     return {
       metas: [
         {
-          id: "kids-channels:movie",
+          id: MOVIE_CHANNEL_ID,
           type: "movie",
           name: "Movie Channel",
           description: "Your household's approved movies, without repeats.",
