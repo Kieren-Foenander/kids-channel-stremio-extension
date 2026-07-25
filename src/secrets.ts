@@ -21,22 +21,22 @@ async function keyMaterial(secret: string): Promise<ArrayBuffer> {
   return crypto.subtle.digest("SHA-256", encoder.encode(secret));
 }
 
-export async function issueParentToken(householdId: string, secret: string, now = Date.now()): Promise<string> {
-  const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: now + 60 * 60 * 1000 })));
+export async function issueParentToken(householdId: string, authVersion: number, secret: string, now = Date.now()): Promise<string> {
+  const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: now + 60 * 60 * 1000, authVersion })));
   const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`${householdId}.${payload}`));
   return `${payload}.${toBase64Url(signature)}`;
 }
 
-export async function verifyParentToken(token: string, householdId: string, secret: string, now = Date.now()): Promise<boolean> {
+export async function verifyParentToken(token: string, householdId: string, authVersion: number, secret: string, now = Date.now()): Promise<boolean> {
   try {
     const [payload, signature, extra] = token.split(".");
     if (!payload || !signature || extra) return false;
     const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
     const valid = await crypto.subtle.verify("HMAC", key, fromBase64Url(signature), encoder.encode(`${householdId}.${payload}`));
     if (!valid) return false;
-    const parsed = JSON.parse(decoder.decode(fromBase64Url(payload))) as { expiresAt?: unknown };
-    return typeof parsed.expiresAt === "number" && parsed.expiresAt > now;
+    const parsed = JSON.parse(decoder.decode(fromBase64Url(payload))) as { expiresAt?: unknown; authVersion?: unknown };
+    return typeof parsed.expiresAt === "number" && parsed.expiresAt > now && parsed.authVersion === authVersion;
   } catch {
     return false;
   }
