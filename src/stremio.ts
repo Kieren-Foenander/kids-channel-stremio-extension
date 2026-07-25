@@ -3,7 +3,6 @@ import type { TvScheduledProgramme } from "./tv-channel";
 export const TV_CATALOG_ID = "kids-tv-channel";
 export const MOVIE_CATALOG_ID = "kids-movie-channel";
 export const TV_CHANNEL_ID = "kids-channels:tv";
-export const TV_BINGE_GROUP = "kids-channels-tv";
 
 export interface HouseholdIdentity {
   id: string;
@@ -13,7 +12,7 @@ export interface HouseholdIdentity {
 export function manifestFor(household: HouseholdIdentity) {
   return {
     id: `community.kids-channels.${household.id}`,
-    version: "0.3.0",
+    version: "0.3.1",
     name: "Kids Channels",
     description: "Two parent-curated Channels for the household.",
     resources: ["catalog", "meta", "stream"],

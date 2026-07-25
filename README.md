@@ -35,6 +35,8 @@ pnpm test:browser
 
 The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, deterministic rolling scheduling, concurrent advancement, and catalog-to-canonical-episode metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
+Manual protocol-gate results are recorded in [`docs/first-playback-feasibility.md`](docs/first-playback-feasibility.md) and [`docs/continuous-tv-feasibility.md`](docs/continuous-tv-feasibility.md).
+
 ## Deploy
 
 Create the production D1 database once:

@@ -2,7 +2,7 @@ import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./appro
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
 import { issueParentToken, verifyParentToken } from "./secrets";
-import { catalogFor, manifestFor, TV_BINGE_GROUP, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import { requestTvProgramme, tvChannelSchedule } from "./tv-channel";
 
 export interface Env {
@@ -17,8 +17,11 @@ const jsonHeaders = {
   "access-control-allow-origin": "*",
 };
 
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), { status, headers: jsonHeaders });
+function json(value: unknown, status = 200, headers?: HeadersInit): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { ...jsonHeaders, ...headers },
+  });
 }
 
 function html(body: string, status = 200): Response {
@@ -365,7 +368,7 @@ export default {
       if (!household) return json({ error: "Household not found." }, 404);
       if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return json({ meta: null });
       const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
-      return json(tvChannelMetadata(schedule, url.origin));
+      return json(tvChannelMetadata(schedule, url.origin), 200, { "cache-control": "no-store" });
     }
 
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/series\/([^/]+)\.json$/);
@@ -375,8 +378,8 @@ export default {
       const episodeId = decodedPathSegment(streamMatch[2]);
       if (episodeId) await requestTvProgramme(env.DB, household.id, episodeId, env.TV_SCHEDULE_SEED);
       // Kids Channels observes schedule movement here. A separately installed provider supplies
-      // the playable stream and its matching bingeGroup in the Stremio client context.
-      return json({ streams: [], behaviorHints: { bingeGroup: TV_BINGE_GROUP } });
+      // the playable stream and must place bingeGroup on that stream object.
+      return json({ streams: [] }, 200, { "cache-control": "no-store" });
     }
 
     return json({ error: "Not found." }, 404);
