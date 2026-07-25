@@ -30,6 +30,12 @@ ADR 0004 exposes TV Channel as a standard Stremio `series` catalog and metadata 
 
 This preserves canonical resume and subtitle identity and keeps provider credentials and media outside Cloudflare. The protocol does not let Kids Channels inspect or select another addon's responses, so Comet should be configured for cached-only 1080p output with one result per resolution.
 
-## Client gate status
+## Client gate result
 
-The redesigned manifest must now be reinstalled and observed on desktop and Fire TV. Confirm whether Stremio requests installed-provider streams for the canonical default episode, whether one-result Comet configuration minimizes the stream picker, and whether playback, resume, and subtitles work before closing #6.
+**Passed with a documented protocol exception.** After removing the old addon, restarting Stremio, and installing manifest v0.2.0, the Channel appeared through the shared Stremio account and played successfully on the household Fire Stick. Stremio requested the canonical episode from the separately installed stream provider without the prior IP mismatch.
+
+Initial playback required selecting the provider stream once. Reopening interrupted playback went directly into the episode and resumed at the saved position. Subtitle discovery matched the canonical episode. This proves that canonical identity supports client-side provider aggregation, Viewing Progress, and subtitles.
+
+Kids Channels cannot satisfy the original requirement to choose another addon's stream automatically because the Stremio addon protocol does not expose installed-addon responses to other addons. The accepted redesign delegates that first stream choice to Stremio and removes server-side provider selection. Configuring Comet for a single cached 1080p result minimizes the choice without proxying provider or media traffic through Cloudflare.
+
+The detail experience necessarily exposes the canonical current show and episode. With only Bluey approved in this slice, it therefore appears that Bluey itself was selected. Continuous rotation across approved shows and stronger Channel continuity belong to issue #7; Channel presentation must not replace the canonical video identity needed for providers, resume, and subtitles.
