@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
+async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByLabel("Choose a six-digit Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Create Household" }).click();
@@ -11,6 +11,10 @@ test("a Parent searches Cinemeta and approves a movie and a show from another st
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();
   await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+}
+
+test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
+  await unlockHousehold(page);
 
   const search = async () => {
     await page.getByLabel("Search Cinemeta for shows and movies").fill("Example");

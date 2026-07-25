@@ -2,9 +2,7 @@ import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./appro
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import { tvCurrentProgramme } from "./current-programme";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
-import { decryptedManifestUrl, providerConfiguration, saveProviderConfiguration } from "./provider-config";
 import { issueParentToken, verifyParentToken } from "./secrets";
-import { parseTorrentioManifestUrl, TorrentioProvider } from "./stream-provider";
 import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 
 export interface Env {
@@ -137,13 +135,7 @@ function parentPage(secret: string): string {
       <div id="search-results"></div>
       <h2>Approved Library</h2>
       <div id="library"><p>No programmes approved yet.</p></div>
-      <form id="provider-form">
-        <label for="manifest-url">Torrentio manifest URL</label>
-        <input id="manifest-url" name="manifestUrl" type="url" placeholder="https://…/manifest.json" autocomplete="off" required>
-        <p class="notice">This URL contains credentials. It is encrypted when saved and will not be shown again.</p>
-        <button type="submit">Save and validate Torrentio</button>
-        <p id="provider-result" role="status"></p>
-      </form>
+      <p class="notice">Install and configure a stream addon such as Comet in Stremio. Kids Channels selects the programme; Stremio resolves streams on your device.</p>
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
@@ -205,7 +197,6 @@ function parentPage(secret: string): string {
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
         parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
-        document.querySelector('#provider-result').textContent = result.provider.configured ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'Torrentio is not configured.';
         form.hidden = true; document.querySelector('#result').hidden = false; await loadLibrary();
       });
       document.querySelector('#search-form').addEventListener('submit', async (event) => {
@@ -216,11 +207,6 @@ function parentPage(secret: string): string {
         if (!response.ok) { status.textContent = result.error; return; }
         status.textContent = result.results.length ? result.results.length + ' results' : 'No matching shows or movies.';
         result.results.forEach(programme => output.append(showSearchResult(programme)));
-      });
-      document.querySelector('#provider-form').addEventListener('submit', async (event) => {
-        event.preventDefault(); const output = document.querySelector('#provider-result'); output.textContent = 'Checking Torrentio manifest and a representative stream…';
-        const response = await fetch('/api/households/${secret}/provider', { method: 'PUT', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({manifestUrl: new FormData(event.currentTarget).get('manifestUrl')}) });
-        const result = await response.json(); output.textContent = response.ok ? result.validation.message : result.error; if (response.ok) event.currentTarget.reset();
       });
     </script>`);
 }
@@ -283,27 +269,7 @@ export default {
       return json({
         ...installDetails(url.origin, unlockMatch[1]),
         parentToken: await issueParentToken(household.id, env.CONFIG_SECRET),
-        provider: await providerConfiguration(env.DB, household.id),
       });
-    }
-
-    const providerMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/provider$/);
-    if (request.method === "PUT" && providerMatch) {
-      const household = await findHousehold(env.DB, providerMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
-        return json({ error: "Parent authentication is required." }, 401);
-      }
-      let manifestValue: unknown;
-      try {
-        manifestValue = ((await request.json()) as { manifestUrl?: unknown }).manifestUrl;
-      } catch {
-        // Invalid JSON is handled as an invalid endpoint without reflecting request content.
-      }
-      const manifestUrl = parseTorrentioManifestUrl(manifestValue);
-      if (!manifestUrl) return json({ error: "Enter a valid HTTPS Torrentio manifest URL ending in /manifest.json." }, 400);
-      const validation = await new TorrentioProvider(manifestUrl).validate();
-      const saved = await saveProviderConfiguration(env.DB, household.id, manifestUrl.toString(), env.CONFIG_SECRET, validation);
-      return json(saved);
     }
 
     const searchMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/search$/);
@@ -392,7 +358,7 @@ export default {
       return catalog ? json(catalog) : json({ metas: [] });
     }
 
-    const metaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/tv\/([^/]+)\.json$/);
+    const metaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/series\/([^/]+)\.json$/);
     if (request.method === "GET" && metaMatch) {
       const household = await findHousehold(env.DB, metaMatch[1]);
       if (!household) return json({ error: "Household not found." }, 404);
@@ -400,24 +366,6 @@ export default {
       return json(tvChannelMetadata(await tvCurrentProgramme(env.DB, household.id)));
     }
 
-    const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/tv\/([^/]+)\.json$/);
-    if (request.method === "GET" && streamMatch) {
-      const household = await findHousehold(env.DB, streamMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
-      const current = await tvCurrentProgramme(env.DB, household.id);
-      const episodeId = decodedPathSegment(streamMatch[2]);
-      if (!current || current.episode.id !== episodeId || !env.CONFIG_SECRET) return json({ streams: [] });
-
-      try {
-        const manifestUrl = await decryptedManifestUrl(env.DB, household.id, env.CONFIG_SECRET);
-        if (!manifestUrl) return json({ streams: [] });
-        const provider = new TorrentioProvider(new URL(manifestUrl));
-        const selected = provider.firstAcceptable(await provider.streams("series", current.episode.id));
-        return json({ streams: selected ? [selected] : [] });
-      } catch {
-        return json({ streams: [] });
-      }
-    }
 
     return json({ error: "Not found." }, 404);
   },

@@ -21,27 +21,6 @@ async function keyMaterial(secret: string): Promise<ArrayBuffer> {
   return crypto.subtle.digest("SHA-256", encoder.encode(secret));
 }
 
-export async function encryptCredential(value: string, secret: string, householdId: string): Promise<{ ciphertext: string; nonce: string }> {
-  const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), "AES-GCM", false, ["encrypt"]);
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: nonce, additionalData: encoder.encode(householdId) },
-    key,
-    encoder.encode(value),
-  );
-  return { ciphertext: toBase64Url(ciphertext), nonce: toBase64Url(nonce) };
-}
-
-export async function decryptCredential(ciphertext: string, nonce: string, secret: string, householdId: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), "AES-GCM", false, ["decrypt"]);
-  const plaintext = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: fromBase64Url(nonce), additionalData: encoder.encode(householdId) },
-    key,
-    fromBase64Url(ciphertext),
-  );
-  return decoder.decode(plaintext);
-}
-
 export async function issueParentToken(householdId: string, secret: string, now = Date.now()): Promise<string> {
   const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: now + 60 * 60 * 1000 })));
   const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);

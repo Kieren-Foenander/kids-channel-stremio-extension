@@ -7,7 +7,7 @@
     {
       "binding": "DB",
       "database_name": "kids-channels",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "5cec8cc9-661f-407a-9d0c-653c7f6df3a4",
       "migrations_dir": "migrations"
     }
   ],
