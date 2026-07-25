@@ -5,7 +5,14 @@ import { movieChannelProgramme, MOVIE_CHANNEL_ID, parseSignOffId, reconcileMovie
 import { issueParentToken, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
-import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "./tv-channel";
+import {
+  parentTvChannelState,
+  refreshTvChannelSchedule,
+  requestTvProgramme,
+  setShowProgress,
+  tvChannelSchedule,
+  undoLatestTvAdvancement,
+} from "./tv-channel";
 
 export interface Env {
   DB: D1Database;
@@ -64,6 +71,7 @@ function shell(content: string, title = "Kids Channels"): string {
     .programme h3 { margin: 0; } .programme p { margin: .35rem 0; }
     .programme button { width: auto; min-height: 2.5rem; margin-top: .5rem; }
     .eyebrow { color: #65d6ad; font-size: .8rem; font-weight: 800; text-transform: uppercase; }
+    .channel-list { padding-left: 1.5rem; } .channel-list li { margin: .65rem 0; color: #cbd0ea; }
     [hidden] { display: none !important; }
   </style>
 </head>
@@ -140,6 +148,14 @@ function parentPage(secret: string): string {
         <p id="search-status" role="status"></p>
       </form>
       <div id="search-results"></div>
+      <h2>TV Channel</h2>
+      <p id="tv-current">No Current Programme.</p>
+      <button id="undo-tv" type="button" class="secondary" hidden>Undo most recent advancement</button>
+      <h3>Channel Schedule</h3>
+      <ol id="tv-schedule" class="channel-list"><li>No programmes scheduled.</li></ol>
+      <h3>Recently played</h3>
+      <ol id="tv-history" class="channel-list"><li>No recent playback.</li></ol>
+      <p id="tv-status" role="status"></p>
       <h2>Approved Library</h2>
       <p class="notice">Stremio keeps Channel details in memory. After changing the Approved Library or regenerating selections, fully close and reopen Stremio to load the updated Channel.</p>
       <button id="regenerate-tv" type="button" class="secondary">Regenerate upcoming TV selections</button>
@@ -160,9 +176,18 @@ function parentPage(secret: string): string {
         const metadata = document.createElement('p'); metadata.textContent = [programme.releaseInfo, (programme.genres || []).join(', '), programme.imdbRating ? 'IMDb ' + programme.imdbRating : ''].filter(Boolean).join(' · ');
         const description = document.createElement('p'); description.textContent = programme.description || 'No description available.';
         details.append(kind, heading, metadata, description);
-        if (approved && programme.showProgress) {
-          const progress = document.createElement('p'); progress.textContent = 'Starts at S' + String(programme.showProgress.season).padStart(2, '0') + 'E' + String(programme.showProgress.episode).padStart(2, '0') + ' — ' + programme.showProgress.title;
-          details.append(progress);
+        if (approved && programme.type === 'show') {
+          const progress = document.createElement('p');
+          progress.textContent = programme.showProgress
+            ? 'Show Progress: ' + episodeLabel(programme.showProgress)
+            : 'Finished';
+          const episode = document.createElement('select'); episode.setAttribute('aria-label', 'Next episode for ' + programme.title);
+          programme.episodes.forEach(item => { const option = document.createElement('option'); option.value = item.id; option.textContent = episodeLabel(item); episode.append(option); });
+          episode.value = programme.showProgress?.id || programme.episodes[0]?.id || '';
+          const correct = document.createElement('button'); correct.type = 'button';
+          correct.textContent = programme.showProgress ? 'Set Show Progress' : 'Restart show';
+          correct.addEventListener('click', () => correctProgress(programme.id, episode.value, correct));
+          details.append(progress, episode, correct);
         }
         if (approved) {
           if (programme.type === 'show') {
@@ -177,6 +202,25 @@ function parentPage(secret: string): string {
         }
         card.append(image, details); return {card, details};
       }
+      function episodeLabel(episode) {
+        return 'S' + String(episode.season).padStart(2, '0') + 'E' + String(episode.episode).padStart(2, '0') + ' — ' + episode.title;
+      }
+      async function loadTvState() {
+        const response = await fetch('/api/households/${secret}/tv-state', {headers: headers()});
+        const result = await response.json(); if (!response.ok) return;
+        document.querySelector('#tv-current').textContent = result.current
+          ? result.current.showTitle + ' — ' + episodeLabel(result.current.episode)
+          : 'No Current Programme.';
+        const schedule = document.querySelector('#tv-schedule'); schedule.replaceChildren();
+        (result.schedule.length ? result.schedule : [{empty: 'No programmes scheduled.'}]).forEach(item => {
+          const row = document.createElement('li'); row.textContent = item.empty || item.showTitle + ' — ' + episodeLabel(item.episode); schedule.append(row);
+        });
+        const history = document.querySelector('#tv-history'); history.replaceChildren();
+        (result.recentPlayback.length ? result.recentPlayback : [{empty: 'No recent playback.'}]).forEach(item => {
+          const row = document.createElement('li'); row.textContent = item.empty || item.showTitle + ' — ' + episodeLabel(item.episode); history.append(row);
+        });
+        document.querySelector('#undo-tv').hidden = !result.canUndo;
+      }
       async function loadLibrary() {
         const response = await fetch('/api/households/${secret}/library', {headers: headers()});
         const result = await response.json(); const output = document.querySelector('#library'); output.replaceChildren();
@@ -190,14 +234,23 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
-        document.querySelector('#library-status').textContent = result.message; await loadLibrary();
+        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState()]);
+      }
+      async function correctProgress(programmeId, videoId, button) {
+        button.disabled = true;
+        const response = await fetch('/api/households/${secret}/library/' + encodeURIComponent(programmeId) + '/progress', {
+          method: 'PATCH', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({videoId})
+        });
+        const result = await response.json(); button.disabled = false;
+        document.querySelector('#library-status').textContent = response.ok ? result.message : result.error;
+        if (response.ok) await Promise.all([loadLibrary(), loadTvState()]);
       }
       async function removeProgramme(programmeId, button) {
         button.disabled = true;
         const response = await fetch('/api/households/${secret}/library/' + encodeURIComponent(programmeId), {method: 'DELETE', headers: headers()});
         const result = await response.json();
         if (!response.ok) { button.disabled = false; document.querySelector('#library-status').textContent = result.error; return; }
-        document.querySelector('#library-status').textContent = result.message; await loadLibrary();
+        document.querySelector('#library-status').textContent = result.message; await Promise.all([loadLibrary(), loadTvState()]);
       }
       async function approve(programme, startingEpisodeId, button) {
         button.disabled = true;
@@ -207,7 +260,7 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { button.disabled = false; button.textContent = result.error; return; }
-        button.textContent = 'Approved'; await loadLibrary();
+        button.textContent = 'Approved'; await Promise.all([loadLibrary(), loadTvState()]);
       }
       function showSearchResult(programme) {
         const built = programmeCard(programme, false); const button = document.createElement('button');
@@ -234,13 +287,21 @@ function parentPage(secret: string): string {
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
         parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
-        form.hidden = true; document.querySelector('#result').hidden = false; await loadLibrary();
+        form.hidden = true; document.querySelector('#result').hidden = false; await Promise.all([loadLibrary(), loadTvState()]);
       });
       document.querySelector('#regenerate-tv').addEventListener('click', async (event) => {
         const button = event.currentTarget; button.disabled = true;
         const response = await fetch('/api/households/${secret}/tv-schedule/regenerate', {method: 'POST', headers: headers()});
         const result = await response.json(); button.disabled = false;
         document.querySelector('#library-status').textContent = response.ok ? result.message : result.error;
+        if (response.ok) await loadTvState();
+      });
+      document.querySelector('#undo-tv').addEventListener('click', async (event) => {
+        const button = event.currentTarget; button.disabled = true;
+        const response = await fetch('/api/households/${secret}/tv-schedule/undo', {method: 'POST', headers: headers()});
+        const result = await response.json(); button.disabled = false;
+        document.querySelector('#tv-status').textContent = response.ok ? result.message : result.error;
+        if (response.ok) await Promise.all([loadLibrary(), loadTvState()]);
       });
       document.querySelector('#search-form').addEventListener('submit', async (event) => {
         event.preventDefault(); const status = document.querySelector('#search-status'); status.textContent = 'Searching Cinemeta…';
@@ -287,7 +348,7 @@ export default {
     const path = url.pathname;
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...jsonHeaders, "access-control-allow-methods": "GET, POST, PUT, OPTIONS", "access-control-allow-headers": "content-type, authorization" } });
+      return new Response(null, { status: 204, headers: { ...jsonHeaders, "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "content-type, authorization" } });
     }
 
     if (request.method === "GET" && path === "/") return html(homePage());
@@ -418,6 +479,46 @@ export default {
         await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
       }
       return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
+    }
+
+    const tvStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-state$/);
+    if (request.method === "GET" && tvStateMatch) {
+      const household = await findHousehold(env.DB, tvStateMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      return json(await parentTvChannelState(env.DB, household.id, env.TV_SCHEDULE_SEED));
+    }
+
+    const progressMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)\/progress$/);
+    if (request.method === "PATCH" && progressMatch) {
+      const household = await findHousehold(env.DB, progressMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      let input: { videoId?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (typeof input.videoId !== "string") return json({ error: "Choose a valid regular released episode." }, 400);
+      try {
+        await setShowProgress(env.DB, household.id, progressMatch[2], input.videoId, env.TV_SCHEDULE_SEED);
+      } catch (error) {
+        if (error instanceof Error && error.message === "episode is invalid") {
+          return json({ error: "Choose a valid regular released episode for this show." }, 400);
+        }
+        throw error;
+      }
+      return json({ message: "Show Progress corrected and incompatible future selections repaired. The active stream was not interrupted. Restart Stremio to refresh the Channel." });
+    }
+
+    const undoMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/undo$/);
+    if (request.method === "POST" && undoMatch) {
+      const household = await findHousehold(env.DB, undoMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      const undone = await undoLatestTvAdvancement(env.DB, household.id, env.TV_SCHEDULE_SEED);
+      if (!undone) return json({ error: "There is no latest TV advancement to undo." }, 409);
+      return json({ message: "Most recent advancement undone without changing later corrections to other shows. The active stream was not interrupted. Restart Stremio to refresh the Channel." });
     }
 
     const regenerateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/regenerate$/);
