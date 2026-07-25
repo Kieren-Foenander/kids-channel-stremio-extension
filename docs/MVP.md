@@ -2,7 +2,7 @@
 
 ## Goal
 
-Give children a parent-curated Stremio experience resembling traditional television: choose the TV Channel or Movie Channel, then watch without choosing a title or stream.
+Give children a parent-curated Stremio experience resembling traditional television: choose the TV Channel or Movie Channel, then receive the scheduled title without browsing the wider catalog. Stremio may require selecting the configured provider source when a programme changes.
 
 The household rule—not technical restrictions—keeps children out of Stremio's other content.
 
@@ -11,6 +11,7 @@ The household rule—not technical restrictions—keeps children out of Stremio'
 - One Household shares Channel state across Stremio devices.
 - The addon is configured and installed on desktop, then syncs through the same Stremio account to Fire TV.
 - Stremio may show a detail page requiring one Play action if Fire TV cannot start directly from a Channel tile.
+- Stremio may show its source screen at programme transitions; selecting the configured provider source is an accepted protocol-imposed action.
 - Upcoming TV programmes may be visible and selectable. Selecting a distant programme skips bypassed programmes; the Parent can correct Show Progress.
 
 ## Parent Page
@@ -60,8 +61,8 @@ If installed stream addons return no results for the current episode, preserve C
 - Expose Channels through standard Stremio `series` and `movie` types.
 - Set the canonical Current Programme video ID as `behaviorHints.defaultVideoId`.
 - Let Stremio request streams from separately installed addons on the playback device.
-- Recommend configuring Comet for cached-only 1080p results and preferred release/language ordering.
-- Kids Channels does not inspect, filter, rank, resolve, or proxy provider streams.
+- Recommend configuring Comet for cached-only 1080p results, preferred release/language ordering, and as few results as practical.
+- Kids Channels does not inspect, filter, rank, resolve, or proxy provider streams, and cannot select another addon's result or control Stremio's source screen.
 - Subtitle preferences and stream-provider failures remain Stremio client concerns.
 
 ## Deployment and security
@@ -78,16 +79,16 @@ If installed stream addons return no results for the current episode, preserve C
 Before polishing the Parent Page, prove on Fire TV that:
 
 1. A Channel tile can start with no interaction beyond a protocol-imposed Play action.
-2. A separately installed Comet addon limited to one cached 1080p result avoids or minimizes the stream picker.
+2. A separately installed Comet addon limited to one cached 1080p result minimizes the source choice; a source prompt at programme transitions is accepted.
 3. Canonical IDs preserve resume positions.
-4. Next moves to a programme from another show.
-5. Natural completion autoplays a programme from another show.
-6. A stable `bingeGroup` preserves automatic stream selection.
+4. Next moves to a programme from another show, after source selection when required.
+5. Natural completion selects the next programme from another show, though Stremio may wait for source selection.
+6. Provider-owned `bingeGroup` behavior is an optional optimization, not an MVP gate.
 7. Stremio caching does not prevent rolling schedule updates.
 8. The movie sign-off marks completion and stops cleanly.
 9. Reopening an interrupted programme resumes it.
 
-Any failed criterion requires redesign before the remaining Parent Page is built.
+The completed Fire TV gates and accepted protocol exceptions are documented in `first-playback-feasibility.md` and `continuous-tv-feasibility.md` before the remaining Parent Page is built.
 
 ## Deferred
 
