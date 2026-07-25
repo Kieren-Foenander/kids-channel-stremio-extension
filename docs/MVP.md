@@ -19,7 +19,7 @@ A Parent can:
 
 - Create a Household and install its secret addon URL.
 - Protect changes with a six-digit PIN.
-- enter and validate a configured Torrentio manifest URL.
+- enter and validate a configured Comet manifest URL.
 - Search Cinemeta for shows and movies.
 - Manage the Approved Library.
 - Choose a show's starting episode, defaulting to S01E01.
@@ -57,20 +57,20 @@ If an expected episode has no acceptable cached stream, leave it as the show's n
 
 - Cinemeta supplies title search, canonical IMDb IDs, posters, seasons, and episodes.
 - Canonical video IDs are preserved so Stremio can associate Viewing Progress and subtitle results.
-- The Household's configured Torrentio endpoint is the first and only MVP stream provider.
-- Torrentio remains behind an internal stream-provider boundary.
+- The Household's configured Comet endpoint is the recommended MVP stream provider.
+- Comet remains behind an internal Stremio stream-provider boundary.
 - Request only cached Real-Debrid results and return exactly one stream to Stremio.
-- Trust the Parent's Torrentio quality and ordering configuration, choosing its first acceptable result. The initial target is 1080p Fire TV playback.
-- Torrentio configuration controls release and language preferences; subtitle preferences remain Stremio's responsibility.
-- If Torrentio itself fails, preserve the Current Programme and report the provider failure rather than advancing the schedule.
+- Trust the Parent's Comet quality and ordering configuration, choosing its first acceptable result. The initial target is 1080p Fire TV playback.
+- Comet configuration controls release and language preferences; subtitle preferences remain Stremio's responsibility.
+- If the configured provider fails, preserve the Current Programme and report the provider failure rather than advancing the schedule.
 
 ## Deployment and security
 
 - Target Cloudflare Workers and D1 from the outset.
 - Identify each Household with a long opaque random secret.
 - Store only opaque Household identity in installation URLs.
-- Encrypt the configured Torrentio URL using a Worker secret before storing it in D1.
-- Never return or log Torrentio credentials.
+- Encrypt the configured provider URL using a Worker secret before storing it in D1.
+- Never return or log provider credentials.
 - Rate-limit failed Parent PIN attempts.
 - Real-Debrid media flows directly to Stremio, not through Cloudflare.
 
@@ -79,7 +79,7 @@ If an expected episode has no acceptable cached stream, leave it as the show's n
 Before polishing the Parent Page, prove on Fire TV that:
 
 1. A Channel tile can start with no interaction beyond a protocol-imposed Play action.
-2. A single selected Torrentio/Real-Debrid stream avoids the stream picker.
+2. A single selected Comet/Real-Debrid stream avoids the stream picker.
 3. Canonical IDs preserve resume positions.
 4. Next moves to a programme from another show.
 5. Natural completion autoplays a programme from another show.
@@ -97,5 +97,5 @@ Any failed criterion requires redesign before the remaining Parent Page is built
 - Parent accounts and recovery
 - Multiple independent profiles within a Household
 - Additional stream providers
-- Advanced stream filtering beyond configured Torrentio ordering
+- Advanced stream filtering beyond configured provider ordering
 - Restricting access to Stremio's ordinary catalogs and addons

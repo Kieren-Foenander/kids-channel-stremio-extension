@@ -1,7 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { decryptedManifestUrl } from "../src/provider-config";
-import { firstAcceptableCachedStream, TorrentioProvider } from "../src/stream-provider";
+import { firstAcceptableCachedStream, StremioAddonProvider } from "../src/stream-provider";
 
 interface CreatedHousehold {
   householdId: string;
@@ -17,10 +17,10 @@ beforeEach(async () => {
     pin_salt TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    torrentio_ciphertext TEXT,
-    torrentio_nonce TEXT,
-    torrentio_validation_status TEXT,
-    torrentio_configured_at TEXT
+    provider_ciphertext TEXT,
+    provider_nonce TEXT,
+    provider_validation_status TEXT,
+    provider_configured_at TEXT
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS approved_programmes (
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
@@ -107,7 +107,7 @@ describe("Parent Page Household creation", () => {
     expect(parentPage.status).toBe(200);
     const parentHtml = await parentPage.text();
     expect(parentHtml).toContain("Enter your six-digit PIN");
-    expect(parentHtml).toContain("Torrentio manifest URL");
+    expect(parentHtml).toContain("Stream provider manifest URL");
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST",
@@ -126,7 +126,7 @@ describe("Parent Page Household creation", () => {
   });
 });
 
-describe("Torrentio configuration", () => {
+describe("stream provider configuration", () => {
   const providerOrigin = "https://torrentio.example";
   const providerPath = "/providers=test/realdebrid=REDACTED";
   const manifestUrl = `${providerOrigin}${providerPath}/manifest.json`;
@@ -175,14 +175,14 @@ describe("Torrentio configuration", () => {
     expect(body).not.toContain("REDACTED");
     expect(JSON.parse(body)).toMatchObject({ configured: true, validation: { status: "acceptable_cached" } });
 
-    const stored = await env.DB.prepare("SELECT torrentio_ciphertext, torrentio_nonce FROM households WHERE id = ?")
-      .bind(created.householdId).first<{ torrentio_ciphertext: string; torrentio_nonce: string }>();
-    expect(stored?.torrentio_ciphertext).not.toContain("REDACTED");
-    expect(stored?.torrentio_nonce).toBeTruthy();
+    const stored = await env.DB.prepare("SELECT provider_ciphertext, provider_nonce FROM households WHERE id = ?")
+      .bind(created.householdId).first<{ provider_ciphertext: string; provider_nonce: string }>();
+    expect(stored?.provider_ciphertext).not.toContain("REDACTED");
+    expect(stored?.provider_nonce).toBeTruthy();
     expect(await decryptedManifestUrl(env.DB, created.householdId, deploymentSecret)).toBe(manifestUrl);
 
-    const tampered = `${stored?.torrentio_ciphertext[0] === "A" ? "B" : "A"}${stored?.torrentio_ciphertext.slice(1)}`;
-    await env.DB.prepare("UPDATE households SET torrentio_ciphertext = ? WHERE id = ?")
+    const tampered = `${stored?.provider_ciphertext[0] === "A" ? "B" : "A"}${stored?.provider_ciphertext.slice(1)}`;
+    await env.DB.prepare("UPDATE households SET provider_ciphertext = ? WHERE id = ?")
       .bind(tampered, created.householdId).run();
     await expect(decryptedManifestUrl(env.DB, created.householdId, deploymentSecret)).rejects.toThrow();
   });
@@ -213,14 +213,14 @@ describe("Torrentio configuration", () => {
     const token = await unlock(created);
     mockTorrentio([{ name: "Torrentio\nRD+", title: "Example 1080p", url: "https://media.example/video" }]);
     await save(created, token);
-    const first = await env.DB.prepare("SELECT torrentio_ciphertext FROM households WHERE id = ?")
-      .bind(created.householdId).first<{ torrentio_ciphertext: string }>();
+    const first = await env.DB.prepare("SELECT provider_ciphertext FROM households WHERE id = ?")
+      .bind(created.householdId).first<{ provider_ciphertext: string }>();
 
     mockTorrentio([{ name: "Torrentio\nRD+", title: "Example 1080p", url: "https://media.example/video" }]);
     await save(created, token);
-    const second = await env.DB.prepare("SELECT torrentio_ciphertext FROM households WHERE id = ?")
-      .bind(created.householdId).first<{ torrentio_ciphertext: string }>();
-    expect(second?.torrentio_ciphertext).not.toBe(first?.torrentio_ciphertext);
+    const second = await env.DB.prepare("SELECT provider_ciphertext FROM households WHERE id = ?")
+      .bind(created.householdId).first<{ provider_ciphertext: string }>();
+    expect(second?.provider_ciphertext).not.toBe(first?.provider_ciphertext);
 
     const unlocked = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
@@ -240,7 +240,7 @@ describe("Torrentio configuration", () => {
         : Response.json({ streams: [] });
     } as typeof fetch;
 
-    const result = await new TorrentioProvider(new URL(manifestUrl), strictFetch).validate();
+    const result = await new StremioAddonProvider(new URL(manifestUrl), strictFetch).validate();
     expect(result.status).toBe("no_cached_result");
     expect(requests).toBe(2);
   });
@@ -260,6 +260,21 @@ describe("Torrentio configuration", () => {
       url: "https://media.example/cached",
     };
     expect(firstAcceptableCachedStream([cached])).toBe(cached);
+  });
+
+  it("recognizes Comet's cached Real-Debrid marker and rejects its uncached marker", () => {
+    const uncached = {
+      name: "[RD⬇️] Comet 1080P",
+      description: "Example.Release.1080p.WEB-DL",
+      url: "https://comet.example/playback/uncached",
+    };
+    const cached = {
+      name: "[RD⚡] Comet 1080P",
+      description: "Example.Release.1080p.WEB-DL",
+      url: "https://comet.example/playback/cached",
+    };
+    expect(firstAcceptableCachedStream([uncached, cached])).toBe(cached);
+    expect(firstAcceptableCachedStream([uncached])).toBeNull();
   });
 });
 
@@ -447,7 +462,7 @@ describe("TV Channel Current Programme playback", () => {
     expect(current?.video_id).toBe(canonicalEpisodeId);
   });
 
-  it("returns a protocol-safe empty result and preserves Current Programme when Torrentio fails", async () => {
+  it("returns a protocol-safe empty result and preserves Current Programme when the provider fails", async () => {
     const { created } = await arrangePlayback(true);
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
     const metadata = await (await SELF.fetch(`${base}/meta/tv/${encodeURIComponent("kids-channels:tv")}.json`)).json<any>();

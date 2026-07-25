@@ -19,10 +19,10 @@ export interface StreamProvider {
 }
 
 const validationMessages: Record<ValidationStatus, string> = {
-  acceptable_cached: "Torrentio returned an acceptable cached 1080p direct stream.",
-  no_cached_result: "Torrentio returned no cached direct stream for the validation title.",
-  unsuitable_results: "Torrentio returned cached streams, but none were suitable 1080p results.",
-  provider_failure: "Torrentio could not be validated. Check the endpoint and try again.",
+  acceptable_cached: "The provider returned an acceptable cached 1080p Real-Debrid stream.",
+  no_cached_result: "The provider returned no cached Real-Debrid stream for the validation title.",
+  unsuitable_results: "The provider returned cached streams, but none were suitable 1080p results.",
+  provider_failure: "The stream provider could not be validated. Check the endpoint and try again.",
 };
 
 function direct(stream: ProviderStream): boolean {
@@ -37,7 +37,9 @@ function direct(stream: ProviderStream): boolean {
 
 function cached(stream: ProviderStream): boolean {
   const label = `${stream.name ?? ""}\n${stream.title ?? ""}`;
-  return direct(stream) && /(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label);
+  const torrentioCached = /(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label);
+  const cometCached = /^\[RD⚡\]\s+Comet\b/i.test(stream.name ?? "");
+  return direct(stream) && (torrentioCached || cometCached);
 }
 
 function suitable(stream: ProviderStream): boolean {
@@ -48,7 +50,7 @@ export function firstAcceptableCachedStream(streams: ProviderStream[]): Provider
   return streams.find(suitable) ?? null;
 }
 
-export function parseTorrentioManifestUrl(value: unknown): URL | null {
+export function parseProviderManifestUrl(value: unknown): URL | null {
   if (typeof value !== "string" || value.length > 4096) return null;
   try {
     const url = new URL(value);
@@ -59,7 +61,7 @@ export function parseTorrentioManifestUrl(value: unknown): URL | null {
   }
 }
 
-export class TorrentioProvider implements StreamProvider {
+export class StremioAddonProvider implements StreamProvider {
   constructor(private readonly manifestUrl: URL, private readonly request?: typeof fetch) {}
 
   private fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {

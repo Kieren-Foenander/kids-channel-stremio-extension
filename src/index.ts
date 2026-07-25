@@ -4,7 +4,7 @@ import { tvCurrentProgramme } from "./current-programme";
 import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
 import { decryptedManifestUrl, providerConfiguration, saveProviderConfiguration } from "./provider-config";
 import { issueParentToken, verifyParentToken } from "./secrets";
-import { parseTorrentioManifestUrl, TorrentioProvider } from "./stream-provider";
+import { parseProviderManifestUrl, StremioAddonProvider } from "./stream-provider";
 import { catalogFor, manifestFor, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 
 export interface Env {
@@ -138,10 +138,10 @@ function parentPage(secret: string): string {
       <h2>Approved Library</h2>
       <div id="library"><p>No programmes approved yet.</p></div>
       <form id="provider-form">
-        <label for="manifest-url">Torrentio manifest URL</label>
+        <label for="manifest-url">Stream provider manifest URL</label>
         <input id="manifest-url" name="manifestUrl" type="url" placeholder="https://…/manifest.json" autocomplete="off" required>
-        <p class="notice">This URL contains credentials. It is encrypted when saved and will not be shown again.</p>
-        <button type="submit">Save and validate Torrentio</button>
+        <p class="notice">Comet is recommended. This URL contains credentials; it is encrypted when saved and will not be shown again.</p>
+        <button type="submit">Save and validate provider</button>
         <p id="provider-result" role="status"></p>
       </form>
     </section>
@@ -205,7 +205,7 @@ function parentPage(secret: string): string {
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
         parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
         document.querySelector('#manifest').textContent = result.manifestUrl;
-        document.querySelector('#provider-result').textContent = result.provider.configured ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'Torrentio is not configured.';
+        document.querySelector('#provider-result').textContent = result.provider.configured ? result.provider.validation.message + ' Enter a new URL to replace it.' : 'A stream provider is not configured.';
         form.hidden = true; document.querySelector('#result').hidden = false; await loadLibrary();
       });
       document.querySelector('#search-form').addEventListener('submit', async (event) => {
@@ -218,7 +218,7 @@ function parentPage(secret: string): string {
         result.results.forEach(programme => output.append(showSearchResult(programme)));
       });
       document.querySelector('#provider-form').addEventListener('submit', async (event) => {
-        event.preventDefault(); const form = event.currentTarget; const output = document.querySelector('#provider-result'); output.textContent = 'Checking Torrentio manifest and a representative stream…';
+        event.preventDefault(); const form = event.currentTarget; const output = document.querySelector('#provider-result'); output.textContent = 'Checking the provider manifest and a representative stream…';
         const response = await fetch('/api/households/${secret}/provider', { method: 'PUT', headers: {...headers(), 'content-type': 'application/json'}, body: JSON.stringify({manifestUrl: new FormData(form).get('manifestUrl')}) });
         const result = await response.json(); output.textContent = response.ok ? result.validation.message : result.error; if (response.ok) form.reset();
       });
@@ -299,9 +299,9 @@ export default {
       } catch {
         // Invalid JSON is handled as an invalid endpoint without reflecting request content.
       }
-      const manifestUrl = parseTorrentioManifestUrl(manifestValue);
-      if (!manifestUrl) return json({ error: "Enter a valid HTTPS Torrentio manifest URL ending in /manifest.json." }, 400);
-      const validation = await new TorrentioProvider(manifestUrl).validate();
+      const manifestUrl = parseProviderManifestUrl(manifestValue);
+      if (!manifestUrl) return json({ error: "Enter a valid HTTPS provider manifest URL ending in /manifest.json." }, 400);
+      const validation = await new StremioAddonProvider(manifestUrl).validate();
       const saved = await saveProviderConfiguration(env.DB, household.id, manifestUrl.toString(), env.CONFIG_SECRET, validation);
       return json(saved);
     }
@@ -411,7 +411,7 @@ export default {
       try {
         const manifestUrl = await decryptedManifestUrl(env.DB, household.id, env.CONFIG_SECRET);
         if (!manifestUrl) return json({ streams: [] });
-        const provider = new TorrentioProvider(new URL(manifestUrl));
+        const provider = new StremioAddonProvider(new URL(manifestUrl));
         const selected = provider.firstAcceptable(await provider.streams("series", current.episode.id));
         return json({ streams: selected ? [selected] : [] });
       } catch {

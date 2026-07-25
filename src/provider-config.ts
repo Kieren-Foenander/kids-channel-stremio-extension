@@ -8,17 +8,17 @@ export interface ProviderConfiguration {
 }
 
 interface StoredConfiguration {
-  torrentio_ciphertext: string | null;
-  torrentio_nonce: string | null;
-  torrentio_validation_status: ValidationStatus | null;
-  torrentio_configured_at: string | null;
+  provider_ciphertext: string | null;
+  provider_nonce: string | null;
+  provider_validation_status: ValidationStatus | null;
+  provider_configured_at: string | null;
 }
 
 const messages: Record<ValidationStatus, string> = {
-  acceptable_cached: "Torrentio returned an acceptable cached 1080p direct stream.",
-  no_cached_result: "Torrentio returned no cached direct stream for the validation title.",
-  unsuitable_results: "Torrentio returned cached streams, but none were suitable 1080p results.",
-  provider_failure: "Torrentio could not be validated. Check the endpoint and try again.",
+  acceptable_cached: "The provider returned an acceptable cached 1080p Real-Debrid stream.",
+  no_cached_result: "The provider returned no cached Real-Debrid stream for the validation title.",
+  unsuitable_results: "The provider returned cached streams, but none were suitable 1080p results.",
+  provider_failure: "The stream provider could not be validated. Check the endpoint and try again.",
 };
 
 export async function saveProviderConfiguration(
@@ -31,7 +31,7 @@ export async function saveProviderConfiguration(
   const encrypted = await encryptCredential(manifestUrl, deploymentSecret, householdId);
   const updatedAt = new Date().toISOString();
   await db.prepare(`UPDATE households
-    SET torrentio_ciphertext = ?, torrentio_nonce = ?, torrentio_validation_status = ?, torrentio_configured_at = ?
+    SET provider_ciphertext = ?, provider_nonce = ?, provider_validation_status = ?, provider_configured_at = ?
     WHERE id = ?`)
     .bind(encrypted.ciphertext, encrypted.nonce, validation.status, updatedAt, householdId)
     .run();
@@ -39,21 +39,21 @@ export async function saveProviderConfiguration(
 }
 
 export async function providerConfiguration(db: D1Database, householdId: string): Promise<ProviderConfiguration> {
-  const stored = await db.prepare(`SELECT torrentio_ciphertext, torrentio_nonce,
-    torrentio_validation_status, torrentio_configured_at FROM households WHERE id = ?`)
+  const stored = await db.prepare(`SELECT provider_ciphertext, provider_nonce,
+    provider_validation_status, provider_configured_at FROM households WHERE id = ?`)
     .bind(householdId).first<StoredConfiguration>();
-  if (!stored?.torrentio_ciphertext) return { configured: false };
-  const status = stored.torrentio_validation_status ?? "provider_failure";
+  if (!stored?.provider_ciphertext) return { configured: false };
+  const status = stored.provider_validation_status ?? "provider_failure";
   return {
     configured: true,
     validation: { status, message: messages[status] },
-    updatedAt: stored.torrentio_configured_at ?? undefined,
+    updatedAt: stored.provider_configured_at ?? undefined,
   };
 }
 
 export async function decryptedManifestUrl(db: D1Database, householdId: string, deploymentSecret: string): Promise<string | null> {
-  const stored = await db.prepare("SELECT torrentio_ciphertext, torrentio_nonce FROM households WHERE id = ?")
+  const stored = await db.prepare("SELECT provider_ciphertext, provider_nonce FROM households WHERE id = ?")
     .bind(householdId).first<StoredConfiguration>();
-  if (!stored?.torrentio_ciphertext || !stored.torrentio_nonce) return null;
-  return decryptCredential(stored.torrentio_ciphertext, stored.torrentio_nonce, deploymentSecret, householdId);
+  if (!stored?.provider_ciphertext || !stored.provider_nonce) return null;
+  return decryptCredential(stored.provider_ciphertext, stored.provider_nonce, deploymentSecret, householdId);
 }

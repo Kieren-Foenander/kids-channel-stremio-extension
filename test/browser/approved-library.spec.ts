@@ -23,9 +23,9 @@ test("a Parent saves a provider endpoint without a browser error", async ({ page
     body: JSON.stringify({ validation: { message: "Cached 1080p stream found." } }),
   }));
 
-  const endpoint = page.getByLabel("Torrentio manifest URL");
-  await endpoint.fill("https://torrentio.example/config/manifest.json");
-  await page.getByRole("button", { name: "Save and validate Torrentio" }).click();
+  const endpoint = page.getByLabel("Stream provider manifest URL");
+  await endpoint.fill("https://comet.example/config/manifest.json");
+  await page.getByRole("button", { name: "Save and validate provider" }).click();
 
   await expect(page.locator("#provider-result")).toHaveText("Cached 1080p stream found.");
   await expect(endpoint).toHaveValue("");

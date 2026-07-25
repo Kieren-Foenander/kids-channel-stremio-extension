@@ -9,7 +9,7 @@
     "deploy": "wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply kids-channels --local",
     "db:migrate:remote": "wrangler d1 migrations apply kids-channels --remote",
-    "probe:torrentio": "node scripts/probe-torrentio.mjs",
+    "probe:provider": "node scripts/probe-provider.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "playwright test",

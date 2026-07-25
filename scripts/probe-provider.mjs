@@ -1,6 +1,6 @@
-const manifestValue = process.env.TORRENTIO_MANIFEST_URL;
+const manifestValue = process.env.PROVIDER_MANIFEST_URL;
 if (!manifestValue) {
-  console.error("Set TORRENTIO_MANIFEST_URL to a configured HTTPS manifest URL.");
+  console.error("Set PROVIDER_MANIFEST_URL to a configured HTTPS provider manifest URL.");
   process.exitCode = 2;
 } else {
   try {
@@ -17,12 +17,14 @@ if (!manifestValue) {
     const body = await streamResponse.json();
     if (!streamResponse.ok || !Array.isArray(body.streams)) throw new Error();
 
-    const cached = body.streams.filter((stream) => {
+    const direct = body.streams.filter((stream) => typeof stream?.url === "string" && /^https?:\/\//.test(stream.url));
+    const cached = direct.filter((stream) => {
       const label = `${stream?.name ?? ""}\n${stream?.title ?? ""}`;
-      return typeof stream?.url === "string" && /(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label);
+      return (/(?:^|[^a-z0-9])RD\+(?=$|[^a-z0-9])/i.test(label) && !/download/i.test(label))
+        || /^\[RD⚡\]\s+Comet\b/i.test(stream?.name ?? "");
     });
     const acceptable = cached.filter((stream) => /\b1080p?\b/i.test(`${stream?.name ?? ""}\n${stream?.title ?? ""}`));
-    console.log(`Probe succeeded: manifest valid; cached direct results=${cached.length}; acceptable 1080p results=${acceptable.length}.`);
+    console.log(`Probe succeeded: manifest valid; direct results=${direct.length}; cached Real-Debrid results=${cached.length}; acceptable 1080p results=${acceptable.length}.`);
   } catch {
     console.error("Probe failed: the manifest or representative stream request was not usable.");
     process.exitCode = 1;

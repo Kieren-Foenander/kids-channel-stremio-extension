@@ -1,6 +1,6 @@
 # Kids Channels
 
-A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households and can securely configure and validate an existing Torrentio/Real-Debrid endpoint.
+A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households and can securely configure and validate an existing Comet/Real-Debrid endpoint.
 
 ## Requirements
 
@@ -32,9 +32,9 @@ pnpm test:browser
 # Or run both suites with: pnpm test:all
 ```
 
-The integration and protocol suite runs the complete creation, PIN unlock, provider validation, Cinemeta search, approval, encrypted storage, and catalog-to-current-episode stream flow inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta and Torrentio are stubbed only at outbound `fetch`; deterministic tests contain no real credentials or signed media URLs. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
+The integration and protocol suite runs the complete creation, PIN unlock, provider validation, Cinemeta search, approval, encrypted storage, and catalog-to-current-episode stream flow inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta and the stream provider are stubbed only at outbound `fetch`; deterministic tests contain no real credentials or signed media URLs. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
-A credential-safe real-provider check is documented separately in [`docs/torrentio-contract-probe.md`](docs/torrentio-contract-probe.md). It is optional and never runs in CI.
+A credential-safe real-provider check is documented separately in [`docs/provider-contract-probe.md`](docs/provider-contract-probe.md). It is optional and never runs in CI.
 
 ## Deploy
 
@@ -52,7 +52,7 @@ pnpm db:migrate:remote
 pnpm run deploy
 ```
 
-The Worker never places the Parent PIN or provider credentials in installation URLs. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Torrentio manifest URLs are AES-GCM encrypted with Household-bound authenticated data and the deployment secret, and are never returned after saving.
+The Worker never places the Parent PIN or provider credentials in installation URLs. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Provider manifest URLs are AES-GCM encrypted with Household-bound authenticated data and the deployment secret, and are never returned after saving.
 
 ## Routes
 
@@ -60,7 +60,7 @@ The Worker never places the Parent PIN or provider credentials in installation U
 - `POST /api/households` — create a Household with a six-digit PIN
 - `GET /households/:secret` — PIN unlock Parent Page
 - `POST /api/households/:secret/unlock` — authenticate a Parent for one hour
-- `PUT /api/households/:secret/provider` — save and validate a Torrentio endpoint (Parent bearer token required)
+- `PUT /api/households/:secret/provider` — save and validate a stream-provider endpoint (Parent bearer token required)
 - `GET /api/households/:secret/cinemeta/search?q=…` — search Cinemeta shows and movies (Parent bearer token required)
 - `GET /api/households/:secret/cinemeta/title/:type/:imdbId` — retrieve canonical title and released episode metadata (Parent bearer token required)
 - `GET|POST /api/households/:secret/library` — view or add to the Approved Library (Parent bearer token required)

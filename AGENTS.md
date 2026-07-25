@@ -21,4 +21,4 @@ Workerd brand-checks native runtime functions such as `fetch`. Do not detach a n
 - Add a regression test whose injected function rejects an incorrect `this` receiver.
 - Exercise outbound HTTP through the complete Worker/workerd seam. A Node-only contract probe can succeed while the Worker call still fails.
 
-See `TorrentioProvider` in `src/stream-provider.ts` and its receiver regression test in `test/worker.test.ts`.
+See `StremioAddonProvider` in `src/stream-provider.ts` and its receiver regression test in `test/worker.test.ts`.
