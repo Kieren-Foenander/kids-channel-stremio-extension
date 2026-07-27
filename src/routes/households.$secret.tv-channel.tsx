@@ -68,33 +68,41 @@ function TvChannelPage() {
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingRegeneration, setConfirmingRegeneration] = useState(false);
   const mounted = useRef(true);
-  const loading = useRef(false);
+  const activeLoad = useRef<Promise<void> | null>(null);
   const lastVisibilityRefresh = useRef(0);
 
-  const loadState = useCallback(async (reason: LoadReason = "refresh") => {
-    if (loading.current) return;
-    loading.current = true;
-    if (reason === "refresh") setRefreshStatus("Refreshing Channel data…");
-    try {
-      const response = await fetch(`${base}/tv-state`, { cache: "no-store", credentials: "same-origin" });
-      const result = await responseBody(response);
-      expireParentSession(response, result.error);
-      if (!mounted.current) return;
-      if (!response.ok || !Array.isArray(result.schedule) || !Array.isArray(result.recentPlayback)) {
-        setLoadError(result.error || "TV Channel data could not be loaded. Try again.");
-        setRefreshStatus("Channel data may be out of date.");
-        return;
-      }
-      setState(result as TvState);
-      setLoadError("");
-      if (reason === "refresh") setRefreshStatus("Channel data updated.");
-    } catch {
-      if (!mounted.current) return;
-      setLoadError("TV Channel data could not be loaded. Check your connection and try again.");
-      setRefreshStatus("Channel data may be out of date.");
-    } finally {
-      loading.current = false;
+  const loadState = useCallback(function loadState(reason: LoadReason = "refresh", afterInFlight = false): Promise<void> {
+    const currentLoad = activeLoad.current;
+    if (currentLoad) {
+      if (!afterInFlight) return currentLoad;
+      return currentLoad.then(() => mounted.current ? loadState(reason) : undefined);
     }
+
+    const request = (async () => {
+      if (reason === "refresh") setRefreshStatus("Refreshing Channel data…");
+      try {
+        const response = await fetch(`${base}/tv-state`, { cache: "no-store", credentials: "same-origin" });
+        const result = await responseBody(response);
+        expireParentSession(response, result.error);
+        if (!mounted.current) return;
+        if (!response.ok || !Array.isArray(result.schedule) || !Array.isArray(result.recentPlayback)) {
+          setLoadError(result.error || "TV Channel data could not be loaded. Try again.");
+          setRefreshStatus("Channel data may be out of date.");
+          return;
+        }
+        setState(result as TvState);
+        setLoadError("");
+        if (reason === "refresh") setRefreshStatus("Channel data updated.");
+      } catch {
+        if (!mounted.current) return;
+        setLoadError("TV Channel data could not be loaded. Check your connection and try again.");
+        setRefreshStatus("Channel data may be out of date.");
+      } finally {
+        activeLoad.current = null;
+      }
+    })();
+    activeLoad.current = request;
+    return request;
   }, [base]);
 
   useEffect(() => {
@@ -138,7 +146,7 @@ function TvChannelPage() {
         setMutationStatus(result.error || `The ${kind === "undo" ? "advancement" : "schedule"} could not be changed. Try again.`);
         return;
       }
-      await loadState();
+      await loadState("refresh", true);
       setMutationStatus(result.message || (kind === "undo" ? "Most recent advancement undone." : "Upcoming TV selections regenerated."));
       window.dispatchEvent(new Event("stremio-restart-required"));
     } catch {

@@ -97,6 +97,48 @@ test("a Parent inspects and controls the TV Channel with progressive disclosure"
   expect(stateRequests).toBeGreaterThanOrEqual(3); // initial load plus one refresh after each mutation
 });
 
+test("a mutation queues a fresh state load behind an overlapping refresh", async ({ page }) => {
+  let state = channelState();
+  let stateRequests = 0;
+  let undoRequests = 0;
+  let releaseOverlappingRefresh!: () => void;
+  let markRefreshStarted!: () => void;
+  const overlappingRefreshStarted = new Promise<void>(resolve => { markRefreshStarted = resolve; });
+  const overlappingRefreshReleased = new Promise<void>(resolve => { releaseOverlappingRefresh = resolve; });
+
+  await page.route("**/api/households/*/tv-state", async route => {
+    stateRequests += 1;
+    if (stateRequests === 2) {
+      const staleState = state;
+      markRefreshStarted();
+      await overlappingRefreshReleased;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(staleState) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
+  });
+  await page.route("**/api/households/*/tv-schedule/undo", async route => {
+    undoRequests += 1;
+    state = { ...state, canUndo: false };
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "Most recent advancement undone." }) });
+  });
+
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  const undo = page.getByRole("button", { name: "Undo latest advancement" });
+  await expect(undo).toBeVisible();
+
+  await page.waitForTimeout(300);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await overlappingRefreshStarted;
+  await undo.click();
+  await expect.poll(() => undoRequests).toBe(1);
+
+  releaseOverlappingRefresh();
+  await expect.poll(() => stateRequests).toBe(3);
+  await expect(undo).toBeHidden();
+});
+
 test("TV Channel refreshes on focus and polls only while visible", async ({ page }) => {
   await page.clock.install();
   let stateRequests = 0;
