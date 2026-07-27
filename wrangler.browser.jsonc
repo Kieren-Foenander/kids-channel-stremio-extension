@@ -3,6 +3,10 @@
   "name": "kids-channels-browser-test",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-24",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS"
+  },
   "d1_databases": [
     {
       "binding": "DB",

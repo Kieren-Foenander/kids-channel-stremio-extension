@@ -4,10 +4,13 @@ async function createHousehold(page: Page, pin: string) {
   await page.goto("/");
   await page.getByLabel("Choose a six-digit Parent PIN").fill(pin);
   await page.getByRole("button", { name: "Create Household" }).click();
-  const parentUrl = await page.getByRole("link", { name: "Open Parent Page" }).getAttribute("href");
-  const manifestUrl = await page.locator("#manifest").textContent();
+  await expect(page.getByRole("heading", { name: "Save your details, then install" })).toBeVisible();
+  const parentUrl = await page.getByRole("link", { name: "Continue to Parent Page" }).getAttribute("href");
+  const manifestUrl = await page.locator("code").first().textContent();
   expect(parentUrl).toBeTruthy();
   expect(manifestUrl).toBeTruthy();
+  // Lifecycle journeys below deliberately exercise explicit PIN unlock.
+  await page.context().clearCookies();
   return { parentUrl: parentUrl!, manifestUrl: manifestUrl! };
 }
 

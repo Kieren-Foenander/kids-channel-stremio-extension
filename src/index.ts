@@ -35,6 +35,7 @@ import {
 
 export interface Env {
   DB: D1Database;
+  ASSETS?: Fetcher;
   CONFIG_SECRET?: string;
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
@@ -43,7 +44,6 @@ export interface Env {
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
-  "access-control-allow-origin": "*",
 };
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
@@ -51,6 +51,10 @@ function json(value: unknown, status = 200, headers?: HeadersInit): Response {
     status,
     headers: { ...jsonHeaders, ...headers },
   });
+}
+
+function addonJson(value: unknown, status = 200, headers?: HeadersInit): Response {
+  return json(value, status, { "access-control-allow-origin": "*", ...headers });
 }
 
 function html(body: string, status = 200): Response {
@@ -97,6 +101,43 @@ function shell(content: string, title = "Kids Channels"): string {
 </head>
 <body><main>${content}</main></body>
 </html>`;
+}
+
+const PARENT_SESSION_COOKIE = "kids_parent_session";
+const PARENT_SESSION_SECONDS = 60 * 60;
+
+function parentSessionCookie(token: string): string {
+  return `${PARENT_SESSION_COOKIE}=${token}; Path=/; Max-Age=${PARENT_SESSION_SECONDS}; HttpOnly; Secure; SameSite=Strict`;
+}
+
+function cookieValue(request: Request, name: string): string | null {
+  for (const part of (request.headers.get("cookie") || "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator !== -1 && part.slice(0, separator).trim() === name) return part.slice(separator + 1).trim();
+  }
+  return null;
+}
+
+async function spaResponse(request: Request, assets: Fetcher): Promise<Response> {
+  // Cloudflare's asset binding canonicalises HTML assets to extensionless paths.
+  const shellUrl = new URL("/_shell", request.url);
+  // Do not forward browser cache validators: CSP hashes require the complete shell body.
+  const response = await assets.fetch(new Request(shellUrl));
+  const body = await response.text(); // The generated shell is a small, bounded deployment asset.
+  const scriptHashes: string[] = [];
+  for (const match of body.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)) {
+    // HTML parsing replaces null bytes in the generated route payload before CSP validation.
+    const parsedScript = match[1].replaceAll("\0", "\uFFFD");
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(parsedScript)));
+    let binary = "";
+    for (const byte of digest) binary += String.fromCharCode(byte);
+    scriptHashes.push(`'sha256-${btoa(binary)}'`);
+  }
+  const headers = new Headers(response.headers);
+  headers.set("content-security-policy", `default-src 'self'; connect-src 'self'; img-src 'self' https: data:; style-src 'self'; script-src 'self' ${scriptHashes.join(" ")}; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`);
+  headers.set("x-content-type-options", "nosniff");
+  headers.set("referrer-policy", "no-referrer");
+  return new Response(body, { status: response.status, statusText: response.statusText, headers });
 }
 
 function installDetails(origin: string, secret: string) {
@@ -214,7 +255,7 @@ function parentPage(secret: string): string {
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
-      const headers = () => ({authorization: 'Bearer ' + parentToken});
+      const headers = () => parentToken ? {authorization: 'Bearer ' + parentToken} : {};
       let parentToken = '';
       function programmeCard(programme, approved) {
         const card = document.createElement('article'); card.className = 'programme';
@@ -342,6 +383,13 @@ function parentPage(secret: string): string {
         }, {once: programme.type === 'show'});
         built.details.append(button); return built.card;
       }
+      async function showAuthenticatedParent(details) {
+        document.querySelector('#install').href = details.installUrl;
+        document.querySelector('#manifest').textContent = details.manifestUrl;
+        form.hidden = true;
+        document.querySelector('#result').hidden = false;
+        await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
+      }
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const response = await fetch('/api/households/${secret}/unlock', {
@@ -349,10 +397,16 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
-        parentToken = result.parentToken; document.querySelector('#install').href = result.installUrl;
-        document.querySelector('#manifest').textContent = result.manifestUrl;
-        form.hidden = true; document.querySelector('#result').hidden = false; await Promise.all([loadLibrary(), loadTvState(), loadMovieState()]);
+        parentToken = result.parentToken;
+        await showAuthenticatedParent(result);
       });
+      void fetch('/api/households/${secret}/session')
+        .then(async response => {
+          if (response.ok) await showAuthenticatedParent({
+            installUrl: 'stremio://' + location.host + '/addons/${secret}/manifest.json',
+            manifestUrl: location.origin + '/addons/${secret}/manifest.json'
+          });
+        });
       document.querySelector('#regenerate-tv').addEventListener('click', async (event) => {
         const button = event.currentTarget; button.disabled = true;
         const response = await fetch('/api/households/${secret}/tv-schedule/regenerate', {method: 'POST', headers: headers()});
@@ -424,8 +478,10 @@ async function parsePin(request: Request): Promise<unknown> {
 
 async function authorizedParent(request: Request, household: Household, deploymentSecret: string): Promise<boolean> {
   const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Bearer ")) return false;
-  return verifyParentToken(authorization.slice(7), household.id, household.auth_version, deploymentSecret);
+  const token = authorization?.startsWith("Bearer ")
+    ? authorization.slice(7)
+    : cookieValue(request, PARENT_SESSION_COOKIE);
+  return token ? verifyParentToken(token, household.id, household.auth_version, deploymentSecret) : false;
 }
 
 function pinRequestOrigin(request: Request): string {
@@ -444,16 +500,37 @@ function decodedPathSegment(value: string): string | null {
   try { return decodeURIComponent(value); } catch { return null; }
 }
 
+function isStateChangingParentRequest(request: Request, path: string): boolean {
+  return path.startsWith("/api/households") && !["GET", "HEAD", "OPTIONS"].includes(request.method);
+}
+
+function hasSameOrigin(request: Request): boolean {
+  const origin = request.headers.get("origin");
+  return origin !== null && origin === new URL(request.url).origin;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...jsonHeaders, "access-control-allow-methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS", "access-control-allow-headers": "content-type, authorization" } });
+      if (path.startsWith("/addons/")) {
+        return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, HEAD, OPTIONS" } });
+      }
+      return new Response(null, { status: 204 });
     }
 
-    if (request.method === "GET" && path === "/") return html(homePage());
+    if (isStateChangingParentRequest(request, path) && !hasSameOrigin(request)) {
+      return json({ error: "This request must come from the Parent Page." }, 403, { "cache-control": "no-store" });
+    }
+
+    if (request.method === "GET" && path === "/") {
+      return env.ASSETS ? spaResponse(request, env.ASSETS) : html(homePage());
+    }
+    if (request.method === "GET" && /^\/households\/[A-Za-z0-9_-]+\/onboarding$/.test(path) && env.ASSETS) {
+      return spaResponse(request, env.ASSETS);
+    }
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
     if (request.method === "GET" && path === "/assets/movie-channel.svg") return channelPoster("movie");
     if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
@@ -461,8 +538,23 @@ export default {
     if (request.method === "POST" && path === "/api/households") {
       const pin = await parsePin(request);
       if (!validPin(pin)) return json({ error: "PIN must contain exactly six digits." }, 400);
+      if (!env.CONFIG_SECRET) return json({ error: "Household creation is temporarily unavailable." }, 503);
       const household = await createHousehold(env.DB, pin);
-      return json({ householdId: household.id, ...installDetails(url.origin, household.secret) }, 201);
+      const token = await issueParentToken(household.id, household.auth_version, env.CONFIG_SECRET);
+      return json(
+        { householdId: household.id, ...installDetails(url.origin, household.secret) },
+        201,
+        { "cache-control": "no-store", "set-cookie": parentSessionCookie(token) },
+      );
+    }
+
+    const sessionMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/session$/);
+    if (request.method === "GET" && sessionMatch) {
+      const household = await findHousehold(env.DB, sessionMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      return json({ authenticated: true, expiresIn: PARENT_SESSION_SECONDS }, 200, { "cache-control": "no-store" });
     }
 
     const unlockMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/unlock$/);
@@ -696,45 +788,45 @@ export default {
     const manifestMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/manifest\.json$/);
     if (request.method === "GET" && manifestMatch) {
       const household = await findHousehold(env.DB, manifestMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
-      return json(manifestFor(household));
+      if (!household) return addonJson({ error: "Household not found." }, 404);
+      return addonJson(manifestFor(household));
     }
 
     const configureMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/configure$/);
     if (request.method === "GET" && configureMatch) {
-      if (!(await findHousehold(env.DB, configureMatch[1]))) return json({ error: "Household not found." }, 404);
+      if (!(await findHousehold(env.DB, configureMatch[1]))) return addonJson({ error: "Household not found." }, 404);
       return Response.redirect(`${url.origin}/households/${configureMatch[1]}`, 302);
     }
 
     const catalogMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/catalog\/([^/]+)\/([^/]+)\.json$/);
     if (request.method === "GET" && catalogMatch) {
-      if (!(await findHousehold(env.DB, catalogMatch[1]))) return json({ error: "Household not found." }, 404);
+      if (!(await findHousehold(env.DB, catalogMatch[1]))) return addonJson({ error: "Household not found." }, 404);
       const catalog = catalogFor(catalogMatch[2], catalogMatch[3], url.origin);
-      return catalog ? json(catalog) : json({ metas: [] });
+      return catalog ? addonJson(catalog) : addonJson({ metas: [] });
     }
 
     const metaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/series\/([^/]+)\.json$/);
     if (request.method === "GET" && metaMatch) {
       const household = await findHousehold(env.DB, metaMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
-      if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return json({ meta: null });
+      if (!household) return addonJson({ error: "Household not found." }, 404);
+      if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return addonJson({ meta: null });
       const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
-      return json(tvChannelMetadata(schedule, url.origin), 200, { "cache-control": "no-store" });
+      return addonJson(tvChannelMetadata(schedule, url.origin), 200, { "cache-control": "no-store" });
     }
 
     const movieMetaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/movie\/([^/]+)\.json$/);
     if (request.method === "GET" && movieMetaMatch) {
       const household = await findHousehold(env.DB, movieMetaMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
-      if (decodedPathSegment(movieMetaMatch[2]) !== MOVIE_CHANNEL_ID) return json({ meta: null });
+      if (!household) return addonJson({ error: "Household not found." }, 404);
+      if (decodedPathSegment(movieMetaMatch[2]) !== MOVIE_CHANNEL_ID) return addonJson({ meta: null });
       const programme = await movieChannelProgramme(env.DB, household.id, env.MOVIE_ROTATION_SEED);
-      return json(movieChannelMetadata(programme, url.origin, household.secret), 200, { "cache-control": "no-store" });
+      return addonJson(movieChannelMetadata(programme, url.origin, household.secret), 200, { "cache-control": "no-store" });
     }
 
     const movieSignOffMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/media\/movie-sign-off\/(\d+)\/(\d+)\.mp4$/);
     if ((request.method === "GET" || request.method === "HEAD") && movieSignOffMatch) {
       const household = await findHousehold(env.DB, movieSignOffMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
+      if (!household) return addonJson({ error: "Household not found." }, 404);
       await requestMovieSignOff(env.DB, household.id, Number(movieSignOffMatch[2]), Number(movieSignOffMatch[3]));
       return movieSignOff(request);
     }
@@ -742,22 +834,22 @@ export default {
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);
     if (request.method === "GET" && streamMatch) {
       const household = await findHousehold(env.DB, streamMatch[1]);
-      if (!household) return json({ error: "Household not found." }, 404);
+      if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
       if (streamMatch[2] === "series") {
         if (videoId) await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
         // Kids Channels observes schedule movement here. A separately installed provider supplies
         // the playable stream and must place bingeGroup on that stream object.
-        return json({ streams: [] }, 200, { "cache-control": "no-store" });
+        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
 
       const signOff = videoId ? parseSignOffId(videoId) : null;
       if (!signOff) {
         // Canonical IMDb identity lets installed providers own movie playback and subtitles.
-        return json({ streams: [] }, 200, { "cache-control": "no-store" });
+        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
       await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
-      return json({ streams: [{
+      return addonJson({ streams: [{
         name: "Kids Channels",
         description: "Five-second sign-off",
         url: `${url.origin}/assets/movie-sign-off.mp4`,

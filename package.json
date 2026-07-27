@@ -5,8 +5,10 @@
   "type": "module",
   "packageManager": "pnpm@10.28.0",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "pnpm build && wrangler deploy",
     "db:migrate:local": "wrangler d1 migrations apply kids-channels --local",
     "db:migrate:remote": "wrangler d1 migrations apply kids-channels --remote",
     "test": "vitest run",
@@ -24,8 +26,23 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "~0.18.8",
     "@playwright/test": "^1.61.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
+    "vite": "^8.1.5",
     "vitest": "~4.1.10",
     "wrangler": "^4.114.0"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "^5.5.7",
+    "@tanstack/react-router": "^1.170.18",
+    "@tanstack/react-start": "^1.168.32",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-hook-form": "^7.83.0",
+    "zod": "^4.4.3"
   }
 }

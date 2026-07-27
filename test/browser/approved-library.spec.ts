@@ -8,9 +8,12 @@ async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByLabel("Choose a six-digit Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Create Household" }).click();
-  const parentUrl = await page.getByRole("link", { name: "Open Parent Page" }).getAttribute("href");
+  await expect(page.getByRole("heading", { name: "Save your details, then install" })).toBeVisible();
+  const parentUrl = await page.getByRole("link", { name: "Continue to Parent Page" }).getAttribute("href");
   expect(parentUrl).toBeTruthy();
 
+  // This journey covers explicit PIN unlock independently of creation's automatic session.
+  await page.context().clearCookies();
   await page.goto(parentUrl!);
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();
