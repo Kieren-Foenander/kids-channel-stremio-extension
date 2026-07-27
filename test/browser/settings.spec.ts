@@ -80,6 +80,32 @@ test("Settings provides installation details and securely rotates the Parent PIN
   await older.context.close();
 });
 
+test("Household deletion keeps context through pending, server failure, and rate limiting", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/settings`);
+  await page.getByRole("button", { name: "Delete Household…" }).click();
+  await page.getByLabel("Current six-digit PIN").fill("123456");
+  await page.getByLabel("Type DELETE to confirm").fill("DELETE");
+
+  await page.route("**/api/households/*", async (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return route.fulfill({ status: 500, contentType: "application/json", body: "{}" });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Permanently delete Household" }).click();
+  await expect(page.getByRole("button", { name: "Deleting Household…" })).toBeDisabled();
+  await expect(page.getByRole("alert").filter({ hasText: "Nothing was removed" })).toBeVisible();
+  await expect(page.getByLabel("Type DELETE to confirm")).toHaveValue("DELETE");
+
+  await page.route("**/api/households/*", (route) => {
+    if (route.request().method() !== "DELETE") return route.continue();
+    return route.fulfill({ status: 429, contentType: "application/json", body: JSON.stringify({ error: "Too many incorrect PIN attempts. Try again in 15 minutes." }) });
+  }, { times: 1 });
+  await page.getByRole("button", { name: "Permanently delete Household" }).click();
+  await expect(page.locator("#delete-current-pin-error")).toContainText("Too many incorrect PIN attempts");
+  await expect(page.getByRole("dialog", { name: "Delete Household permanently?" })).toBeVisible();
+});
+
 test("Settings gives phone visitors desktop installation guidance", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
   const parentUrl = await createHousehold(page);

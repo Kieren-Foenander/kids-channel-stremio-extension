@@ -149,7 +149,7 @@ function ApprovedLibraryPage() {
       </DialogContent>
     </Dialog>
 
-    <LegacyParentWorkflows secret={secret} surface="show-management-and-deletion" />
+    <LegacyParentWorkflows secret={secret} surface="show-management" />
   </div>;
 }
 

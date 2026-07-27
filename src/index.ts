@@ -69,6 +69,47 @@ function html(body: string, status = 200): Response {
   });
 }
 
+async function householdNotFoundResponse(request: Request, assets?: Fetcher): Promise<Response> {
+  let stylesheetLinks = "";
+  if (assets) {
+    // Reuse the application's generated design-system stylesheet without executing the SPA
+    // or embedding presentation in this privacy-preserving error document.
+    const shellUrl = new URL("/_shell", request.url);
+    const shellBody = await (await assets.fetch(new Request(shellUrl))).text();
+    stylesheetLinks = [...shellBody.matchAll(/<link\b(?=[^>]*\brel=["']stylesheet["'])(?=[^>]*\bhref=["'](\/assets\/[^"'<>]+)["'])[^>]*>/gi)]
+      .map((match) => `<link rel="stylesheet" href="${match[1]}">`)
+      .join("");
+  }
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f2ed">
+  <title>Household not found — Kids Channels</title>
+  ${stylesheetLinks}
+</head>
+<body>
+  <main id="main" class="page-shell deleted-shell">
+    <p class="eyebrow">Kids Channels</p>
+    <h1>Household not found</h1>
+    <p>This private Household URL is unavailable. Check the complete URL, or create a new Household.</p>
+    <a class="button" href="/">Create a new Household</a>
+  </main>
+</body>
+</html>`;
+  return new Response(body, {
+    status: 404,
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "content-security-policy": "default-src 'self'; img-src 'self' https: data:; font-src 'self'; style-src 'self'; script-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 function shell(content: string, title = "Kids Channels"): string {
   return `<!doctype html>
 <html lang="en">
@@ -528,9 +569,9 @@ export default {
     if (request.method === "GET" && path === "/") {
       return env.ASSETS ? spaResponse(request, env.ASSETS) : html(homePage());
     }
-    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/(?:onboarding|add-programmes|approved-library|tv-channel|movie-channel|settings))?$/);
+    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/.*)?$/);
     if (request.method === "GET" && spaHouseholdMatch && env.ASSETS) {
-      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
+      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return householdNotFoundResponse(request, env.ASSETS);
       return spaResponse(request, env.ASSETS);
     }
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
@@ -812,9 +853,10 @@ export default {
       return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress. Restart Stremio to refresh the Channel." });
     }
 
-    const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);
+    const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/.*)?$/);
     if (request.method === "GET" && parentMatch) {
-      if (!(await findHousehold(env.DB, parentMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
+      if (!(await findHousehold(env.DB, parentMatch[1]))) return householdNotFoundResponse(request);
+      if (path !== `/households/${parentMatch[1]}`) return html(shell("<h1>Page not found</h1>"), 404);
       return html(parentPage(parentMatch[1]));
     }
 

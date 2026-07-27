@@ -19,7 +19,7 @@ type Programme = {
   pausedAt?: string | null;
 };
 
-type CompatibilitySurface = "search" | "show-management-and-deletion";
+type CompatibilitySurface = "search" | "show-management";
 
 const episodeLabel = (episode: Episode) => `S${String(episode.season).padStart(2, "0")}E${String(episode.episode).padStart(2, "0")} — ${episode.title}`;
 
@@ -43,8 +43,6 @@ export function LegacyParentWorkflows({ secret, surface }: { secret: string; sur
   const [searchVersion, setSearchVersion] = useState(0);
   const [searchStatus, setSearchStatus] = useState("");
   const [libraryStatus, setLibraryStatus] = useState("");
-  const [deleteStatus, setDeleteStatus] = useState("");
-  const [deleted, setDeleted] = useState(false);
 
   const loadLibrary = useCallback(async () => {
     const response = await fetch(`${base}/library`, { cache: "no-store" });
@@ -53,7 +51,7 @@ export function LegacyParentWorkflows({ secret, surface }: { secret: string; sur
   }, [base]);
 
   useEffect(() => {
-    if (surface === "show-management-and-deletion") void loadLibrary();
+    if (surface === "show-management") void loadLibrary();
   }, [loadLibrary, surface]);
 
   async function refreshParentState() {
@@ -111,26 +109,6 @@ export function LegacyParentWorkflows({ secret, surface }: { secret: string; sur
     }
   }
 
-  async function deleteHousehold(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const response = await fetch(base, {
-      method: "DELETE",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ currentPin: data.get("currentPin"), confirmation: data.get("confirmation") }),
-    });
-    const result = await resultOf(response);
-    if (!response.ok) {
-      setDeleteStatus(String(result.error || "Deletion failed."));
-      return;
-    }
-    setDeleted(true);
-  }
-
-  if (deleted) {
-    return <section><h2>Household deleted</h2><p>All Household data and synced addon access have been permanently removed.</p></section>;
-  }
-
   if (surface === "search") {
     return <section className="legacy-workflows" aria-labelledby="legacy-search-heading">
       <h2 id="legacy-search-heading">Search Cinemeta</h2>
@@ -156,15 +134,6 @@ export function LegacyParentWorkflows({ secret, surface }: { secret: string; sur
         {shows.map((programme) => <LibraryShow key={programme.id} programme={programme} base={base} act={libraryAction} />)}
       </div>
     </section>}
-
-    <section><h2>Delete Household</h2><p className="warning">Permanent deletion removes the Approved Library, Channel state, history, PIN, and synced addon access. This cannot be undone.</p>
-      <form className="form" onSubmit={deleteHousehold}>
-        <label>Current PIN<input name="currentPin" type="password" inputMode="numeric" pattern="[0-9]{6}" required /></label>
-        <label>Type DELETE to confirm<input name="confirmation" pattern="DELETE" autoComplete="off" required /></label>
-        <Button type="submit">Permanently delete Household</Button>
-        <p id="delete-status" className="field-error" role="alert">{deleteStatus}</p>
-      </form>
-    </section>
   </div>;
 }
 
