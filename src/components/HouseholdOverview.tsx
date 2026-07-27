@@ -3,8 +3,23 @@ import { useCallback, useEffect, useState } from "react";
 import type { HouseholdOverview as OverviewData, OverviewTvProgramme } from "../overview";
 import { Button } from "./Button";
 
+const OVERVIEW_LOAD_ERROR = "The Household summary could not be loaded.";
+
 const episodeLabel = (programme: OverviewTvProgramme) =>
   `S${String(programme.episode.season).padStart(2, "0")}E${String(programme.episode.episode).padStart(2, "0")} — ${programme.episode.title}`;
+
+async function apiErrorMessage(response: Response) {
+  try {
+    const body: unknown = await response.json();
+    if (body && typeof body === "object" && "error" in body
+      && typeof body.error === "string" && body.error.trim()) {
+      return body.error;
+    }
+  } catch {
+    // Gateways and other intermediaries may return plain text or malformed JSON.
+  }
+  return OVERVIEW_LOAD_ERROR;
+}
 
 export function HouseholdOverview({ secret }: { secret: string }) {
   const [overview, setOverview] = useState<OverviewData | null>(null);
@@ -21,18 +36,22 @@ export function HouseholdOverview({ secret }: { secret: string }) {
       credentials: "same-origin",
       signal: controller.signal,
     }).then(async (response) => {
-      const result = await response.json() as OverviewData & { error?: string };
       if (response.status === 401) {
         window.dispatchEvent(new Event("parent-session-expired"));
         return;
       }
-      if (!response.ok) throw new Error(result.error);
-      setOverview(result);
-    }).catch((cause: unknown) => {
+      if (!response.ok) {
+        setError(await apiErrorMessage(response));
+        return;
+      }
+      try {
+        setOverview(await response.json() as OverviewData);
+      } catch {
+        setError(OVERVIEW_LOAD_ERROR);
+      }
+    }).catch(() => {
       if (controller.signal.aborted) return;
-      setError(cause instanceof Error && cause.message
-        ? cause.message
-        : "The Household summary could not be loaded.");
+      setError(OVERVIEW_LOAD_ERROR);
     });
     return () => controller.abort();
   }, [request, secret]);

@@ -73,3 +73,18 @@ test("Overview keeps its structure while loading and reports API failure accessi
   await expect(page.getByRole("alert")).toContainText("Summary service is temporarily unavailable.");
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
 });
+
+test("Overview gives concise feedback for a non-JSON API failure", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.route("**/api/households/*/overview", (route) => route.fulfill({
+    status: 502,
+    contentType: "text/plain",
+    body: "Upstream gateway failure",
+  }));
+
+  await page.goto(parentUrl);
+
+  const alert = page.getByRole("alert");
+  await expect(alert).toContainText("The Household summary could not be loaded.");
+  await expect(alert).not.toContainText(/JSON|Unexpected token|gateway failure/i);
+});
