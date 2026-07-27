@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { HeadContent, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
+import { QueryProvider } from "../components/QueryProvider";
 import "../styles.css";
 
 export const Route = createRootRoute({
@@ -30,7 +31,7 @@ export const Route = createRootRoute({
       <head><HeadContent /></head>
       <body>
         <a className="skip-link" href="#main">Skip to content</a>
-        {children}
+        <QueryProvider>{children}</QueryProvider>
         <Scripts />
       </body>
     </html>

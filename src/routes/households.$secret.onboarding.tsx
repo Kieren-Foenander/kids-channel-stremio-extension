@@ -1,6 +1,8 @@
+import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "../components/Button";
+import { parentApi, parentKeys } from "../lib/parent-api";
 
 export const Route = createFileRoute("/households/$secret/onboarding")({ component: OnboardingPage });
 
@@ -9,24 +11,16 @@ type CopyTarget = "manifest" | "parent";
 function OnboardingPage() {
   const { secret } = Route.useParams();
   const [status, setStatus] = useState("");
-  const [sessionReady, setSessionReady] = useState(false);
+  const sessionQuery = useQuery({
+    queryKey: parentKeys.session(secret),
+    queryFn: () => parentApi(`/api/households/${secret}/session`, { notifyOnUnauthorized: false }),
+    retry: false,
+  });
   const origin = window.location.origin;
   const manifestUrl = `${origin}/addons/${secret}/manifest.json`;
   const parentUrl = `${origin}/households/${secret}`;
   const installUrl = `stremio://${manifestUrl.replace(/^https?:\/\//, "")}`;
 
-  useEffect(() => {
-    let active = true;
-    void fetch(`/api/households/${secret}/session`, { credentials: "same-origin" })
-      .then((response) => {
-        if (!response.ok) throw new Error("session unavailable");
-        if (active) setSessionReady(true);
-      })
-      .catch(() => {
-        if (active) setStatus("Your Parent session could not be confirmed. Return to creation and try again.");
-      });
-    return () => { active = false; };
-  }, [secret]);
 
   async function copy(value: string, target: CopyTarget) {
     try {
@@ -43,7 +37,7 @@ function OnboardingPage() {
         <p className="eyebrow">Household created</p>
         <h1>Save your details, then install</h1>
         <p>Your Parent session is ready. You do not need to enter your PIN again.</p>
-        <span className="session-state" role="status">{sessionReady ? "Parent session confirmed for one hour." : "Confirming secure Parent session…"}</span>
+        <span className="session-state" role="status">{sessionQuery.isSuccess ? "Parent session confirmed for one hour." : sessionQuery.isError ? "Your Parent session could not be confirmed. Return to creation and try again." : "Confirming secure Parent session…"}</span>
       </header>
 
       <section className="warning warning-strong" aria-labelledby="save-heading">

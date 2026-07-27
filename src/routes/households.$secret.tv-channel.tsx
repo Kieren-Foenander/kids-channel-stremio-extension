@@ -1,6 +1,12 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { Button } from "../components/Button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { Card } from "../components/ui/card";
+import { Skeleton } from "../components/ui/skeleton";
+import { useTvChannel } from "../lib/channel-queries";
+import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
 export const Route = createFileRoute("/households/$secret/tv-channel")({ component: TvChannelPage });
 
@@ -33,130 +39,46 @@ type TvState = {
   canUndo: boolean;
 };
 
-type LoadReason = "initial" | "refresh";
-
 const HISTORY_PREVIEW_SIZE = 5;
-const POLL_INTERVAL_MS = 30_000;
 
 function episodeLabel(episode: Episode) {
   return `S${String(episode.season).padStart(2, "0")}E${String(episode.episode).padStart(2, "0")} — ${episode.title}`;
 }
 
-async function responseBody(response: Response): Promise<{ error?: string; message?: string } & Partial<TvState>> {
-  try {
-    return await response.json() as { error?: string; message?: string } & Partial<TvState>;
-  } catch {
-    return {};
-  }
-}
-
-function expireParentSession(response: Response, error?: string) {
-  if (response.status === 401 && error === "Parent authentication is required.") {
-    window.dispatchEvent(new Event("parent-session-expired"));
-  }
-}
-
 function TvChannelPage() {
   const { secret } = Route.useParams();
   const base = `/api/households/${secret}`;
-  const [state, setState] = useState<TvState | null>(null);
-  const [loadError, setLoadError] = useState("");
-  const [refreshStatus, setRefreshStatus] = useState("");
+  const queryClient = useQueryClient();
+  const channelQuery = useTvChannel<TvState>(secret);
+  const state = channelQuery.data;
   const [historyExpanded, setHistoryExpanded] = useState(false);
-  const [mutation, setMutation] = useState<"undo" | "regenerate" | null>(null);
   const [mutationStatus, setMutationStatus] = useState("");
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingRegeneration, setConfirmingRegeneration] = useState(false);
-  const mounted = useRef(true);
-  const activeLoad = useRef<Promise<void> | null>(null);
-  const lastVisibilityRefresh = useRef(0);
-
-  const loadState = useCallback(function loadState(reason: LoadReason = "refresh", afterInFlight = false): Promise<void> {
-    const currentLoad = activeLoad.current;
-    if (currentLoad) {
-      if (!afterInFlight) return currentLoad;
-      return currentLoad.then(() => mounted.current ? loadState(reason) : undefined);
-    }
-
-    const request = (async () => {
-      if (reason === "refresh") setRefreshStatus("Refreshing Channel data…");
-      try {
-        const response = await fetch(`${base}/tv-state`, { cache: "no-store", credentials: "same-origin" });
-        const result = await responseBody(response);
-        expireParentSession(response, result.error);
-        if (!mounted.current) return;
-        if (!response.ok || !Array.isArray(result.schedule) || !Array.isArray(result.recentPlayback)) {
-          setLoadError(result.error || "TV Channel data could not be loaded. Try again.");
-          setRefreshStatus("Channel data may be out of date.");
-          return;
-        }
-        setState(result as TvState);
-        setLoadError("");
-        if (reason === "refresh") setRefreshStatus("Channel data updated.");
-      } catch {
-        if (!mounted.current) return;
-        setLoadError("TV Channel data could not be loaded. Check your connection and try again.");
-        setRefreshStatus("Channel data may be out of date.");
-      } finally {
-        activeLoad.current = null;
-      }
-    })();
-    activeLoad.current = request;
-    return request;
-  }, [base]);
-
-  useEffect(() => {
-    mounted.current = true;
-    void loadState("initial");
-    return () => { mounted.current = false; };
-  }, [loadState]);
-
-  useEffect(() => {
-    const refreshWhenVisible = () => {
-      if (document.visibilityState !== "visible") return;
-      const now = Date.now();
-      if (now - lastVisibilityRefresh.current < 250) return;
-      lastVisibilityRefresh.current = now;
-      void loadState();
-    };
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void loadState();
-    }, POLL_INTERVAL_MS);
-    window.addEventListener("focus", refreshWhenVisible);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    return () => {
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refreshWhenVisible);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
-  }, [loadState]);
+  const actionMutation = useMutation({
+    mutationFn: async (kind: "undo" | "regenerate") => {
+      const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
+      return parentApi<{ message?: string }>(`${base}${path}`, { method: "POST" });
+    },
+  });
 
   async function performAction(kind: "undo" | "regenerate") {
-    if (mutation) return;
-    setMutation(kind);
+    if (actionMutation.isPending) return;
     setMutationStatus("");
     setMutationFailed(false);
     try {
-      const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
-      const response = await fetch(`${base}${path}`, { method: "POST", credentials: "same-origin" });
-      const result = await responseBody(response);
-      expireParentSession(response, result.error);
-      if (!response.ok) {
-        setMutationFailed(true);
-        setMutationStatus(result.error || `The ${kind === "undo" ? "advancement" : "schedule"} could not be changed. Try again.`);
-        return;
-      }
-      await loadState("refresh", true);
+      const result = await actionMutation.mutateAsync(kind);
+      await queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) });
       setMutationStatus(result.message || (kind === "undo" ? "Most recent advancement undone." : "Upcoming TV selections regenerated."));
       window.dispatchEvent(new Event("stremio-restart-required"));
-    } catch {
+    } catch (error) {
       setMutationFailed(true);
-      setMutationStatus("The TV Channel could not be changed. Check your connection and try again.");
-    } finally {
-      if (mounted.current) setMutation(null);
+      setMutationStatus(apiErrorMessage(error, "The TV Channel could not be changed. Check your connection and try again."));
+      throw error;
     }
   }
 
+  const mutation = actionMutation.isPending ? actionMutation.variables : null;
   const history = state?.recentPlayback ?? [];
   const visibleHistory = historyExpanded ? history : history.slice(0, HISTORY_PREVIEW_SIZE);
 
@@ -169,26 +91,26 @@ function TvChannelPage() {
       </header>
 
       {!state ? (
-        loadError ? (
-          <div className="card channel-load-error">
+        channelQuery.isError ? (
+          <Card className="channel-load-error">
             <h2>TV Channel unavailable</h2>
-            <p role="alert">{loadError}</p>
-            <Button type="button" className="button-secondary" onClick={() => void loadState("initial")}>Try again</Button>
-          </div>
+            <p role="alert">{apiErrorMessage(channelQuery.error, "TV Channel data could not be loaded. Check your connection and try again.")}</p>
+            <Button type="button" className="button-secondary" onClick={() => void channelQuery.refetch()}>Try again</Button>
+          </Card>
         ) : <ChannelSkeleton />
       ) : (
         <>
-          {loadError && <p className="inline-error" role="alert">{loadError}</p>}
-          <p className="sr-status" role="status" aria-live="polite">{refreshStatus}</p>
+          {channelQuery.isError && <p className="inline-error" role="alert">Channel data may be out of date.</p>}
+          <p className="sr-status" role="status" aria-live="polite">{channelQuery.isFetching ? "Refreshing Channel data…" : ""}</p>
 
-          <section className="card current-programme" aria-labelledby="current-programme-heading">
+          <Card className="current-programme" aria-labelledby="current-programme-heading">
             <div>
               <h2 id="current-programme-heading" className="eyebrow">Current Programme</h2>
               <h3>{state.current?.showTitle || "Nothing scheduled"}</h3>
               {state.current ? <p className="current-episode">{episodeLabel(state.current.episode)}</p> : <p>Add or resume an approved show to start the TV Channel.</p>}
             </div>
             {state.current?.poster && <img src={state.current.poster} alt={`Poster for ${state.current.showTitle}`} />}
-          </section>
+          </Card>
 
           <section className="channel-section" aria-labelledby="schedule-heading">
             <div className="section-heading-row">
@@ -230,24 +152,26 @@ function TvChannelPage() {
         </>
       )}
 
-      {confirmingRegeneration && <ConfirmationDialog pending={mutation === "regenerate"} onCancel={() => setConfirmingRegeneration(false)} onConfirm={async () => { await performAction("regenerate"); if (mounted.current) setConfirmingRegeneration(false); }} />}
+      <ConfirmationDialog open={confirmingRegeneration} pending={mutation === "regenerate"} onOpenChange={setConfirmingRegeneration} onConfirm={() => performAction("regenerate")} />
     </section>
   );
 }
 
 function ChannelSkeleton() {
-  return <div className="channel-skeleton" role="status" aria-live="polite" aria-busy="true" aria-label="Loading TV Channel"><div className="card skeleton-block skeleton-current" /><div className="skeleton-block skeleton-list" /><span className="sr-only">Loading TV Channel…</span></div>;
+  return <div className="channel-skeleton" role="status" aria-live="polite" aria-busy="true" aria-label="Loading TV Channel"><Skeleton className="skeleton-block skeleton-current" /><Skeleton className="skeleton-block skeleton-list" /><span className="sr-only">Loading TV Channel…</span></div>;
 }
 
-function ConfirmationDialog({ pending, onCancel, onConfirm }: { pending: boolean; onCancel: () => void; onConfirm: () => Promise<void> }) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  useEffect(() => { dialogRef.current?.showModal(); }, []);
-  return <dialog ref={dialogRef} className="confirmation-dialog card" aria-labelledby="regenerate-dialog-title" aria-describedby="regenerate-dialog-description" onCancel={(event) => { if (pending) event.preventDefault(); else onCancel(); }}>
-    <h2 id="regenerate-dialog-title">Regenerate upcoming selections?</h2>
-    <p id="regenerate-dialog-description">This changes only upcoming TV selections. The Current Programme and Show Progress remain unchanged.</p>
-    <div className="dialog-actions">
-      <Button type="button" className="button-secondary" disabled={pending} onClick={onCancel}>Cancel</Button>
-      <Button type="button" disabled={pending} autoFocus onClick={() => void onConfirm()}>{pending ? "Regenerating…" : "Regenerate selections"}</Button>
-    </div>
-  </dialog>;
+function ConfirmationDialog({ open, pending, onOpenChange, onConfirm }: { open: boolean; pending: boolean; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
+  return <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
+    <DialogContent className="data-closed:hidden" showCloseButton={false}>
+      <DialogHeader>
+        <DialogTitle>Regenerate upcoming selections?</DialogTitle>
+        <DialogDescription>This changes only upcoming TV selections. The Current Programme and Show Progress remain unchanged.</DialogDescription>
+      </DialogHeader>
+      <DialogFooter>
+        <Button type="button" className="button-secondary" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Regenerating…" : "Regenerate selections"}</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>;
 }

@@ -1,9 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
 import { Button } from "../components/Button";
+import { apiErrorMessage, parentApi } from "../lib/parent-api";
 
 const schema = z.object({
   pin: z.string().regex(/^\d{6}$/, "Enter exactly six digits."),
@@ -17,34 +18,28 @@ export const Route = createFileRoute("/")({ component: CreateHouseholdPage });
 
 function CreateHouseholdPage() {
   const navigate = useNavigate();
-  const [serverError, setServerError] = useState("");
-  const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<FormValues>({
+  const createMutation = useMutation({
+    mutationFn: (values: FormValues) => parentApi<CreatedHousehold>("/api/households", { method: "POST", body: values }),
+  });
+  const { register, handleSubmit, formState: { errors } } = useForm<FormValues>({
     resolver: zodResolver(schema),
     defaultValues: { pin: "" },
   });
 
   async function createHousehold(values: FormValues) {
-    setServerError("");
     try {
-      const response = await fetch("/api/households", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(values),
-      });
-      const result = await response.json() as CreatedHousehold & { error?: string };
-      if (!response.ok) {
-        setServerError(result.error || "Household creation failed. Try again.");
-        return;
-      }
+      const result = await createMutation.mutateAsync(values);
       const secret = new URL(result.parentUrl, window.location.origin).pathname.split("/").at(-1);
       if (!secret) throw new Error("The private Parent Page URL was missing.");
       await navigate({ to: "/households/$secret/onboarding", params: { secret } });
     } catch {
-      setServerError("Household creation is temporarily unavailable. Try again.");
+      // TanStack Query retains the error for the inline form message.
     }
   }
 
-  const error = errors.pin?.message || serverError;
+  const error = errors.pin?.message || (createMutation.isError
+    ? apiErrorMessage(createMutation.error, "Household creation is temporarily unavailable. Try again.")
+    : "");
   return (
     <main id="main" className="page-shell">
       <header className="hero">
@@ -72,8 +67,8 @@ function CreateHouseholdPage() {
           <strong>Keep your PIN safe.</strong>
           <span> It cannot be recovered if you lose it.</span>
         </aside>
-        <Button type="submit" disabled={isSubmitting}>
-          {isSubmitting ? "Creating Household…" : "Create Household"}
+        <Button type="submit" disabled={createMutation.isPending}>
+          {createMutation.isPending ? "Creating Household…" : "Create Household"}
         </Button>
       </form>
     </main>

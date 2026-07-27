@@ -1,5 +1,7 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
+import { ParentApiError, parentApi, parentKeys } from "../lib/parent-api";
 import { Button } from "./Button";
 
 type SessionState = "checking" | "authenticated" | "locked" | "expired";
@@ -15,16 +17,19 @@ const destinations = [
 ] as const;
 
 function applyTheme(theme: Theme) {
-  document.documentElement.dataset.theme = theme;
   if (theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = theme;
+  const systemIsDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+  const isDark = theme === "dark" || (theme === "system" && systemIsDark);
+  document.documentElement.classList.toggle("dark", isDark);
+  document.documentElement.style.setProperty("--parent-secondary-foreground", isDark ? "#f1f2ee" : "#20231f");
 }
 
 export function ParentShell({ secret }: { secret: string }) {
   const location = useLocation();
   const [session, setSession] = useState<SessionState>("checking");
+  const queryClient = useQueryClient();
   const [error, setError] = useState("");
-  const [isUnlocking, setIsUnlocking] = useState(false);
-  const [isLocking, setIsLocking] = useState(false);
   const [lockError, setLockError] = useState("");
   const [theme, setTheme] = useState<Theme>("system");
   const [expiresIn, setExpiresIn] = useState(60 * 60);
@@ -39,42 +44,48 @@ export function ParentShell({ secret }: { secret: string }) {
   }, []);
 
   useEffect(() => {
-    let active = true;
+    if (theme !== "system") return;
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => applyTheme("system");
+    preference.addEventListener("change", update);
+    return () => preference.removeEventListener("change", update);
+  }, [theme]);
 
-    async function checkSession() {
-      try {
-        const response = await fetch(`/api/households/${secret}/session`, {
-          credentials: "same-origin",
-          cache: "no-store",
-        });
-        if (!active) return;
-        if (response.ok) {
-          const result = await response.json() as { expiresIn?: number };
-          wasAuthenticated.current = true;
-          setExpiresIn(Math.max(1, result.expiresIn ?? 60 * 60));
-          setSession("authenticated");
-        } else {
-          setSession(wasAuthenticated.current ? "expired" : "locked");
-        }
-      } catch {
-        if (active) {
-          setSession(wasAuthenticated.current ? "expired" : "locked");
-          setError("Parent access could not be checked. Try again.");
-        }
+  const sessionQuery = useQuery({
+    queryKey: parentKeys.session(secret),
+    queryFn: () => parentApi<{ expiresIn?: number }>(`/api/households/${secret}/session`, { notifyOnUnauthorized: false }),
+    retry: false,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    if (sessionQuery.error) {
+      setSession(wasAuthenticated.current ? "expired" : "locked");
+      if (!(sessionQuery.error instanceof ParentApiError) || sessionQuery.error.status !== 401) {
+        setError("Parent access could not be checked. Try again.");
       }
+    } else if (sessionQuery.data) {
+      wasAuthenticated.current = true;
+      setExpiresIn(Math.max(1, sessionQuery.data.expiresIn ?? 60 * 60));
+      setSession("authenticated");
+      setError("");
     }
+  }, [sessionQuery.data, sessionQuery.error]);
 
-    void checkSession();
-    const onFocus = () => void checkSession();
-    const onExpired = () => setSession("expired");
+  useEffect(() => {
+    const onFocus = () => void sessionQuery.refetch();
+    const onExpired = () => {
+      wasAuthenticated.current = true;
+      setSession("expired");
+      void queryClient.invalidateQueries({ queryKey: parentKeys.session(secret) });
+    };
     window.addEventListener("focus", onFocus);
     window.addEventListener("parent-session-expired", onExpired);
     return () => {
-      active = false;
       window.removeEventListener("focus", onFocus);
       window.removeEventListener("parent-session-expired", onExpired);
     };
-  }, [secret]);
+  }, [queryClient, secret, sessionQuery.refetch]);
 
   useEffect(() => {
     if (session !== "authenticated") return;
@@ -88,54 +99,43 @@ export function ParentShell({ secret }: { secret: string }) {
     return () => window.removeEventListener("stremio-restart-required", showRestartNotice);
   }, []);
 
+  const unlockMutation = useMutation({
+    mutationFn: (pin: FormDataEntryValue | null) => parentApi(`/api/households/${secret}/unlock`, {
+      method: "POST",
+      body: { pin },
+      notifyOnUnauthorized: false,
+    }),
+  });
+  const lockMutation = useMutation({
+    mutationFn: () => parentApi(`/api/households/${secret}/lock`, { method: "POST" }),
+  });
+
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
-    setIsUnlocking(true);
     const form = event.currentTarget;
-    const pin = new FormData(form).get("pin");
     try {
-      const response = await fetch(`/api/households/${secret}/unlock`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ pin }),
-      });
-      const result = await response.json() as { error?: string };
-      if (!response.ok) {
-        setError(result.error || "The Parent Page could not be unlocked.");
-        return;
-      }
+      await unlockMutation.mutateAsync(new FormData(form).get("pin"));
       form.reset();
       wasAuthenticated.current = true;
+      queryClient.setQueryData(parentKeys.session(secret), { expiresIn: 60 * 60 });
       setExpiresIn(60 * 60);
       setSession("authenticated");
-    } catch {
-      setError("Parent access is temporarily unavailable. Try again.");
-    } finally {
-      setIsUnlocking(false);
+    } catch (unlockError) {
+      setError(unlockError instanceof ParentApiError ? unlockError.message : "Parent access is temporarily unavailable. Try again.");
     }
   }
 
   async function lock() {
-    if (isLocking) return;
-    setIsLocking(true);
+    if (lockMutation.isPending) return;
     setLockError("");
     try {
-      const response = await fetch(`/api/households/${secret}/lock`, {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!response.ok) {
-        setLockError("The Parent Page could not be locked. Try again.");
-        return;
-      }
+      await lockMutation.mutateAsync();
       wasAuthenticated.current = false;
+      queryClient.removeQueries({ queryKey: ["household", secret] });
       setSession("locked");
     } catch {
       setLockError("The Parent Page could not be locked. Try again.");
-    } finally {
-      setIsLocking(false);
     }
   }
 
@@ -164,7 +164,7 @@ export function ParentShell({ secret }: { secret: string }) {
             <input id="parent-pin" name="pin" type="password" inputMode="numeric" pattern="[0-9]{6}" minLength={6} maxLength={6} autoComplete="current-password" required aria-describedby="unlock-error" />
             <p id="unlock-error" className="field-error" role="alert">{error}</p>
           </div>
-          <Button type="submit" disabled={isUnlocking}>{isUnlocking ? "Unlocking…" : "Unlock Household"}</Button>
+          <Button type="submit" disabled={unlockMutation.isPending}>{unlockMutation.isPending ? "Unlocking…" : "Unlock Household"}</Button>
         </form>
       </main>
     );
@@ -177,7 +177,7 @@ export function ParentShell({ secret }: { secret: string }) {
         <Navigation secret={secret} />
         <div className="sidebar-controls">
           <ThemeChoice id="theme-desktop" theme={theme} chooseTheme={chooseTheme} />
-          <Button type="button" className="button-secondary" disabled={isLocking} onClick={() => void lock()}>{isLocking ? "Locking…" : "Lock Parent Page"}</Button>
+          <Button type="button" className="button-secondary" style={theme === "light" ? { color: "#20231f" } : undefined} disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
         </div>
       </aside>
       <header className="mobile-header">
@@ -188,7 +188,7 @@ export function ParentShell({ secret }: { secret: string }) {
             <Navigation secret={secret} closeOnNavigate />
             <div className="mobile-controls">
               <ThemeChoice id="theme-mobile" theme={theme} chooseTheme={chooseTheme} />
-              <Button type="button" className="button-secondary" disabled={isLocking} onClick={() => void lock()}>{isLocking ? "Locking…" : "Lock Parent Page"}</Button>
+              <Button type="button" className="button-secondary" style={theme === "light" ? { color: "#20231f" } : undefined} disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
             </div>
           </div>
         </details>

@@ -1,70 +1,32 @@
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
 import type { HouseholdOverview as OverviewData, OverviewTvProgramme } from "../overview";
+import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 import { Button } from "./Button";
+import { Card } from "./ui/card";
+import { Skeleton } from "./ui/skeleton";
 
 const OVERVIEW_LOAD_ERROR = "The Household summary could not be loaded.";
 
 const episodeLabel = (programme: OverviewTvProgramme) =>
   `S${String(programme.episode.season).padStart(2, "0")}E${String(programme.episode.episode).padStart(2, "0")} — ${programme.episode.title}`;
 
-async function apiErrorMessage(response: Response) {
-  try {
-    const body: unknown = await response.json();
-    if (body && typeof body === "object" && "error" in body
-      && typeof body.error === "string" && body.error.trim()) {
-      return body.error;
-    }
-  } catch {
-    // Gateways and other intermediaries may return plain text or malformed JSON.
-  }
-  return OVERVIEW_LOAD_ERROR;
-}
-
 export function HouseholdOverview({ secret }: { secret: string }) {
-  const [overview, setOverview] = useState<OverviewData | null>(null);
-  const [error, setError] = useState("");
-  const [request, setRequest] = useState(0);
+  const overviewQuery = useQuery({
+    queryKey: parentKeys.overview(secret),
+    queryFn: () => parentApi<OverviewData>(`/api/households/${secret}/overview`),
+  });
+  const overview = overviewQuery.data;
 
-  const load = useCallback(() => setRequest((value) => value + 1), []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setError("");
-    fetch(`/api/households/${secret}/overview`, {
-      cache: "no-store",
-      credentials: "same-origin",
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (response.status === 401) {
-        window.dispatchEvent(new Event("parent-session-expired"));
-        return;
-      }
-      if (!response.ok) {
-        setError(await apiErrorMessage(response));
-        return;
-      }
-      try {
-        setOverview(await response.json() as OverviewData);
-      } catch {
-        setError(OVERVIEW_LOAD_ERROR);
-      }
-    }).catch(() => {
-      if (controller.signal.aborted) return;
-      setError(OVERVIEW_LOAD_ERROR);
-    });
-    return () => controller.abort();
-  }, [request, secret]);
-
-  if (!overview && !error) return <OverviewSkeleton />;
+  if (overviewQuery.isPending) return <OverviewSkeleton />;
 
   if (!overview) {
     return (
-      <section className="overview-error card" role="alert">
+      <Card className="overview-error" role="alert">
         <h2>Household summary unavailable</h2>
-        <p>{error}</p>
-        <Button type="button" className="button-secondary" onClick={load}>Try again</Button>
-      </section>
+        <p>{apiErrorMessage(overviewQuery.error, OVERVIEW_LOAD_ERROR)}</p>
+        <Button type="button" className="button-secondary" onClick={() => void overviewQuery.refetch()}>Try again</Button>
+      </Card>
     );
   }
 
@@ -172,9 +134,9 @@ function OverviewSkeleton() {
   return (
     <div className="overview overview-skeleton" aria-busy="true" aria-label="Loading Household overview">
       <span className="sr-only">Loading Household overview…</span>
-      <section><div className="skeleton-line skeleton-heading" /><div className="current-grid"><div className="skeleton-card" /><div className="skeleton-card" /></div></section>
-      <section className="overview-panel"><div className="skeleton-line skeleton-heading" /><div className="skeleton-row" /><div className="skeleton-row" /></section>
-      <section className="library-summary card"><div className="skeleton-line skeleton-heading" /><div className="skeleton-row" /></section>
+      <section><Skeleton className="skeleton-line skeleton-heading" /><div className="current-grid"><Skeleton className="skeleton-card" /><Skeleton className="skeleton-card" /></div></section>
+      <section className="overview-panel"><Skeleton className="skeleton-line skeleton-heading" /><Skeleton className="skeleton-row" /><Skeleton className="skeleton-row" /></section>
+      <Card className="library-summary"><Skeleton className="skeleton-line skeleton-heading" /><Skeleton className="skeleton-row" /></Card>
     </div>
   );
 }
