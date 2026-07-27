@@ -17,6 +17,22 @@ export interface ApprovedProgramme {
   showProgress?: CinemetaEpisode;
 }
 
+export interface ApprovedProgrammeSummary {
+  id: string;
+  imdbId: string;
+  type: ContentType;
+  title: string;
+  poster?: string;
+  releaseInfo?: string;
+  genres: string[];
+  imdbRating?: string;
+  approvedAt: string;
+  pausedAt?: string;
+  current: boolean;
+  finished: boolean;
+  showProgress?: CinemetaEpisode;
+}
+
 interface StoredProgramme {
   id: string;
   imdb_id: string;
@@ -107,22 +123,57 @@ export async function approveProgramme(
   return { ...title, id, imdbId: title.id, approvedAt, showProgress: startingEpisode };
 }
 
-export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgramme[]> {
-  const rows = await db.prepare(`SELECT p.*, progress.next_video_id
-    FROM approved_programmes p
-    LEFT JOIN show_progress progress ON progress.programme_id = p.id
-    WHERE p.household_id = ? ORDER BY p.approved_at, p.title`).bind(householdId).all<StoredProgramme>();
+type SummaryRow = StoredProgramme & {
+  is_current: number;
+  progress_video_id: string | null;
+  progress_season: number | null;
+  progress_episode: number | null;
+  progress_title: string | null;
+  progress_released_at: string | null;
+};
 
-  const programmes: ApprovedProgramme[] = [];
-  for (const row of rows.results) {
+/** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
+ * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
+export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
+  const rows = await db.prepare(`SELECT p.*,
+      CASE WHEN current.programme_id IS NULL THEN 0 ELSE 1 END AS is_current,
+      progress.next_video_id AS progress_video_id,
+      episode.season AS progress_season, episode.episode AS progress_episode,
+      episode.title AS progress_title, episode.released_at AS progress_released_at
+    FROM approved_programmes p
+    LEFT JOIN current_programmes current
+      ON current.household_id = p.household_id AND current.programme_id = p.id
+    LEFT JOIN show_progress progress ON progress.programme_id = p.id
+    LEFT JOIN show_episodes episode
+      ON episode.programme_id = p.id AND episode.video_id = progress.next_video_id
+    WHERE p.household_id = ?
+    ORDER BY p.approved_at, p.title`).bind(householdId).all<SummaryRow>();
+
+  return rows.results.map((row) => {
     const programme = programmeFromRow(row);
-    if (programme.type === "show") {
-      const episodeRows = await db.prepare(`SELECT video_id, season, episode, title, released_at, overview
-        FROM show_episodes WHERE programme_id = ? ORDER BY season, episode`).bind(programme.id).all<Record<string, unknown>>();
-      programme.episodes = episodeRows.results.map(episodeFromRow);
-      programme.showProgress = programme.episodes.find((episode) => episode.id === row.next_video_id);
-    }
-    programmes.push(programme);
-  }
-  return programmes;
+    const showProgress = row.progress_video_id && row.progress_season !== null && row.progress_episode !== null
+      ? {
+          id: row.progress_video_id,
+          season: row.progress_season,
+          episode: row.progress_episode,
+          title: row.progress_title ?? "Untitled episode",
+          released: row.progress_released_at ?? "",
+        }
+      : undefined;
+    return {
+      id: programme.id,
+      imdbId: programme.imdbId,
+      type: programme.type,
+      title: programme.title,
+      poster: programme.poster,
+      releaseInfo: programme.releaseInfo,
+      genres: programme.genres,
+      imdbRating: programme.imdbRating,
+      approvedAt: programme.approvedAt,
+      pausedAt: programme.pausedAt,
+      current: Boolean(row.is_current),
+      finished: programme.type === "show" && !row.progress_video_id,
+      showProgress,
+    };
+  });
 }

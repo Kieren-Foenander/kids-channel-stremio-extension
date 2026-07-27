@@ -447,8 +447,14 @@ describe("Cinemeta Approved Library", () => {
 
     const library = await (await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, { headers })).json<any>();
     expect(library.programmes).toHaveLength(1);
-    expect(library.programmes[0].episodes.map((episode: any) => episode.id)).toEqual(["tt1234567:1:1", "tt1234567:1:2"]);
-    expect(library.programmes[0].showProgress.id).toBe("tt1234567:1:1");
+    expect(library.programmes[0]).toMatchObject({
+      imdbId: "tt1234567", type: "show", current: false, finished: false,
+      showProgress: { id: "tt1234567:1:1", season: 1, episode: 1, title: "First" },
+    });
+    expect(library.programmes[0]).not.toHaveProperty("episodes");
+    expect(library.programmes[0]).not.toHaveProperty("description");
+    expect(library.programmes[0]).not.toHaveProperty("background");
+    expect(JSON.stringify(library.programmes[0])).not.toContain("Second");
   });
 
   it("accepts another valid starting episode and rejects specials, unreleased, and unknown episodes", async () => {
