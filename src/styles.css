@@ -152,11 +152,13 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 }
 
 
-/* TV Channel operational destination */
+/* Channel operational destinations */
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; padding: 0; border: 0; margin: -1px; clip: rect(0, 0, 0, 0); white-space: nowrap; }
 .sr-status { min-height: 1.4rem; margin: -1rem 0 1rem; color: #62675f; font-size: .85rem; }
-.tv-channel-page { display: grid; gap: 2rem; }
-.tv-channel-page .destination-header { margin-bottom: 0; }
+.tv-channel-page, .movie-channel-page { display: grid; gap: 2rem; }
+.tv-channel-page .destination-header, .movie-channel-page .destination-header { margin-bottom: 0; }
+.movie-current-programme { border-left-color: #8a6425; }
+.movie-rotation-list .schedule-marker { border-radius: .3rem; }
 .current-programme { display: flex; min-height: 12rem; align-items: center; justify-content: space-between; gap: 1.5rem; border-left: .35rem solid #35604b; }
 .current-programme h2 { margin: 0; }
 .current-programme h3 { margin: .2rem 0 .45rem; font-size: clamp(1.65rem, 4vw, 2.45rem); letter-spacing: -.025em; }
