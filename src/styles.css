@@ -269,6 +269,57 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
   .library-tabs button { flex: 1; padding-inline: .4rem; }
 }
 
+/* Add Programmes */
+.add-programmes-page { display: grid; gap: 1.75rem; }
+.add-programmes-page .destination-header { margin-bottom: 0; }
+.search-panel h2, .search-results h2, .search-error h2 { margin: 0; font-size: 1.55rem; }
+.programme-search-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .8rem; align-items: end; margin-top: 1rem; }
+.programme-search-form input { margin-top: .45rem; letter-spacing: normal; }
+.search-results { display: grid; gap: 1.25rem; }
+.search-results-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; }
+.search-results-heading p { margin: 0; }
+.search-results-heading > p { color: #62675f; font-size: .85rem; font-weight: 700; }
+.search-status { margin: 0; color: #62675f; font-size: .9rem; }
+.search-poster-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+.search-programme-card { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border: 1px solid #d7d5cd; border-radius: .85rem; background: rgb(255 255 255 / 68%); }
+.search-poster { position: relative; display: grid; width: 100%; aspect-ratio: 2 / 3; place-items: center; overflow: hidden; background: #e2e2dc; color: #62675f; font-size: .75rem; font-weight: 800; text-transform: uppercase; }
+.search-poster img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.search-programme-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; align-items: flex-start; padding: .85rem; }
+.search-programme-copy .eyebrow { margin: 0 0 .2rem; }
+.search-programme-copy h3 { margin: 0; overflow-wrap: anywhere; font-size: 1rem; line-height: 1.3; }
+.search-metadata { margin: .45rem 0; color: #5b6058; font-size: .78rem; line-height: 1.45; }
+.search-programme-copy .state-badge { margin-top: .25rem; }
+.search-programme-copy .button { width: 100%; margin-top: auto; padding-top: .7rem; }
+.pagination { display: flex; align-items: center; justify-content: center; gap: 1rem; }
+.pagination span { font-size: .9rem; font-weight: 700; }
+.search-empty, .search-error { box-shadow: none; }
+.search-empty h3 { margin: 0 0 .45rem; }
+.search-empty p, .search-error p { color: #555b52; line-height: 1.5; }
+.programme-detail-dialog { max-width: 32rem; }
+.programme-detail-dialog [data-slot="dialog-title"] { font-size: 1.45rem; line-height: 1.25; }
+.programme-detail-dialog .eyebrow { margin: 0; }
+.programme-detail-dialog .search-metadata { margin-top: .25rem; }
+.programme-description { max-height: min(40vh, 18rem); overflow-y: auto; color: inherit; line-height: 1.6; }
+.approval-success { margin: 0; color: #35604b; font-weight: 750; }
+:root[data-theme="dark"] .search-programme-card { border-color: #414741; background: rgb(34 38 34 / 70%); }
+:root[data-theme="dark"] .search-poster { background: #343934; color: #ccd0ca; }
+:root[data-theme="dark"] .search-metadata, :root[data-theme="dark"] .search-status, :root[data-theme="dark"] .search-results-heading > p, :root[data-theme="dark"] .search-empty p, :root[data-theme="dark"] .search-error p { color: #bcc1b9; }
+:root[data-theme="dark"] .approval-success { color: #8fc5a7; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) .search-programme-card { border-color: #414741; background: rgb(34 38 34 / 70%); }
+  :root:not([data-theme]) .search-poster { background: #343934; color: #ccd0ca; }
+  :root:not([data-theme]) .search-metadata, :root:not([data-theme]) .search-status, :root:not([data-theme]) .search-results-heading > p, :root:not([data-theme]) .search-empty p, :root:not([data-theme]) .search-error p { color: #bcc1b9; }
+}
+@media (max-width: 680px) { .search-poster-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 520px) {
+  .programme-search-form { grid-template-columns: 1fr; }
+  .programme-search-form .button { width: 100%; }
+  .search-poster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+  .search-results-heading { align-items: flex-start; flex-direction: column; }
+  .pagination { justify-content: space-between; gap: .5rem; }
+}
+@media (max-width: 340px) { .search-programme-copy { padding: .7rem; } }
+
 .legacy-workflows { display: grid; gap: 2.5rem; margin-top: 2.5rem; }
 .legacy-workflows section { min-width: 0; padding-top: 1rem; border-top: 1px solid #d7d5cd; }
 .legacy-workflows h2 { margin: 0 0 1rem; font-size: 1.6rem; }
