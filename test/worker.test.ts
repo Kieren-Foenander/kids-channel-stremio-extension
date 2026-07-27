@@ -14,7 +14,13 @@ beforeEach(async () => {
     secret TEXT UNIQUE NOT NULL,
     pin_salt TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    auth_version INTEGER NOT NULL DEFAULT 1
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pin_attempts (
+    household_id TEXT NOT NULL, origin_hash TEXT NOT NULL, failed_attempts INTEGER NOT NULL,
+    window_started_at INTEGER NOT NULL, blocked_until INTEGER,
+    PRIMARY KEY (household_id, origin_hash)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS approved_programmes (
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
@@ -80,6 +86,7 @@ beforeEach(async () => {
     played_at TEXT NOT NULL
   )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
+  await env.DB.prepare("DELETE FROM pin_attempts").run();
   await env.DB.prepare("DELETE FROM movie_playback_history").run();
   await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
   await env.DB.prepare("DELETE FROM movie_advancements").run();
@@ -172,6 +179,65 @@ describe("Parent Page Household creation", () => {
     });
     expect(unlocked.status).toBe(200);
     expect(await unlocked.json()).toMatchObject({ manifestUrl: created.manifestUrl });
+  });
+
+  it("rate-limits PIN failures by Household and request origin without exposing secrets", async () => {
+    const first = await create();
+    const second = await create("654321");
+    const unlock = (created: CreatedHousehold, pin: string, origin: string) => SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(created)}/unlock`,
+      { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": origin }, body: JSON.stringify({ pin }) },
+    );
+
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      expect((await unlock(first, "000000", "192.0.2.10")).status).toBe(401);
+    }
+    const limited = await unlock(first, "000000", "192.0.2.10");
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("900");
+    const limitedBody = await limited.text();
+    expect(limitedBody).not.toContain(secretFrom(first));
+    expect(limitedBody).not.toContain("000000");
+
+    expect((await unlock(first, "123456", "192.0.2.11")).status).toBe(200);
+    expect((await unlock(second, "654321", "192.0.2.10")).status).toBe(200);
+  });
+
+  it("rotates the PIN only with the current PIN and invalidates older Parent sessions", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await unlocked.json<{ parentToken: string }>();
+    const authorization = `Bearer ${parentToken}`;
+
+    const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
+      method: "PUT", headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ currentPin: "000000", newPin: "654321" }),
+    });
+    expect(denied.status).toBe(401);
+
+    const rotated = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
+      method: "PUT", headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({ currentPin: "123456", newPin: "654321" }),
+    });
+    expect(rotated.status).toBe(200);
+    const rotatedBody = await rotated.json<{ parentToken: string }>();
+    expect(rotatedBody.parentToken).not.toBe(parentToken);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, { headers: { authorization } })).status).toBe(401);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, {
+      headers: { authorization: `Bearer ${rotatedBody.parentToken}` },
+    })).status).toBe(200);
+
+    const oldPin = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    expect(oldPin.status).toBe(401);
+    const newPin = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "654321" }),
+    });
+    expect(newPin.status).toBe(200);
   });
 });
 
@@ -847,6 +913,71 @@ describe("Movie Channel rotation and sign-off", () => {
     const clamped = await SELF.fetch(url, { headers: { range: "bytes=100-999999" } });
     expect(clamped.status).toBe(206);
     expect(clamped.headers.get("content-range")).toBe(`bytes 100-${length - 1}/${length}`);
+  });
+});
+
+describe("Household deletion", () => {
+  it("requires explicit confirmation and current PIN, removes all state, and invalidates every synced route", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const unlock = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const { parentToken } = await unlock.json<{ parentToken: string }>();
+    const headers = { authorization: `Bearer ${parentToken}`, "content-type": "application/json" };
+
+    const unconfirmed = await SELF.fetch(`https://kids.test/api/households/${secret}`, {
+      method: "DELETE", headers, body: JSON.stringify({ currentPin: "123456", confirmation: "delete" }),
+    });
+    expect(unconfirmed.status).toBe(400);
+    const wrongPin = await SELF.fetch(`https://kids.test/api/households/${secret}`, {
+      method: "DELETE", headers, body: JSON.stringify({ currentPin: "000000", confirmation: "DELETE" }),
+    });
+    expect(wrongPin.status).toBe(401);
+
+    const householdId = created.householdId;
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+      VALUES ('programme-delete', ?, 'tt1234567', 'show', 'Delete me', '[]', 'now')`).bind(householdId).run();
+    await env.DB.prepare("INSERT INTO show_episodes VALUES ('programme-delete', 'tt1234567:1:1', 1, 1, 'Pilot', 'now', NULL)").run();
+    await env.DB.prepare("INSERT INTO show_progress VALUES ('programme-delete', 'tt1234567:1:1')").run();
+    await env.DB.prepare("INSERT INTO current_programmes VALUES (?, 'tv', 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO channel_state VALUES (?, 'tv', 0, 'seed', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO channel_schedule VALUES (?, 'tv', 0, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO channel_advancements VALUES (?, 'tv', 0, 1, 'owner', 'now')").bind(householdId).run();
+    await env.DB.prepare(`INSERT INTO tv_advancement_history VALUES
+      ('history-delete', ?, 0, 1, 'programme-delete', 'tt1234567:1:1', 'programme-delete', 'tt1234567:1:1', '{}', '{}', 'now', NULL, NULL)`).bind(householdId).run();
+    await env.DB.prepare("INSERT INTO movie_channel_state VALUES (?, 1, 0, 'seed', 'now', 0)").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO movie_rotation VALUES (?, 1, 0, 'programme-delete', NULL)").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO movie_advancements VALUES (?, 1, 0, 'owner', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO movie_channel_mutations VALUES (?, 0, 'owner', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO movie_playback_history VALUES ('movie-history-delete', ?, 'programme-delete', 'tt1234567', 'Delete me', 1, 0, 'now')").bind(householdId).run();
+
+    const deleted = await SELF.fetch(`https://kids.test/api/households/${secret}`, {
+      method: "DELETE", headers, body: JSON.stringify({ currentPin: "123456", confirmation: "DELETE" }),
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({ message: "Household permanently deleted." });
+
+    for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
+      "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
+      "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history"]) {
+      expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toMatchObject({ count: 0 });
+    }
+
+    const base = `https://kids.test/addons/${secret}`;
+    const invalidated = [
+      created.parentUrl, `${base}/manifest.json`, `${base}/configure`,
+      `${base}/catalog/series/kids-tv-channel.json`, `${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`,
+      `${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`,
+      `${base}/stream/series/${encodeURIComponent("tt1234567:1:1")}.json`, `${base}/stream/movie/tt1234567.json`,
+      `${base}/media/movie-sign-off/1/0.mp4`,
+    ];
+    for (const route of invalidated) {
+      const response = await SELF.fetch(route);
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain(secret);
+    }
   });
 });
 

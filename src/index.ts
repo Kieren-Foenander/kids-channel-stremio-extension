@@ -1,6 +1,16 @@
 import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
-import { createHousehold, findHousehold, validPin, verifyPin } from "./households";
+import {
+  authenticatePin,
+  createHousehold,
+  deleteHousehold,
+  findHousehold,
+  type Household,
+  PIN_FAILURE_LIMIT,
+  PIN_RATE_LIMIT_SECONDS,
+  rotatePin,
+  validPin,
+} from "./households";
 import {
   movieChannelProgramme,
   MOVIE_CHANNEL_ID,
@@ -72,6 +82,7 @@ function shell(content: string, title = "Kids Channels"): string {
     input[name="pin"] { letter-spacing: .2em; }
     button, .button { display: block; cursor: pointer; background: #725cff; border-color: #8c7aff; color: white; font-weight: 800; text-align: center; text-decoration: none; margin-top: 1rem; }
     .secondary { background: transparent; }
+    .danger { background: #a5263d; border-color: #e05a70; }
     .notice { border-left: .25rem solid #ffca5c; padding-left: 1rem; }
     .error { color: #ff9292; min-height: 1.5rem; }
     code { overflow-wrap: anywhere; color: #aeb8ff; }
@@ -140,6 +151,7 @@ function parentPage(secret: string): string {
   return shell(`
     <h1>Parent Page</h1>
     <p>Enter your six-digit PIN to manage this Household.</p>
+    <p class="notice">There is no forgotten-PIN or account recovery flow. ${PIN_FAILURE_LIMIT} incorrect attempts from the same origin within ${PIN_RATE_LIMIT_SECONDS / 60} minutes lock PIN access for ${PIN_RATE_LIMIT_SECONDS / 60} minutes for this Household only.</p>
     <form id="unlock-form">
       <label for="pin">Parent PIN</label>
       <input id="pin" name="pin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="current-password" required>
@@ -179,6 +191,26 @@ function parentPage(secret: string): string {
       <p id="library-status" role="status"></p>
       <div id="library"><p>No programmes approved yet.</p></div>
       <p class="notice">Install and configure a stream addon such as Comet in Stremio. Kids Channels selects the programme; Stremio resolves streams on your device.</p>
+      <h2>Parent access</h2>
+      <p class="notice">There is no forgotten-PIN or account recovery flow. Store the PIN somewhere safe.</p>
+      <form id="change-pin-form">
+        <label for="current-pin">Current PIN</label>
+        <input id="current-pin" name="currentPin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="current-password" required>
+        <label for="new-pin">New six-digit PIN</label>
+        <input id="new-pin" name="newPin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="new-password" required>
+        <button type="submit">Change Parent PIN</button>
+        <p id="pin-status" role="status"></p>
+      </form>
+      <h2>Delete Household</h2>
+      <p class="notice">Permanent deletion removes the Approved Library, Channel state, history, PIN, and synced addon access. This cannot be undone.</p>
+      <form id="delete-form">
+        <label for="delete-pin">Current PIN</label>
+        <input id="delete-pin" name="currentPin" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="current-password" required>
+        <label for="delete-confirmation">Type DELETE to confirm</label>
+        <input id="delete-confirmation" name="confirmation" pattern="DELETE" autocomplete="off" required>
+        <button type="submit" class="danger">Permanently delete Household</button>
+        <p id="delete-status" class="error" role="alert"></p>
+      </form>
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
@@ -351,6 +383,25 @@ function parentPage(secret: string): string {
         status.textContent = result.results.length ? result.results.length + ' results' : 'No matching shows or movies.';
         result.results.forEach(programme => output.append(showSearchResult(programme)));
       });
+      document.querySelector('#change-pin-form').addEventListener('submit', async (event) => {
+        event.preventDefault(); const data = new FormData(event.currentTarget); const status = document.querySelector('#pin-status');
+        const response = await fetch('/api/households/${secret}/pin', {
+          method: 'PUT', headers: {...headers(), 'content-type': 'application/json'},
+          body: JSON.stringify({currentPin: data.get('currentPin'), newPin: data.get('newPin')})
+        });
+        const result = await response.json(); status.textContent = response.ok ? result.message : result.error;
+        if (response.ok) { parentToken = result.parentToken; event.currentTarget.reset(); }
+      });
+      document.querySelector('#delete-form').addEventListener('submit', async (event) => {
+        event.preventDefault(); const data = new FormData(event.currentTarget); const status = document.querySelector('#delete-status');
+        const response = await fetch('/api/households/${secret}', {
+          method: 'DELETE', headers: {...headers(), 'content-type': 'application/json'},
+          body: JSON.stringify({currentPin: data.get('currentPin'), confirmation: data.get('confirmation')})
+        });
+        const result = await response.json();
+        if (!response.ok) { status.textContent = result.error; return; }
+        document.querySelector('main').innerHTML = '<h1>Household deleted</h1><p>All Household data and synced addon access have been permanently removed.</p>';
+      });
     </script>`);
 }
 
@@ -371,10 +422,22 @@ async function parsePin(request: Request): Promise<unknown> {
   }
 }
 
-async function authorizedParent(request: Request, householdId: string, deploymentSecret: string): Promise<boolean> {
+async function authorizedParent(request: Request, household: Household, deploymentSecret: string): Promise<boolean> {
   const authorization = request.headers.get("authorization");
   if (!authorization?.startsWith("Bearer ")) return false;
-  return verifyParentToken(authorization.slice(7), householdId, deploymentSecret);
+  return verifyParentToken(authorization.slice(7), household.id, household.auth_version, deploymentSecret);
+}
+
+function pinRequestOrigin(request: Request): string {
+  return request.headers.get("cf-connecting-ip") || "unknown-origin";
+}
+
+function rateLimitedPin(retryAfter: number): Response {
+  return json(
+    { error: `Too many incorrect PIN attempts. Try again in ${Math.ceil(retryAfter / 60)} minutes.` },
+    429,
+    { "retry-after": String(retryAfter), "cache-control": "no-store" },
+  );
 }
 
 function decodedPathSegment(value: string): string | null {
@@ -406,20 +469,59 @@ export default {
     if (request.method === "POST" && unlockMatch) {
       const pin = await parsePin(request);
       if (!validPin(pin)) return json({ error: "PIN must contain exactly six digits." }, 400);
-      if (!(await verifyPin(env.DB, unlockMatch[1], pin))) return json({ error: "Household or PIN is incorrect." }, 401);
-      const household = await findHousehold(env.DB, unlockMatch[1]);
-      if (!household) return json({ error: "Household or PIN is incorrect." }, 401);
-      if (!env.CONFIG_SECRET) return json({ error: "Provider configuration is unavailable." }, 503);
+      const authentication = await authenticatePin(env.DB, unlockMatch[1], pin, pinRequestOrigin(request));
+      if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
+      if (authentication.status === "invalid") return json({ error: "Household or PIN is incorrect." }, 401);
+      if (!env.CONFIG_SECRET) return json({ error: "Parent access is temporarily unavailable." }, 503);
       return json({
         ...installDetails(url.origin, unlockMatch[1]),
-        parentToken: await issueParentToken(household.id, env.CONFIG_SECRET),
-      });
+        parentToken: await issueParentToken(authentication.household.id, authentication.household.auth_version, env.CONFIG_SECRET),
+      }, 200, { "cache-control": "no-store" });
+    }
+
+    const pinMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/pin$/);
+    if (request.method === "PUT" && pinMatch) {
+      const household = await findHousehold(env.DB, pinMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      let input: { currentPin?: unknown; newPin?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (!validPin(input.currentPin) || !validPin(input.newPin)) {
+        return json({ error: "Current and new PINs must each contain exactly six digits." }, 400);
+      }
+      if (input.currentPin === input.newPin) return json({ error: "Choose a new PIN that differs from the current PIN." }, 400);
+      const authentication = await authenticatePin(env.DB, household.secret, input.currentPin, pinRequestOrigin(request));
+      if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
+      if (authentication.status === "invalid") return json({ error: "Current PIN is incorrect." }, 401);
+      const authVersion = await rotatePin(env.DB, household.id, input.newPin);
+      return json({
+        message: "Parent PIN changed. Previous Parent sessions have been signed out.",
+        parentToken: await issueParentToken(household.id, authVersion, env.CONFIG_SECRET),
+      }, 200, { "cache-control": "no-store" });
+    }
+
+    const deleteMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)$/);
+    if (request.method === "DELETE" && deleteMatch) {
+      const household = await findHousehold(env.DB, deleteMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      let input: { currentPin?: unknown; confirmation?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (input.confirmation !== "DELETE") return json({ error: "Type DELETE exactly to confirm permanent deletion." }, 400);
+      if (!validPin(input.currentPin)) return json({ error: "Enter the current six-digit PIN." }, 400);
+      const authentication = await authenticatePin(env.DB, household.secret, input.currentPin, pinRequestOrigin(request));
+      if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
+      if (authentication.status === "invalid") return json({ error: "Current PIN is incorrect." }, 401);
+      await deleteHousehold(env.DB, household.id);
+      return json({ message: "Household permanently deleted." }, 200, { "cache-control": "no-store" });
     }
 
     const searchMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/search$/);
     if (request.method === "GET" && searchMatch) {
       const household = await findHousehold(env.DB, searchMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       const query = url.searchParams.get("q")?.trim();
@@ -434,7 +536,7 @@ export default {
     const titleMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/title\/(show|movie)\/(tt\d+)$/);
     if (request.method === "GET" && titleMatch) {
       const household = await findHousehold(env.DB, titleMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       try {
@@ -449,7 +551,7 @@ export default {
     const libraryMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library$/);
     if (libraryMatch && (request.method === "GET" || request.method === "POST")) {
       const household = await findHousehold(env.DB, libraryMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       if (request.method === "GET") return json({ programmes: await approvedLibrary(env.DB, household.id) });
@@ -480,7 +582,7 @@ export default {
     const libraryProgrammeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)$/);
     if (libraryProgrammeMatch && (request.method === "PATCH" || request.method === "DELETE")) {
       const household = await findHousehold(env.DB, libraryProgrammeMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       const programme = await env.DB.prepare(`SELECT id, content_type FROM approved_programmes
@@ -519,7 +621,7 @@ export default {
     const tvStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-state$/);
     if (request.method === "GET" && tvStateMatch) {
       const household = await findHousehold(env.DB, tvStateMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       return json(await parentTvChannelState(env.DB, household.id, env.TV_SCHEDULE_SEED));
@@ -528,7 +630,7 @@ export default {
     const movieStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-state$/);
     if (request.method === "GET" && movieStateMatch) {
       const household = await findHousehold(env.DB, movieStateMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       return json(await parentMovieChannelState(env.DB, household.id, env.MOVIE_ROTATION_SEED));
@@ -537,7 +639,7 @@ export default {
     const resetMoviesMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-rotation\/reset$/);
     if (request.method === "POST" && resetMoviesMatch) {
       const household = await findHousehold(env.DB, resetMoviesMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       await resetMovieRotation(env.DB, household.id, env.MOVIE_ROTATION_SEED);
@@ -547,7 +649,7 @@ export default {
     const progressMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)\/progress$/);
     if (request.method === "PATCH" && progressMatch) {
       const household = await findHousehold(env.DB, progressMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       let input: { videoId?: unknown } = {};
@@ -567,7 +669,7 @@ export default {
     const undoMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/undo$/);
     if (request.method === "POST" && undoMatch) {
       const household = await findHousehold(env.DB, undoMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       const undone = await undoLatestTvAdvancement(env.DB, household.id, env.TV_SCHEDULE_SEED);
@@ -578,7 +680,7 @@ export default {
     const regenerateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-schedule\/regenerate$/);
     if (request.method === "POST" && regenerateMatch) {
       const household = await findHousehold(env.DB, regenerateMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household.id, env.CONFIG_SECRET))) {
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
       await refreshTvChannelSchedule(env.DB, household.id, true, env.TV_SCHEDULE_SEED);

@@ -23,7 +23,7 @@ Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `
 
 Stremio retains loaded addon metadata in memory even when responses use `Cache-Control: no-store`. After a Parent changes the Approved Library or regenerates selections, fully close and reopen Stremio to load the updated Channel. The Worker state changes immediately and does not interrupt media already playing.
 
-Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN recovery.
+Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN or account recovery. Five incorrect PIN attempts from one request origin within 15 minutes lock PIN access from that origin for 15 minutes for that Household only. A Parent can rotate the PIN by supplying the current PIN; rotation invalidates older Parent sessions. Permanent deletion requires the current PIN plus the exact confirmation `DELETE`, removes all Household data, and invalidates every synced addon route.
 
 ## Test
 
@@ -35,7 +35,7 @@ pnpm test:browser
 # Or run both suites with: pnpm test:all
 ```
 
-The integration and protocol suite runs Household creation, PIN unlock, Cinemeta search, approval, deterministic rolling scheduling, shuffled movie rotation, concurrent advancement, sign-off delivery, and canonical programme metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
+The integration and protocol suite runs Household creation, isolated PIN rate limiting, PIN rotation and session invalidation, complete deletion, Cinemeta search, approval, deterministic rolling scheduling, shuffled movie rotation, concurrent advancement, sign-off delivery, and canonical programme metadata inside the Cloudflare Worker runtime against an isolated test D1 database. Cinemeta is stubbed only at outbound `fetch`. The Playwright suite starts a local Worker, local D1 database, and network-boundary Cinemeta stub to exercise the Parent Page in Chromium. Set `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` to use an existing Chromium binary instead of downloading one.
 
 Manual protocol-gate results are recorded in [`docs/first-playback-feasibility.md`](docs/first-playback-feasibility.md) and [`docs/continuous-tv-feasibility.md`](docs/continuous-tv-feasibility.md).
 
@@ -62,7 +62,9 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /` — minimal Household creation Parent Page
 - `POST /api/households` — create a Household with a six-digit PIN
 - `GET /households/:secret` — PIN unlock Parent Page
-- `POST /api/households/:secret/unlock` — authenticate a Parent for one hour
+- `POST /api/households/:secret/unlock` — authenticate a Parent for one hour (rate-limited by Household and request origin)
+- `PUT /api/households/:secret/pin` — change the PIN after supplying the current PIN and invalidate older Parent sessions
+- `DELETE /api/households/:secret` — permanently delete the Household after current-PIN and exact `DELETE` confirmation
 - `GET /api/households/:secret/cinemeta/search?q=…` — search Cinemeta shows and movies (Parent bearer token required)
 - `GET /api/households/:secret/cinemeta/title/:type/:imdbId` — retrieve canonical title and released episode metadata (Parent bearer token required)
 - `GET|POST /api/households/:secret/library` — view or add to the Approved Library (Parent bearer token required)
