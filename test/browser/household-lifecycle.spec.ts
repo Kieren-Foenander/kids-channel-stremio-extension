@@ -70,7 +70,13 @@ test("a Parent rotates the PIN, sees recovery limitations, and permanently delet
     expect(await response.text()).not.toContain(new URL(household.manifestUrl).pathname.split("/")[2]);
   }
 
-  await page.goto(household.parentUrl);
+  const unavailablePage = await page.goto(household.parentUrl);
+  expect(unavailablePage?.status()).toBe(404);
+  const csp = unavailablePage?.headers()["content-security-policy"];
+  expect(csp).toContain("style-src 'self'");
+  expect(csp).toContain("script-src 'none'");
+  expect(csp).not.toContain("unsafe-inline");
+  await expect(page.locator('link[rel="stylesheet"][href^="/assets/"]')).toHaveCount(1);
   await expect(page.getByRole("heading", { name: "Household not found" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Create a new Household" })).toBeVisible();
   await expect(page.getByText(/PIN|Approved Library|Channel Schedule/)).toHaveCount(0);

@@ -1155,6 +1155,10 @@ describe("Household deletion", () => {
       const body = await response.text();
       expect(response.status).toBe(404);
       expect(response.headers.get("content-type")).toContain("text/html");
+      const csp = response.headers.get("content-security-policy");
+      expect(csp).toContain("style-src 'self'");
+      expect(csp).toContain("script-src 'none'");
+      expect(csp).not.toContain("unsafe-inline");
       expect(body).toContain("Household not found");
       expect(body).toContain("Create a new Household");
       expect(body).not.toContain(unknownSecret);
