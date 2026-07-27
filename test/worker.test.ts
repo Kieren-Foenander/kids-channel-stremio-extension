@@ -134,6 +134,30 @@ describe("Parent Page Household creation", () => {
     }
   });
 
+  it("creates a one-hour HttpOnly Parent session without returning its credential", async () => {
+    const response = await SELF.fetch("https://kids.test/api/households", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    const created = await response.clone().json<CreatedHousehold & { parentToken?: string }>();
+    const cookie = response.headers.get("set-cookie");
+
+    expect(response.status).toBe(201);
+    expect(created.parentToken).toBeUndefined();
+    expect(cookie).toMatch(/^kids_parent_session=[^;]+;/);
+    expect(cookie).toContain("Max-Age=3600");
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("Secure");
+    expect(cookie).toContain("SameSite=Strict");
+
+    const session = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/session`, {
+      headers: { cookie: cookie!.split(";")[0] },
+    });
+    expect(session.status).toBe(200);
+    expect(await session.json()).toEqual({ authenticated: true, expiresIn: 3600 });
+  });
+
   it("creates an isolated Household with an opaque high-entropy secret and hashed PIN", async () => {
     const first = await create();
     const second = await create("654321");

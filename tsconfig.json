@@ -3,8 +3,9 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022", "WebWorker"],
-    "types": ["@cloudflare/vitest-pool-workers/types", "vitest/globals"],
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "jsx": "react-jsx",
+    "types": ["@cloudflare/vitest-pool-workers/types", "vitest/globals", "vite/client"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true

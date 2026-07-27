@@ -30,6 +30,8 @@ const stub = http.createServer((request, response) => {
 });
 await new Promise((resolve) => stub.listen(8791, "127.0.0.1", resolve));
 
+const build = spawnSync("pnpm", ["build"], { stdio: "inherit" });
+if (build.status !== 0) process.exit(build.status ?? 1);
 const migration = spawnSync("pnpm", ["exec", "wrangler", "d1", "migrations", "apply", "kids-channels-browser", "--local", "--config", "wrangler.browser.jsonc"], { stdio: "inherit" });
 if (migration.status !== 0) process.exit(migration.status ?? 1);
 const worker = spawn("pnpm", ["exec", "wrangler", "dev", "--config", "wrangler.browser.jsonc", "--port", "8790", "--ip", "127.0.0.1"], { stdio: "inherit" });
