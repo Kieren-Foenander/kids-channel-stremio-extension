@@ -1,12 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { DestinationPage } from "../components/DestinationPage";
-import { LegacyParentWorkflows } from "../components/LegacyParentWorkflows";
+import { HouseholdOverview } from "../components/HouseholdOverview";
 
 export const Route = createFileRoute("/households/$secret/")({ component: Overview });
 function Overview() {
   const { secret } = Route.useParams();
-  return <>
-    <DestinationPage eyebrow="Household" title="Overview" description="A concise view of your Household and both Channels." />
-    <LegacyParentWorkflows secret={secret} />
-  </>;
+  return <section className="destination" aria-labelledby="page-heading">
+    <header className="destination-header">
+      <p className="eyebrow">Household</p>
+      <h1 id="page-heading">Overview</h1>
+      <p>Current Programmes, the immediate TV schedule, and useful next steps.</p>
+    </header>
+    <HouseholdOverview secret={secret} />
+  </section>;
 }

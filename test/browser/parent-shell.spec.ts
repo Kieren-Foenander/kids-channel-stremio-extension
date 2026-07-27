@@ -39,14 +39,14 @@ test("a Parent unlocks with a cookie and keeps access across routes, reloads, an
 test("expiry preserves the intended route and manual lock clears access", async ({ page, context }) => {
   const parentUrl = await createHousehold(page);
   await page.goto(`${parentUrl}/approved-library`);
-  await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Approved Library", exact: true })).toBeVisible();
 
   await context.clearCookies();
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.getByRole("heading", { name: "Your Parent session expired" })).toBeVisible();
   await unlock(page);
   await expect(page).toHaveURL(`${parentUrl}/approved-library`);
-  await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Approved Library", exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Lock Parent Page" }).click();
   await expect(page.getByRole("heading", { name: "Unlock your Household" })).toBeVisible();
@@ -83,7 +83,7 @@ test("narrow navigation is keyboard accessible and theme choice persists", async
   const menu = page.getByText("Menu", { exact: true });
   await menu.focus();
   await page.keyboard.press("Enter");
-  await page.getByRole("link", { name: "Add Programmes" }).click();
+  await page.locator(".mobile-menu-panel").getByRole("link", { name: "Add Programmes" }).click();
   await expect(page.getByRole("heading", { name: "Add Programmes" })).toBeVisible();
 
   await page.setViewportSize({ width: 1024, height: 800 });

@@ -17,7 +17,8 @@ async function unlockHousehold(page: import("@playwright/test").Page) {
   await page.goto(parentUrl!);
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();
-  await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+  await page.locator(".parent-sidebar").getByRole("link", { name: "Approved Library" }).click();
+  await expect(page.getByRole("heading", { name: "Approved Library", exact: true })).toBeVisible();
   await expect(page.getByText("fully close and reopen Stremio")).toBeVisible();
 }
 
