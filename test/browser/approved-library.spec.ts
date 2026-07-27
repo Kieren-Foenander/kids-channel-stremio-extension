@@ -52,6 +52,8 @@ test("an empty Approved Library links directly to Add Programmes", async ({ page
   await expect(page.getByRole("heading", { name: "No programmes approved yet" })).toBeVisible();
   await page.locator("#main").getByRole("link", { name: "Add Programmes" }).click();
   await expect(page).toHaveURL(/\/add-programmes$/);
+  await expect(page.getByRole("heading", { name: "Search Cinemeta" })).toBeVisible();
+  await expect(page.getByLabel("Search Cinemeta for shows and movies")).toBeVisible();
 });
 
 test("a Parent filters summary cards and cancels or confirms named movie removal", async ({ page }) => {
@@ -72,6 +74,10 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: finishedTitle, exact: true }) });
   await expect(show.getByText("Paused", { exact: true })).toBeVisible();
   await expect(show.getByText("Finished", { exact: true })).toBeVisible();
+  const existingControls = page.getByRole("region", { name: `${finishedTitle} show controls` });
+  await expect(existingControls.getByRole("button", { name: "Resume show" })).toBeVisible();
+  await expect(existingControls.getByRole("button", { name: "Restart show" })).toBeVisible();
+  await expect(existingControls.getByRole("button", { name: "Remove show" })).toBeVisible();
 
   await showsTab.focus();
   await showsTab.press("ArrowLeft");

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState, type KeyboardEvent } from "react";
 import { DestinationPage } from "../components/DestinationPage";
+import { LegacyParentWorkflows } from "../components/LegacyParentWorkflows";
 import { Button } from "../components/Button";
 import {
   Dialog,
@@ -147,6 +148,8 @@ function ApprovedLibraryPage() {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <LegacyParentWorkflows secret={secret} surface="show-management-and-deletion" />
   </div>;
 }
 
