@@ -120,7 +120,7 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
   const manifestUrl = `${location.origin}/addons/${secret}/manifest.json`;
   return <div className="legacy-workflows">
     <section aria-labelledby="legacy-library-heading">
-      <h2 id="legacy-library-heading">Approved Library</h2>
+      <h2 id="legacy-library-heading">Manage Approved Library</h2>
       <p className="warning">Stremio keeps Channel details in memory. After changing the Approved Library or regenerating selections, fully close and reopen Stremio to load the updated Channel.</p>
       <p>Manifest: <code id="manifest">{manifestUrl}</code></p>
       <form className="legacy-search" onSubmit={search}>

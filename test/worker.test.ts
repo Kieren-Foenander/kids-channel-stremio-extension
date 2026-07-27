@@ -329,6 +329,61 @@ describe("Parent Page Household creation", () => {
   });
 });
 
+describe("Household Overview summary", () => {
+  async function access(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    return sessionHeaders(response);
+  }
+
+  it("returns compact counts, both Current Programmes, and no more than two upcoming TV programmes", async () => {
+    const populated = await create();
+    const isolated = await create();
+    const approvedAt = "2024-01-01T00:00:00.000Z";
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, poster, release_info, genres_json, approved_at)
+        VALUES ('overview-show', ?, 'tt1000001', 'show', 'Overview Show', 'https://images.example/show.jpg', '2024', '[]', ?)`)
+        .bind(populated.householdId, approvedAt),
+      env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, poster, release_info, genres_json, approved_at)
+        VALUES ('overview-movie', ?, 'tt1000002', 'movie', 'Overview Movie', 'https://images.example/movie.jpg', '2023', '[]', ?)`)
+        .bind(populated.householdId, approvedAt),
+      ...[1, 2, 3].map((episode) => env.DB.prepare(`INSERT INTO show_episodes
+        (programme_id, video_id, season, episode, title, released_at)
+        VALUES ('overview-show', ?, 1, ?, ?, '2024-01-01T00:00:00.000Z')`)
+        .bind(`tt1000001:1:${episode}`, episode, `Episode ${episode}`)),
+      env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES ('overview-show', 'tt1000001:1:1')"),
+    ]);
+
+    const denied = await SELF.fetch(`https://kids.test/api/households/${secretFrom(populated)}/overview`);
+    expect(denied.status).toBe(401);
+
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(populated)}/overview`, { headers: await access(populated) });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const summary = await response.json<any>();
+    expect(summary.approved).toEqual({ shows: 1, movies: 1 });
+    expect(summary.tv.current).toMatchObject({ title: "Overview Show", episode: { id: "tt1000001:1:1", title: "Episode 1" } });
+    expect(summary.tv.next.map((item: any) => item.episode.id)).toEqual(["tt1000001:1:2", "tt1000001:1:3"]);
+    expect(summary.tv.next).toHaveLength(2);
+    expect(summary.movie.current).toMatchObject({ title: "Overview Movie", releaseInfo: "2023" });
+    expect(summary.tv.current).not.toHaveProperty("description");
+    expect(summary.movie.current).not.toHaveProperty("signOffId");
+
+    const isolatedSummary = await (await SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(isolated)}/overview`,
+      { headers: await access(isolated) },
+    )).json<any>();
+    expect(isolatedSummary).toEqual({
+      approved: { shows: 0, movies: 0 },
+      tv: { current: null, next: [] },
+      movie: { current: null },
+    });
+  });
+});
+
 describe("Cinemeta Approved Library", () => {
   const showMeta = {
     id: "tt1234567", imdb_id: "tt1234567", type: "series", name: "The Example",

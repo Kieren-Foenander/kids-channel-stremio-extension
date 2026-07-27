@@ -21,6 +21,7 @@ import {
   requestMovieSignOff,
   resetMovieRotation,
 } from "./movie-channel";
+import { householdOverview } from "./overview";
 import { issueParentToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
@@ -727,6 +728,19 @@ export default {
         await removeApprovedMovie(env.DB, household.id, programme.id, env.MOVIE_ROTATION_SEED);
       }
       return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
+    }
+
+    const overviewMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/overview$/);
+    if (request.method === "GET" && overviewMatch) {
+      const household = await findHousehold(env.DB, overviewMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      return json(
+        await householdOverview(env.DB, household.id, env.TV_SCHEDULE_SEED, env.MOVIE_ROTATION_SEED),
+        200,
+        { "cache-control": "no-store" },
+      );
     }
 
     const tvStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-state$/);
