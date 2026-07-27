@@ -56,17 +56,17 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 @media (max-width: 360px) { .page-shell { width: min(100% - 1rem, 38rem); padding-top: 1.25rem; } .card { padding: 1rem; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }
 @media (prefers-color-scheme: dark) {
-  :root { background: #171a17; color: #f1f2ee; }
-  body { background: radial-gradient(circle at top, #252a25 0, #171a17 34rem); }
-  .hero p, .step p, .help { color: #bcc1b9; }
-  .eyebrow, .session-state, .action-status, .text-link { color: #8fc5a7 !important; }
-  .card { border-color: #414741; background: rgb(34 38 34 / 94%); box-shadow: none; }
-  input { border-color: #737a72; background: #151815; color: #f1f2ee; }
-  .button-secondary { border-color: #8d948c; color: #f1f2ee; }
-  .button-secondary:hover, .mobile-guidance, .url-value { background: #303530; color: #e7e9e4 !important; }
-  .warning { background: #3d321d; color: #f3dfb9; }
-  .warning h2 { color: #fff1d5; }
-  .step-number { background: #294536; color: #bce6cc; }
+  :root:not([data-theme]) { background: #171a17; color: #f1f2ee; }
+  :root:not([data-theme]) body { background: radial-gradient(circle at top, #252a25 0, #171a17 34rem); }
+  :root:not([data-theme]) .hero p, :root:not([data-theme]) .step p, :root:not([data-theme]) .help { color: #bcc1b9; }
+  :root:not([data-theme]) .eyebrow, :root:not([data-theme]) .session-state, :root:not([data-theme]) .action-status, :root:not([data-theme]) .text-link { color: #8fc5a7 !important; }
+  :root:not([data-theme]) .card { border-color: #414741; background: rgb(34 38 34 / 94%); box-shadow: none; }
+  :root:not([data-theme]) input { border-color: #737a72; background: #151815; color: #f1f2ee; }
+  :root:not([data-theme]) .button-secondary { border-color: #8d948c; color: #f1f2ee; }
+  :root:not([data-theme]) .button-secondary:hover, :root:not([data-theme]) .mobile-guidance, :root:not([data-theme]) .url-value { background: #303530; color: #e7e9e4 !important; }
+  :root:not([data-theme]) .warning { background: #3d321d; color: #f3dfb9; }
+  :root:not([data-theme]) .warning h2 { color: #fff1d5; }
+  :root:not([data-theme]) .step-number { background: #294536; color: #bce6cc; }
 }
 
 .parent-layout { min-height: 100vh; }
@@ -100,7 +100,12 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 :root[data-theme="dark"] input, :root[data-theme="dark"] select { border-color: #737a72; background: #151815; color: #f1f2ee; }
 :root[data-theme="dark"] .parent-sidebar nav a:hover, :root[data-theme="dark"] .mobile-menu nav a:hover { background: #303530; }
 :root[data-theme="dark"] .parent-sidebar nav a[aria-current="page"], :root[data-theme="dark"] .mobile-menu nav a[aria-current="page"] { background: #294536; color: #d8f3e2; }
-:root[data-theme="dark"] .brand { color: #8fc5a7; }
+:root[data-theme="dark"] .brand, :root[data-theme="dark"] .eyebrow, :root[data-theme="dark"] .session-state, :root[data-theme="dark"] .action-status, :root[data-theme="dark"] .text-link { color: #8fc5a7 !important; }
+:root[data-theme="dark"] .button-secondary { border-color: #8d948c; color: #f1f2ee; }
+:root[data-theme="dark"] .button-secondary:hover, :root[data-theme="dark"] .mobile-guidance, :root[data-theme="dark"] .url-value { background: #303530; color: #e7e9e4 !important; }
+:root[data-theme="dark"] .warning { background: #3d321d; color: #f3dfb9; }
+:root[data-theme="dark"] .warning h2 { color: #fff1d5; }
+:root[data-theme="dark"] .step-number { background: #294536; color: #bce6cc; }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) .parent-sidebar { border-color: #414741; background: rgb(34 38 34 / 96%); color: #f1f2ee; }
@@ -109,6 +114,23 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
   :root:not([data-theme]) .theme-choice select { border-color: #737a72; background: #151815; color: #f1f2ee; }
   :root:not([data-theme]) .brand { color: #8fc5a7; }
 }
+
+.legacy-workflows { display: grid; gap: 2.5rem; margin-top: 2.5rem; }
+.legacy-workflows section { min-width: 0; padding-top: 1rem; border-top: 1px solid #d7d5cd; }
+.legacy-workflows h2 { margin: 0 0 1rem; font-size: 1.6rem; }
+.legacy-workflows code { overflow-wrap: anywhere; }
+.legacy-search { display: grid; grid-template-columns: 1fr auto; gap: .75rem; align-items: end; margin-top: 1.25rem; }
+.legacy-search label { grid-column: 1 / -1; }
+.legacy-search input { letter-spacing: normal; }
+.programme-grid { display: grid; gap: 1rem; }
+.programme { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: 1rem; padding: 1rem; border: 1px solid #d7d5cd; border-radius: .8rem; background: rgb(255 255 255 / 60%); }
+.programme img { width: 5rem; min-height: 7rem; object-fit: cover; border-radius: .35rem; }
+.programme h3, .programme p { margin: 0 0 .6rem; }
+.programme select { width: 100%; min-height: 3rem; margin-bottom: .5rem; }
+.programme .button { margin: .5rem .5rem 0 0; }
+:root[data-theme="dark"] .legacy-workflows section, :root[data-theme="dark"] .programme { border-color: #414741; }
+:root[data-theme="dark"] .programme { background: rgb(34 38 34 / 70%); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme]) .legacy-workflows section, :root:not([data-theme]) .programme { border-color: #414741; } :root:not([data-theme]) .programme { background: rgb(34 38 34 / 70%); } }
 
 @media (max-width: 800px) {
   .parent-sidebar { display: none; }
@@ -120,6 +142,8 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
   .mobile-menu-panel { position: absolute; top: 3.1rem; right: 0; display: grid; width: min(18rem, calc(100vw - 2rem)); max-height: calc(100vh - 5rem); gap: .75rem; overflow-y: auto; padding: .75rem; border: 1px solid #d7d5cd; border-radius: .7rem; background: #fff; box-shadow: 0 1rem 3rem rgb(38 42 35 / 18%); }
   .mobile-controls { display: grid; gap: .75rem; padding-top: .75rem; border-top: 1px solid #d7d5cd; }
   .parent-content { width: min(100% - 2rem, 48rem); margin: 0 auto; padding: 2rem 0 4rem; }
+  .legacy-search { grid-template-columns: 1fr; }
+  .legacy-search label { grid-column: auto; }
   :root[data-theme="dark"] .mobile-header { border-color: #414741; background: rgb(23 26 23 / 96%); }
   :root[data-theme="dark"] .mobile-menu-panel, :root[data-theme="dark"] .mobile-controls { border-color: #414741; background: #222622; }
   @media (prefers-color-scheme: dark) {

@@ -527,7 +527,9 @@ export default {
     if (request.method === "GET" && path === "/") {
       return env.ASSETS ? spaResponse(request, env.ASSETS) : html(homePage());
     }
-    if (request.method === "GET" && /^\/households\/[A-Za-z0-9_-]+(?:\/(?:onboarding|add-programmes|approved-library|tv-channel|movie-channel|settings))?$/.test(path) && env.ASSETS) {
+    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/(?:onboarding|add-programmes|approved-library|tv-channel|movie-channel|settings))?$/);
+    if (request.method === "GET" && spaHouseholdMatch && env.ASSETS) {
+      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
       return spaResponse(request, env.ASSETS);
     }
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");

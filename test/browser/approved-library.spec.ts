@@ -21,8 +21,7 @@ async function unlockHousehold(page: import("@playwright/test").Page) {
   await expect(page.getByText("fully close and reopen Stremio")).toBeVisible();
 }
 
-// Approved Library UI moves to its focused destination in the follow-up ticket.
-test.skip("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
+test("a Parent searches Cinemeta and approves a movie and a show from another starting episode", async ({ page }) => {
   await unlockHousehold(page);
 
   const search = async () => {

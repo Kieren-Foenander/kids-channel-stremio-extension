@@ -56,6 +56,7 @@ test("expiry preserves the intended route and manual lock clears access", async 
 });
 
 test("narrow navigation is keyboard accessible and theme choice persists", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   await page.setViewportSize({ width: 320, height: 700 });
   const parentUrl = await createHousehold(page);
   await page.goto(parentUrl);
@@ -68,7 +69,13 @@ test("narrow navigation is keyboard accessible and theme choice persists", async
   await expect(page.getByRole("heading", { name: "Add Programmes" })).toBeVisible();
 
   await page.setViewportSize({ width: 1024, height: 800 });
-  await page.locator(".parent-sidebar").getByLabel("Theme").selectOption("dark");
+  const theme = page.locator(".parent-sidebar").getByLabel("Theme");
+  await theme.selectOption("light");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await page.locator(".eyebrow").first().evaluate(element => getComputedStyle(element).color)).toBe("rgb(53, 96, 75)");
+  expect(await page.getByRole("button", { name: "Lock Parent Page" }).first().evaluate(element => getComputedStyle(element).color)).toBe("rgb(32, 35, 31)");
+
+  await theme.selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await page.reload();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");

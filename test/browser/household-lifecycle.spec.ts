@@ -21,8 +21,7 @@ async function submitUnlock(page: Page, pin: string) {
   return responsePromise;
 }
 
-// Settings forms move to the focused Settings destination in its follow-up ticket.
-test.skip("a Parent rotates the PIN, sees recovery limitations, and permanently deletes the Household", async ({ page }) => {
+test("a Parent rotates the PIN, sees recovery limitations, and permanently deletes the Household", async ({ page }) => {
   const household = await createHousehold(page, "123456");
   await page.goto(household.parentUrl);
   await expect(page.getByText("There is no forgotten-PIN or account recovery flow").first()).toBeVisible();

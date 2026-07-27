@@ -131,7 +131,7 @@ export function ParentShell({ secret }: { secret: string }) {
         <header className="hero">
           <p className="eyebrow">Parent Page</p>
           <h1>{session === "expired" ? "Your Parent session expired" : "Unlock your Household"}</h1>
-          <p>{session === "expired" ? "For your security, access ends after one hour. Enter your PIN to return to the page you were using." : "Enter your six-digit PIN to manage this Household."}</p>
+          <p>{session === "expired" ? "For your security, access ends after one hour. Enter your PIN to return to the page you were using." : "Enter your six-digit PIN to manage this Household. There is no forgotten-PIN or account recovery flow."}</p>
         </header>
         <form className="card form" noValidate onSubmit={unlock}>
           <div>
