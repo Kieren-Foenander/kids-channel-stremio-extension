@@ -131,6 +131,12 @@ function secretFrom(created: CreatedHousehold): string {
   return new URL(created.manifestUrl).pathname.split("/")[2];
 }
 
+function sessionHeaders(response: Response): { cookie: string } {
+  const cookie = response.headers.get("set-cookie")?.split(";")[0];
+  if (!cookie) throw new Error("Parent session cookie was not issued");
+  return { cookie };
+}
+
 describe("Parent Page Household creation", () => {
   it("serves a minimal creation page and rejects any PIN other than six digits", async () => {
     const page = await SELF.fetch("https://kids.test/");
@@ -251,7 +257,18 @@ describe("Parent Page Household creation", () => {
       body: JSON.stringify({ pin: "123456" }),
     });
     expect(unlocked.status).toBe(200);
-    expect(await unlocked.json()).toMatchObject({ manifestUrl: created.manifestUrl });
+    expect(await unlocked.clone().json()).toMatchObject({ manifestUrl: created.manifestUrl });
+    expect(await unlocked.json()).not.toHaveProperty("parentToken");
+    const session = sessionHeaders(unlocked);
+    expect(unlocked.headers.get("set-cookie")).toContain("Max-Age=3600");
+
+    const locked = await SELF.fetch(`https://kids.test/api/households/${secret}/lock`, {
+      method: "POST", headers: session,
+    });
+    expect(locked.status).toBe(200);
+    expect(locked.headers.get("set-cookie")).toContain("Max-Age=0");
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/session`, { headers: session })).status).toBe(200);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/session`)).status).toBe(401);
   });
 
   it("rate-limits PIN failures by Household and request origin without exposing secrets", async () => {
@@ -282,26 +299,24 @@ describe("Parent Page Household creation", () => {
     const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await unlocked.json<{ parentToken: string }>();
-    const authorization = `Bearer ${parentToken}`;
+    const oldSession = sessionHeaders(unlocked);
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
-      method: "PUT", headers: { authorization, "content-type": "application/json" },
+      method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
       body: JSON.stringify({ currentPin: "000000", newPin: "654321" }),
     });
     expect(denied.status).toBe(401);
 
     const rotated = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
-      method: "PUT", headers: { authorization, "content-type": "application/json" },
+      method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
       body: JSON.stringify({ currentPin: "123456", newPin: "654321" }),
     });
     expect(rotated.status).toBe(200);
-    const rotatedBody = await rotated.json<{ parentToken: string }>();
-    expect(rotatedBody.parentToken).not.toBe(parentToken);
-    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, { headers: { authorization } })).status).toBe(401);
-    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, {
-      headers: { authorization: `Bearer ${rotatedBody.parentToken}` },
-    })).status).toBe(200);
+    expect(await rotated.clone().json()).not.toHaveProperty("parentToken");
+    const newSession = sessionHeaders(rotated);
+    expect(newSession.cookie).not.toBe(oldSession.cookie);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, { headers: oldSession })).status).toBe(401);
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/tv-state`, { headers: newSession })).status).toBe(200);
 
     const oldPin = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
@@ -346,8 +361,7 @@ describe("Cinemeta Approved Library", () => {
     const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await response.json<{ parentToken: string }>();
-    return { authorization: `Bearer ${parentToken}` };
+    return sessionHeaders(response);
   }
 
   it("searches shows and movies with distinguishing metadata and artwork", async () => {
@@ -440,9 +454,9 @@ describe("TV Channel client-side stream resolution", () => {
     const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await unlocked.json<{ parentToken: string }>();
+    const session = sessionHeaders(unlocked);
     const approved = await SELF.fetch(`https://kids.test/api/households/${secret}/library`, {
-      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${parentToken}` },
+      method: "POST", headers: { "content-type": "application/json", ...session },
       body: JSON.stringify({ type: "show", imdbId: "tt2468101" }),
     });
     expect(approved.status).toBe(201);
@@ -507,8 +521,7 @@ describe("rolling TV Channel Schedule", () => {
     const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await response.json<{ parentToken: string }>();
-    return { authorization: `Bearer ${parentToken}` };
+    return sessionHeaders(response);
   }
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
@@ -686,8 +699,7 @@ describe("Approved Library changes while Channels are active", () => {
     const unlocked = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await unlocked.json<{ parentToken: string }>();
-    const headers = { authorization: `Bearer ${parentToken}` };
+    const headers = sessionHeaders(unlocked);
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
     const tvUrl = `${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`;
     const movieUrl = `${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`;
@@ -800,8 +812,7 @@ describe("Movie Channel rotation and sign-off", () => {
     const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await response.json<{ parentToken: string }>();
-    return { authorization: `Bearer ${parentToken}` };
+    return sessionHeaders(response);
   }
 
   it("keeps an interrupted canonical movie current and delegates its streams and subtitles to installed addons", async () => {
@@ -996,8 +1007,7 @@ describe("Household deletion", () => {
     const unlock = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
     });
-    const { parentToken } = await unlock.json<{ parentToken: string }>();
-    const headers = { authorization: `Bearer ${parentToken}`, "content-type": "application/json" };
+    const headers = { ...sessionHeaders(unlock), "content-type": "application/json" };
 
     const unconfirmed = await SELF.fetch(`https://kids.test/api/households/${secret}`, {
       method: "DELETE", headers, body: JSON.stringify({ currentPin: "123456", confirmation: "delete" }),

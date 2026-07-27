@@ -57,11 +57,11 @@ test("browser PIN failures rate-limit only the targeted Household", async ({ pag
   for (let attempt = 0; attempt < 5; attempt += 1) limitedResponse = await submitUnlock(page, "000000");
   expect(limitedResponse!.status()).toBe(429);
   expect(limitedResponse!.headers()["retry-after"]).toBe("900");
-  await expect(page.locator("#error")).toContainText("Too many incorrect PIN attempts");
+  await expect(page.locator("#unlock-error")).toContainText("Too many incorrect PIN attempts");
   expect(await limitedResponse!.text()).not.toContain(new URL(limitedHousehold.manifestUrl).pathname.split("/")[2]);
 
   const otherHousehold = await createHousehold(page, "654321");
   await page.goto(otherHousehold.parentUrl);
   expect((await submitUnlock(page, "654321")).status()).toBe(200);
-  await expect(page.getByRole("heading", { name: "Approved Library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
 });

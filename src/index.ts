@@ -21,7 +21,7 @@ import {
   requestMovieSignOff,
   resetMovieRotation,
 } from "./movie-channel";
-import { issueParentToken, verifyParentToken } from "./secrets";
+import { issueParentToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import {
@@ -108,6 +108,10 @@ const PARENT_SESSION_SECONDS = 60 * 60;
 
 function parentSessionCookie(token: string): string {
   return `${PARENT_SESSION_COOKIE}=${token}; Path=/; Max-Age=${PARENT_SESSION_SECONDS}; HttpOnly; Secure; SameSite=Strict`;
+}
+
+function clearParentSessionCookie(): string {
+  return `${PARENT_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`;
 }
 
 function cookieValue(request: Request, name: string): string | null {
@@ -255,8 +259,7 @@ function parentPage(secret: string): string {
     </section>
     <script>
       const form = document.querySelector('#unlock-form');
-      const headers = () => parentToken ? {authorization: 'Bearer ' + parentToken} : {};
-      let parentToken = '';
+      const headers = () => ({});
       function programmeCard(programme, approved) {
         const card = document.createElement('article'); card.className = 'programme';
         const image = document.createElement('img'); image.alt = ''; if (programme.poster) image.src = programme.poster;
@@ -397,7 +400,6 @@ function parentPage(secret: string): string {
         });
         const result = await response.json();
         if (!response.ok) { document.querySelector('#error').textContent = result.error; return; }
-        parentToken = result.parentToken;
         await showAuthenticatedParent(result);
       });
       void fetch('/api/households/${secret}/session')
@@ -444,7 +446,7 @@ function parentPage(secret: string): string {
           body: JSON.stringify({currentPin: data.get('currentPin'), newPin: data.get('newPin')})
         });
         const result = await response.json(); status.textContent = response.ok ? result.message : result.error;
-        if (response.ok) { parentToken = result.parentToken; event.currentTarget.reset(); }
+        if (response.ok) event.currentTarget.reset();
       });
       document.querySelector('#delete-form').addEventListener('submit', async (event) => {
         event.preventDefault(); const data = new FormData(event.currentTarget); const status = document.querySelector('#delete-status');
@@ -477,10 +479,7 @@ async function parsePin(request: Request): Promise<unknown> {
 }
 
 async function authorizedParent(request: Request, household: Household, deploymentSecret: string): Promise<boolean> {
-  const authorization = request.headers.get("authorization");
-  const token = authorization?.startsWith("Bearer ")
-    ? authorization.slice(7)
-    : cookieValue(request, PARENT_SESSION_COOKIE);
+  const token = cookieValue(request, PARENT_SESSION_COOKIE);
   return token ? verifyParentToken(token, household.id, household.auth_version, deploymentSecret) : false;
 }
 
@@ -528,7 +527,9 @@ export default {
     if (request.method === "GET" && path === "/") {
       return env.ASSETS ? spaResponse(request, env.ASSETS) : html(homePage());
     }
-    if (request.method === "GET" && /^\/households\/[A-Za-z0-9_-]+\/onboarding$/.test(path) && env.ASSETS) {
+    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/(?:onboarding|add-programmes|approved-library|tv-channel|movie-channel|settings))?$/);
+    if (request.method === "GET" && spaHouseholdMatch && env.ASSETS) {
+      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
       return spaResponse(request, env.ASSETS);
     }
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
@@ -554,7 +555,8 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
       }
-      return json({ authenticated: true, expiresIn: PARENT_SESSION_SECONDS }, 200, { "cache-control": "no-store" });
+      const token = cookieValue(request, PARENT_SESSION_COOKIE)!;
+      return json({ authenticated: true, expiresIn: parentTokenSecondsRemaining(token) }, 200, { "cache-control": "no-store" });
     }
 
     const unlockMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/unlock$/);
@@ -565,10 +567,21 @@ export default {
       if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
       if (authentication.status === "invalid") return json({ error: "Household or PIN is incorrect." }, 401);
       if (!env.CONFIG_SECRET) return json({ error: "Parent access is temporarily unavailable." }, 503);
-      return json({
-        ...installDetails(url.origin, unlockMatch[1]),
-        parentToken: await issueParentToken(authentication.household.id, authentication.household.auth_version, env.CONFIG_SECRET),
-      }, 200, { "cache-control": "no-store" });
+      const token = await issueParentToken(authentication.household.id, authentication.household.auth_version, env.CONFIG_SECRET);
+      return json(
+        installDetails(url.origin, unlockMatch[1]),
+        200,
+        { "cache-control": "no-store", "set-cookie": parentSessionCookie(token) },
+      );
+    }
+
+    const lockMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/lock$/);
+    if (request.method === "POST" && lockMatch) {
+      return json(
+        { message: "Parent Page locked." },
+        200,
+        { "cache-control": "no-store", "set-cookie": clearParentSessionCookie() },
+      );
     }
 
     const pinMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/pin$/);
@@ -587,10 +600,12 @@ export default {
       if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
       if (authentication.status === "invalid") return json({ error: "Current PIN is incorrect." }, 401);
       const authVersion = await rotatePin(env.DB, household.id, input.newPin);
-      return json({
-        message: "Parent PIN changed. Previous Parent sessions have been signed out.",
-        parentToken: await issueParentToken(household.id, authVersion, env.CONFIG_SECRET),
-      }, 200, { "cache-control": "no-store" });
+      const token = await issueParentToken(household.id, authVersion, env.CONFIG_SECRET);
+      return json(
+        { message: "Parent PIN changed. Previous Parent sessions have been signed out." },
+        200,
+        { "cache-control": "no-store", "set-cookie": parentSessionCookie(token) },
+      );
     }
 
     const deleteMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)$/);
@@ -607,7 +622,11 @@ export default {
       if (authentication.status === "rate_limited") return rateLimitedPin(authentication.retryAfter);
       if (authentication.status === "invalid") return json({ error: "Current PIN is incorrect." }, 401);
       await deleteHousehold(env.DB, household.id);
-      return json({ message: "Household permanently deleted." }, 200, { "cache-control": "no-store" });
+      return json(
+        { message: "Household permanently deleted." },
+        200,
+        { "cache-control": "no-store", "set-cookie": clearParentSessionCookie() },
+      );
     }
 
     const searchMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/search$/);

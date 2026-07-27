@@ -10,44 +10,138 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as HouseholdsSecretRouteImport } from './routes/households.$secret'
+import { Route as HouseholdsSecretIndexRouteImport } from './routes/households.$secret.index'
+import { Route as HouseholdsSecretAddProgrammesRouteImport } from './routes/households.$secret.add-programmes'
+import { Route as HouseholdsSecretApprovedLibraryRouteImport } from './routes/households.$secret.approved-library'
+import { Route as HouseholdsSecretMovieChannelRouteImport } from './routes/households.$secret.movie-channel'
 import { Route as HouseholdsSecretOnboardingRouteImport } from './routes/households.$secret.onboarding'
+import { Route as HouseholdsSecretSettingsRouteImport } from './routes/households.$secret.settings'
+import { Route as HouseholdsSecretTvChannelRouteImport } from './routes/households.$secret.tv-channel'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HouseholdsSecretRoute = HouseholdsSecretRouteImport.update({
+  id: '/households/$secret',
+  path: '/households/$secret',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const HouseholdsSecretIndexRoute = HouseholdsSecretIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => HouseholdsSecretRoute,
+} as any)
+const HouseholdsSecretAddProgrammesRoute =
+  HouseholdsSecretAddProgrammesRouteImport.update({
+    id: '/add-programmes',
+    path: '/add-programmes',
+    getParentRoute: () => HouseholdsSecretRoute,
+  } as any)
+const HouseholdsSecretApprovedLibraryRoute =
+  HouseholdsSecretApprovedLibraryRouteImport.update({
+    id: '/approved-library',
+    path: '/approved-library',
+    getParentRoute: () => HouseholdsSecretRoute,
+  } as any)
+const HouseholdsSecretMovieChannelRoute =
+  HouseholdsSecretMovieChannelRouteImport.update({
+    id: '/movie-channel',
+    path: '/movie-channel',
+    getParentRoute: () => HouseholdsSecretRoute,
+  } as any)
 const HouseholdsSecretOnboardingRoute =
   HouseholdsSecretOnboardingRouteImport.update({
-    id: '/households/$secret/onboarding',
-    path: '/households/$secret/onboarding',
-    getParentRoute: () => rootRouteImport,
+    id: '/onboarding',
+    path: '/onboarding',
+    getParentRoute: () => HouseholdsSecretRoute,
+  } as any)
+const HouseholdsSecretSettingsRoute =
+  HouseholdsSecretSettingsRouteImport.update({
+    id: '/settings',
+    path: '/settings',
+    getParentRoute: () => HouseholdsSecretRoute,
+  } as any)
+const HouseholdsSecretTvChannelRoute =
+  HouseholdsSecretTvChannelRouteImport.update({
+    id: '/tv-channel',
+    path: '/tv-channel',
+    getParentRoute: () => HouseholdsSecretRoute,
   } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/households/$secret': typeof HouseholdsSecretRouteWithChildren
+  '/households/$secret/add-programmes': typeof HouseholdsSecretAddProgrammesRoute
+  '/households/$secret/approved-library': typeof HouseholdsSecretApprovedLibraryRoute
+  '/households/$secret/movie-channel': typeof HouseholdsSecretMovieChannelRoute
   '/households/$secret/onboarding': typeof HouseholdsSecretOnboardingRoute
+  '/households/$secret/settings': typeof HouseholdsSecretSettingsRoute
+  '/households/$secret/tv-channel': typeof HouseholdsSecretTvChannelRoute
+  '/households/$secret/': typeof HouseholdsSecretIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/households/$secret/add-programmes': typeof HouseholdsSecretAddProgrammesRoute
+  '/households/$secret/approved-library': typeof HouseholdsSecretApprovedLibraryRoute
+  '/households/$secret/movie-channel': typeof HouseholdsSecretMovieChannelRoute
   '/households/$secret/onboarding': typeof HouseholdsSecretOnboardingRoute
+  '/households/$secret/settings': typeof HouseholdsSecretSettingsRoute
+  '/households/$secret/tv-channel': typeof HouseholdsSecretTvChannelRoute
+  '/households/$secret': typeof HouseholdsSecretIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/households/$secret': typeof HouseholdsSecretRouteWithChildren
+  '/households/$secret/add-programmes': typeof HouseholdsSecretAddProgrammesRoute
+  '/households/$secret/approved-library': typeof HouseholdsSecretApprovedLibraryRoute
+  '/households/$secret/movie-channel': typeof HouseholdsSecretMovieChannelRoute
   '/households/$secret/onboarding': typeof HouseholdsSecretOnboardingRoute
+  '/households/$secret/settings': typeof HouseholdsSecretSettingsRoute
+  '/households/$secret/tv-channel': typeof HouseholdsSecretTvChannelRoute
+  '/households/$secret/': typeof HouseholdsSecretIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/households/$secret/onboarding'
+  fullPaths:
+    | '/'
+    | '/households/$secret'
+    | '/households/$secret/add-programmes'
+    | '/households/$secret/approved-library'
+    | '/households/$secret/movie-channel'
+    | '/households/$secret/onboarding'
+    | '/households/$secret/settings'
+    | '/households/$secret/tv-channel'
+    | '/households/$secret/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/households/$secret/onboarding'
-  id: '__root__' | '/' | '/households/$secret/onboarding'
+  to:
+    | '/'
+    | '/households/$secret/add-programmes'
+    | '/households/$secret/approved-library'
+    | '/households/$secret/movie-channel'
+    | '/households/$secret/onboarding'
+    | '/households/$secret/settings'
+    | '/households/$secret/tv-channel'
+    | '/households/$secret'
+  id:
+    | '__root__'
+    | '/'
+    | '/households/$secret'
+    | '/households/$secret/add-programmes'
+    | '/households/$secret/approved-library'
+    | '/households/$secret/movie-channel'
+    | '/households/$secret/onboarding'
+    | '/households/$secret/settings'
+    | '/households/$secret/tv-channel'
+    | '/households/$secret/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  HouseholdsSecretOnboardingRoute: typeof HouseholdsSecretOnboardingRoute
+  HouseholdsSecretRoute: typeof HouseholdsSecretRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -59,19 +153,91 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/households/$secret': {
+      id: '/households/$secret'
+      path: '/households/$secret'
+      fullPath: '/households/$secret'
+      preLoaderRoute: typeof HouseholdsSecretRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/households/$secret/': {
+      id: '/households/$secret/'
+      path: '/'
+      fullPath: '/households/$secret/'
+      preLoaderRoute: typeof HouseholdsSecretIndexRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
+    '/households/$secret/add-programmes': {
+      id: '/households/$secret/add-programmes'
+      path: '/add-programmes'
+      fullPath: '/households/$secret/add-programmes'
+      preLoaderRoute: typeof HouseholdsSecretAddProgrammesRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
+    '/households/$secret/approved-library': {
+      id: '/households/$secret/approved-library'
+      path: '/approved-library'
+      fullPath: '/households/$secret/approved-library'
+      preLoaderRoute: typeof HouseholdsSecretApprovedLibraryRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
+    '/households/$secret/movie-channel': {
+      id: '/households/$secret/movie-channel'
+      path: '/movie-channel'
+      fullPath: '/households/$secret/movie-channel'
+      preLoaderRoute: typeof HouseholdsSecretMovieChannelRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
     '/households/$secret/onboarding': {
       id: '/households/$secret/onboarding'
-      path: '/households/$secret/onboarding'
+      path: '/onboarding'
       fullPath: '/households/$secret/onboarding'
       preLoaderRoute: typeof HouseholdsSecretOnboardingRouteImport
-      parentRoute: typeof rootRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
+    '/households/$secret/settings': {
+      id: '/households/$secret/settings'
+      path: '/settings'
+      fullPath: '/households/$secret/settings'
+      preLoaderRoute: typeof HouseholdsSecretSettingsRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
+    }
+    '/households/$secret/tv-channel': {
+      id: '/households/$secret/tv-channel'
+      path: '/tv-channel'
+      fullPath: '/households/$secret/tv-channel'
+      preLoaderRoute: typeof HouseholdsSecretTvChannelRouteImport
+      parentRoute: typeof HouseholdsSecretRoute
     }
   }
 }
 
+interface HouseholdsSecretRouteChildren {
+  HouseholdsSecretAddProgrammesRoute: typeof HouseholdsSecretAddProgrammesRoute
+  HouseholdsSecretApprovedLibraryRoute: typeof HouseholdsSecretApprovedLibraryRoute
+  HouseholdsSecretMovieChannelRoute: typeof HouseholdsSecretMovieChannelRoute
+  HouseholdsSecretOnboardingRoute: typeof HouseholdsSecretOnboardingRoute
+  HouseholdsSecretSettingsRoute: typeof HouseholdsSecretSettingsRoute
+  HouseholdsSecretTvChannelRoute: typeof HouseholdsSecretTvChannelRoute
+  HouseholdsSecretIndexRoute: typeof HouseholdsSecretIndexRoute
+}
+
+const HouseholdsSecretRouteChildren: HouseholdsSecretRouteChildren = {
+  HouseholdsSecretAddProgrammesRoute: HouseholdsSecretAddProgrammesRoute,
+  HouseholdsSecretApprovedLibraryRoute: HouseholdsSecretApprovedLibraryRoute,
+  HouseholdsSecretMovieChannelRoute: HouseholdsSecretMovieChannelRoute,
+  HouseholdsSecretOnboardingRoute: HouseholdsSecretOnboardingRoute,
+  HouseholdsSecretSettingsRoute: HouseholdsSecretSettingsRoute,
+  HouseholdsSecretTvChannelRoute: HouseholdsSecretTvChannelRoute,
+  HouseholdsSecretIndexRoute: HouseholdsSecretIndexRoute,
+}
+
+const HouseholdsSecretRouteWithChildren =
+  HouseholdsSecretRoute._addFileChildren(HouseholdsSecretRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  HouseholdsSecretOnboardingRoute: HouseholdsSecretOnboardingRoute,
+  HouseholdsSecretRoute: HouseholdsSecretRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
