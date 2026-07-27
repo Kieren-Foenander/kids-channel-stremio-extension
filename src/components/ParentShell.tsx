@@ -22,7 +22,6 @@ function applyTheme(theme: Theme) {
   const systemIsDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   const isDark = theme === "dark" || (theme === "system" && systemIsDark);
   document.documentElement.classList.toggle("dark", isDark);
-  document.documentElement.style.setProperty("--parent-secondary-foreground", isDark ? "#f1f2ee" : "#20231f");
 }
 
 export function ParentShell({ secret }: { secret: string }) {
@@ -194,7 +193,7 @@ export function ParentShell({ secret }: { secret: string }) {
         <Navigation secret={secret} />
         <div className="sidebar-controls">
           <ThemeChoice id="theme-desktop" theme={theme} chooseTheme={chooseTheme} />
-          <Button type="button" className="button-secondary" style={theme === "light" ? { color: "#20231f" } : undefined} disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
+          <Button type="button" className="button-secondary" disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
         </div>
       </aside>
       <header className="mobile-header">
@@ -205,7 +204,7 @@ export function ParentShell({ secret }: { secret: string }) {
             <Navigation secret={secret} closeOnNavigate />
             <div className="mobile-controls">
               <ThemeChoice id="theme-mobile" theme={theme} chooseTheme={chooseTheme} />
-              <Button type="button" className="button-secondary" style={theme === "light" ? { color: "#20231f" } : undefined} disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
+              <Button type="button" className="button-secondary" disabled={lockMutation.isPending} onClick={() => void lock()}>{lockMutation.isPending ? "Locking…" : "Lock Parent Page"}</Button>
             </div>
           </div>
         </details>

@@ -138,10 +138,21 @@ function sessionHeaders(response: Response): { cookie: string } {
 }
 
 describe("Parent Page Household creation", () => {
-  it("serves a minimal creation page and rejects any PIN other than six digits", async () => {
+  it("serves the hardened SPA shell and rejects any PIN other than six digits", async () => {
     const page = await SELF.fetch("https://kids.test/");
     expect(page.status).toBe(200);
-    expect(await page.text()).toContain("There is no forgotten-PIN recovery");
+    const shell = await page.text();
+    expect(shell).toMatch(/<link[^>]+href="\/assets\/[^\"]+\.css"/);
+    expect(shell).toMatch(/<script[^>]+src="\/assets\/[^\"]+\.js"/);
+    expect(shell).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
+    expect(shell).not.toContain("<style");
+    const csp = page.headers.get("content-security-policy");
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp).toContain("img-src 'self' https: data:");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain("unsafe-inline");
+    expect(page.headers.get("x-content-type-options")).toBe("nosniff");
 
     for (const pin of ["12345", "1234567", "abcdef", 123456]) {
       const response = await SELF.fetch("https://kids.test/api/households", {
@@ -237,12 +248,13 @@ describe("Parent Page Household creation", () => {
     const created = await create();
     const secret = secretFrom(created);
 
-    const parentPage = await SELF.fetch(created.parentUrl);
+    const parentPage = await SELF.fetch(`${created.parentUrl}/settings`);
     expect(parentPage.status).toBe(200);
     const parentHtml = await parentPage.text();
-    expect(parentHtml).toContain("Enter your six-digit PIN");
-    expect(parentHtml).toContain("Stremio resolves streams on your device");
-    expect(parentHtml).toContain("fully close and reopen Stremio");
+    expect(parentHtml).toMatch(/<script[^>]+src="\/assets\/[^\"]+\.js"/);
+    expect(parentHtml).not.toMatch(/<script(?![^>]*\bsrc=)[^>]*>/);
+    expect(parentHtml).not.toContain("unlock-form");
+    expect(parentPage.headers.get("content-security-policy")).not.toContain("unsafe-inline");
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
       method: "POST",

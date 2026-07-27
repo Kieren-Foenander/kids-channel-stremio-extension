@@ -19,7 +19,9 @@ pnpm db:migrate:local
 pnpm dev
 ```
 
-Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `http://localhost:8787`, choose a six-digit Parent PIN, and create a Household. The page returns the opaque manifest URL and a `stremio://` installation action. Open the Parent Page, unlock it, then search Cinemeta to approve shows and movies. Shows default to S01E01; choose another regular released episode before approval when needed. Approved shows can be paused without losing Show Progress, programmes can be removed from future Channel selections, and upcoming TV selections can be regenerated without changing the Current Programme.
+`pnpm dev` creates the production SPA assets and starts the complete Cloudflare Worker at `http://localhost:8787`; rerun it after frontend changes. Use `pnpm build` when only a production asset build is needed. The build prerenders the SSR-disabled TanStack Start shell, extracts generated bootstrap code into hashed external assets, and leaves no inline application scripts or styles.
+
+Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `http://localhost:8787`, choose a six-digit Parent PIN, and create a Household. Creation starts a secure Parent session and opens onboarding with the private Parent Page and manifest URLs plus a `stremio://` installation action. The focused Parent Page destinations cover Overview, Add Programmes, Approved Library, both Channels, and Settings. Shows default to S01E01; choose another regular released episode before approval when needed. Approved shows can be paused without losing Show Progress, programmes can be removed from future Channel selections, and upcoming TV selections can be regenerated without changing the Current Programme.
 
 Stremio retains loaded addon metadata in memory even when responses use `Cache-Control: no-store`. After a Parent changes the Approved Library or regenerates selections, fully close and reopen Stremio to load the updated Channel. The Worker state changes immediately and does not interrupt media already playing.
 
@@ -29,7 +31,8 @@ Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PI
 
 ```bash
 pnpm typecheck
-pnpm test
+pnpm build
+pnpm test # rebuilds before Worker and component tests
 pnpm exec playwright install chromium # once per machine
 pnpm test:browser
 # Or run both suites with: pnpm test:all
@@ -55,21 +58,23 @@ pnpm db:migrate:remote
 pnpm run deploy
 ```
 
-The Worker never receives stream-provider or Real-Debrid credentials. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Installed stream addons resolve canonical programme IDs directly in Stremio's client context.
+The Worker never receives stream-provider or Real-Debrid credentials. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Parent API authentication uses a one-hour `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Browser documents apply a strict Content Security Policy to same-origin hashed scripts, styles, and fonts plus HTTPS programme imagery; framing and MIME sniffing are denied. No analytics, tracking, service worker, or offline mutation queue is included. Installed stream addons resolve canonical programme IDs directly in Stremio's client context.
 
 ## Routes
 
 - `GET /` — minimal Household creation Parent Page
 - `POST /api/households` — create a Household with a six-digit PIN
-- `GET /households/:secret` — PIN unlock Parent Page
+- `GET /households/:secret` — SPA Parent Page Overview (PIN unlock when required)
+- `GET /households/:secret/{add-programmes,approved-library,tv-channel,movie-channel,settings}` — focused SPA destinations with refresh-safe deep links
+- `GET /addons/:secret/configure` — redirect Stremio configuration to the Household Overview
 - `POST /api/households/:secret/unlock` — authenticate a Parent for one hour (rate-limited by Household and request origin)
 - `PUT /api/households/:secret/pin` — change the PIN after supplying the current PIN and invalidate older Parent sessions
 - `DELETE /api/households/:secret` — permanently delete the Household after current-PIN and exact `DELETE` confirmation
-- `GET /api/households/:secret/cinemeta/search?q=…` — search Cinemeta shows and movies (Parent bearer token required)
-- `GET /api/households/:secret/cinemeta/title/:type/:imdbId` — retrieve canonical title and released episode metadata (Parent bearer token required)
-- `GET|POST /api/households/:secret/library` — view or add to the Approved Library (Parent bearer token required)
-- `PATCH|DELETE /api/households/:secret/library/:programmeId` — pause/resume a show or remove a programme and reconcile its active Channel (Parent bearer token required)
-- `POST /api/households/:secret/tv-schedule/regenerate` — regenerate future TV selections without advancing Show Progress (Parent bearer token required)
+- `GET /api/households/:secret/cinemeta/search?q=…` — search Cinemeta shows and movies (Parent session required)
+- `GET /api/households/:secret/cinemeta/title/:type/:imdbId` — retrieve canonical title and released episode metadata (Parent session required)
+- `GET|POST /api/households/:secret/library` — view or add to the Approved Library (Parent session required)
+- `PATCH|DELETE /api/households/:secret/library/:programmeId` — pause/resume a show or remove a programme and reconcile its active Channel (Parent session required)
+- `POST /api/households/:secret/tv-schedule/regenerate` — regenerate future TV selections without advancing Show Progress (Parent session required)
 - `GET /addons/:secret/manifest.json` — Household Stremio manifest
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
