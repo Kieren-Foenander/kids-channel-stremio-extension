@@ -481,6 +481,40 @@ describe("Cinemeta Approved Library", () => {
     expect(JSON.stringify(library.programmes[0])).not.toContain("Second");
   });
 
+  it("loads an approved show's stored episode detail without consulting current Cinemeta metadata", async () => {
+    const created = await create();
+    const headers = await parentAccess(created);
+    mockCinemeta();
+    const approval = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {
+      method: "POST", headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ type: "show", imdbId: "tt1234567" }),
+    });
+    const programmeId = (await approval.json<any>()).programme.id as string;
+
+    await env.DB.prepare("UPDATE show_episodes SET title = 'Stored second' WHERE programme_id = ? AND video_id = 'tt1234567:1:2'")
+      .bind(programmeId).run();
+    vi.restoreAllMocks();
+    const outbound = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Cinemeta unavailable"));
+
+    expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/${programmeId}`)).status).toBe(401);
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library/${programmeId}`, { headers });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json<any>()).toMatchObject({
+      programme: {
+        id: programmeId,
+        imdbId: "tt1234567",
+        type: "show",
+        title: "The Example",
+        episodes: [
+          { id: "tt1234567:1:1", season: 1, episode: 1, title: "First", released: "2020-01-01T00:00:00.000Z" },
+          { id: "tt1234567:1:2", season: 1, episode: 2, title: "Stored second", released: "2020-01-08T00:00:00.000Z" },
+        ],
+      },
+    });
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("accepts another valid starting episode and rejects specials, unreleased, and unknown episodes", async () => {
     mockCinemeta();
     const choices = ["tt1234567:0:1", "tt1234567:1:3", "tt1234567:9:9"];

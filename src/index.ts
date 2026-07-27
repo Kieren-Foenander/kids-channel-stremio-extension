@@ -1,4 +1,4 @@
-import { approveProgramme, approvedLibrary, hasApprovedProgramme } from "./approved-library";
+import { approveProgramme, approvedLibrary, approvedProgrammeDetail, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
 import {
   authenticatePin,
@@ -733,6 +733,16 @@ export default {
     }
 
     const libraryProgrammeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)$/);
+    if (libraryProgrammeMatch && request.method === "GET") {
+      const household = await findHousehold(env.DB, libraryProgrammeMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      const programme = await approvedProgrammeDetail(env.DB, household.id, libraryProgrammeMatch[2]);
+      if (!programme) return json({ error: "Programme was not found in the Approved Library." }, 404, { "cache-control": "no-store" });
+      return json({ programme }, 200, { "cache-control": "no-store" });
+    }
+
     if (libraryProgrammeMatch && (request.method === "PATCH" || request.method === "DELETE")) {
       const household = await findHousehold(env.DB, libraryProgrammeMatch[1]);
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {

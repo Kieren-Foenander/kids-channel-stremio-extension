@@ -77,6 +77,31 @@ function programmeFromRow(row: StoredProgramme): ApprovedProgramme {
   };
 }
 
+export async function approvedProgrammeDetail(
+  db: D1Database,
+  householdId: string,
+  programmeId: string,
+): Promise<ApprovedProgramme | null> {
+  const row = await db.prepare(`SELECT p.*, progress.next_video_id
+    FROM approved_programmes p
+    LEFT JOIN show_progress progress ON progress.programme_id = p.id
+    WHERE p.id = ? AND p.household_id = ?`).bind(programmeId, householdId)
+    .first<StoredProgramme & { next_video_id: string | null }>();
+  if (!row) return null;
+
+  const programme = programmeFromRow(row);
+  if (programme.type !== "show") return programme;
+
+  const episodes = await db.prepare(`SELECT video_id, season, episode, title, released_at, overview
+    FROM show_episodes WHERE programme_id = ? ORDER BY season, episode`).bind(programme.id)
+    .all<Record<string, unknown>>();
+  programme.episodes = episodes.results.map(episodeFromRow);
+  programme.showProgress = row.next_video_id
+    ? programme.episodes.find((episode) => episode.id === row.next_video_id)
+    : undefined;
+  return programme;
+}
+
 export async function hasApprovedProgramme(
   db: D1Database,
   householdId: string,

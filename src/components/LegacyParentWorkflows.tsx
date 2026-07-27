@@ -198,14 +198,14 @@ function LibraryShow({ programme, base, act }: { programme: Programme; base: str
     if (episodes) return;
     setLoadingEpisodes(true);
     setDetailError("");
-    const response = await fetch(`${base}/cinemeta/title/show/${encodeURIComponent(programme.imdbId ?? programme.id)}`, { cache: "no-store" });
+    const response = await fetch(`${base}/library/${encodeURIComponent(programme.id)}`, { cache: "no-store" });
     const result = await resultOf(response);
     setLoadingEpisodes(false);
     if (!response.ok) {
       setDetailError(String(result.error));
       return;
     }
-    const loaded = result.title.episodes as Episode[];
+    const loaded = result.programme.episodes as Episode[];
     setEpisodes(loaded);
     setEpisode((current) => current || programme.showProgress?.id || loaded[0]?.id || "");
   }

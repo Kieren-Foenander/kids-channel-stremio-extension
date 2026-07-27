@@ -89,6 +89,17 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   await expect(existingControls.getByRole("button", { name: "Restart show" })).toBeVisible();
   await expect(existingControls.getByRole("button", { name: "Remove show" })).toBeVisible();
 
+  let liveMetadataRequests = 0;
+  await page.route("**/cinemeta/title/**", (route) => {
+    liveMetadataRequests++;
+    return route.abort();
+  });
+  await existingControls.getByRole("button", { name: "Restart show" }).click();
+  const episodeChoices = existingControls.getByRole("combobox", { name: `Next episode for ${finishedTitle}` });
+  await expect(episodeChoices).toBeVisible();
+  expect(await episodeChoices.locator("option").count()).toBe(2);
+  expect(liveMetadataRequests).toBe(0);
+
   await showsTab.focus();
   await showsTab.press("ArrowLeft");
   await expect(moviesTab).toBeFocused();
