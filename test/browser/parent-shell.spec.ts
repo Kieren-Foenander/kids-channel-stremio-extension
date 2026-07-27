@@ -15,6 +15,13 @@ async function unlock(page: Page, pin = "123456") {
 }
 
 test("browser and Stremio configure entry points use the hardened SPA shell", async ({ page }) => {
+  for (const path of ["/_shell", "/_shell.html"]) {
+    const internalShell = await page.request.get(path, { maxRedirects: 0 });
+    expect(internalShell.status()).toBe(404);
+    expect(internalShell.headers()["content-type"]).toContain("application/json");
+    expect(await internalShell.text()).not.toContain("<!DOCTYPE html>");
+  }
+
   const rootResponse = await page.goto("/");
   expect(rootResponse?.headers()["content-security-policy"]).toContain("default-src 'none'");
   expect(rootResponse?.headers()["content-security-policy"]).toContain("script-src 'self'");

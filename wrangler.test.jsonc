@@ -5,7 +5,8 @@
   "compatibility_date": "2026-07-24",
   "assets": {
     "directory": "./dist/client",
-    "binding": "ASSETS"
+    "binding": "ASSETS",
+    "run_worker_first": ["/_shell*"]
   },
   "vars": {
     "CONFIG_SECRET": "test-only-configuration-secret-at-least-32-characters",
