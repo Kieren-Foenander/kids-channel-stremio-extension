@@ -9,6 +9,22 @@ async function createHousehold(page: Page) {
   return parentUrl!;
 }
 
+async function errorContrastRatio(page: Page) {
+  return page.getByRole("alert").evaluate((alert) => {
+    const channels = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const luminance = (value: string) => {
+      const [red, green, blue] = channels(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    };
+    const foreground = luminance(getComputedStyle(alert.querySelector("p")!).color);
+    const background = luminance(getComputedStyle(alert).backgroundColor);
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  });
+}
+
 test("empty Overview explains setup gaps and offers direct next actions at 320px", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 700 });
   const parentUrl = await createHousehold(page);
@@ -57,7 +73,8 @@ test("populated Overview shows compact Current Programmes and immediate TV sched
   await expect(page.getByRole("heading", { name: "Build your Approved Library" })).toBeHidden();
 });
 
-test("Overview keeps its structure while loading and reports API failure accessibly", async ({ page }) => {
+test("Overview keeps its structure while loading and reports API failure accessibly in dark themes", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
   const parentUrl = await createHousehold(page);
   let release: (() => void) | undefined;
   const held = new Promise<void>((resolve) => { release = resolve; });
@@ -72,6 +89,12 @@ test("Overview keeps its structure while loading and reports API failure accessi
   release!();
   await expect(page.getByRole("alert")).toContainText("Summary service is temporarily unavailable.");
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
+  await expect(page.locator("html")).not.toHaveAttribute("data-theme");
+  expect(await errorContrastRatio(page)).toBeGreaterThanOrEqual(4.5);
+
+  await page.locator(".parent-sidebar").getByLabel("Theme").selectOption("dark");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(await errorContrastRatio(page)).toBeGreaterThanOrEqual(4.5);
 });
 
 test("Overview gives concise feedback for a non-JSON API failure", async ({ page }) => {
