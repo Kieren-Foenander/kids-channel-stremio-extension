@@ -301,11 +301,24 @@ describe("Parent Page Household creation", () => {
     });
     const oldSession = sessionHeaders(unlocked);
 
+    const malformed = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
+      method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
+      body: JSON.stringify({ currentPin: "12345", newPin: "654321" }),
+    });
+    expect(malformed.status).toBe(400);
+
+    const reused = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
+      method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
+      body: JSON.stringify({ currentPin: "123456", newPin: "123456" }),
+    });
+    expect(reused.status).toBe(400);
+
     const denied = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
       method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
       body: JSON.stringify({ currentPin: "000000", newPin: "654321" }),
     });
     expect(denied.status).toBe(401);
+    expect(await denied.text()).not.toContain("000000");
 
     const rotated = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
       method: "PUT", headers: { ...oldSession, "content-type": "application/json" },
@@ -326,6 +339,17 @@ describe("Parent Page Household creation", () => {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "654321" }),
     });
     expect(newPin.status).toBe(200);
+
+    let limited: Response | undefined;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      limited = await SELF.fetch(`https://kids.test/api/households/${secret}/pin`, {
+        method: "PUT",
+        headers: { ...newSession, "content-type": "application/json", "cf-connecting-ip": "192.0.2.44" },
+        body: JSON.stringify({ currentPin: "000000", newPin: "111111" }),
+      });
+    }
+    expect(limited?.status).toBe(429);
+    expect(await limited?.text()).not.toContain("000000");
   });
 });
 

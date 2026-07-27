@@ -85,10 +85,16 @@ function ApprovedLibraryPage() {
     setState("all");
   }
 
-  function tabKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+  function tabKeyDown(event: KeyboardEvent<HTMLButtonElement>, current: ProgrammeType) {
     if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
-    const next = event.key === "ArrowLeft" || event.key === "Home" ? "show" : "movie";
+    const tabs: ProgrammeType[] = ["show", "movie"];
+    const currentIndex = tabs.indexOf(current);
+    const next = event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+        ? tabs[tabs.length - 1]
+        : tabs[(currentIndex + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
     selectTab(next);
     document.getElementById(`library-tab-${next}`)?.focus();
   }
@@ -102,8 +108,8 @@ function ApprovedLibraryPage() {
       <Button type="button" className="button-secondary" onClick={() => void library.refetch()}>Try again</Button>
     </section> : <>
       <div className="library-tabs" role="tablist" aria-label="Programme type">
-        <button id="library-tab-show" type="button" role="tab" tabIndex={tab === "show" ? 0 : -1} aria-selected={tab === "show"} aria-controls="library-results" onKeyDown={tabKeyDown} onClick={() => selectTab("show")}>Shows <span>{counts.show}</span></button>
-        <button id="library-tab-movie" type="button" role="tab" tabIndex={tab === "movie" ? 0 : -1} aria-selected={tab === "movie"} aria-controls="library-results" onKeyDown={tabKeyDown} onClick={() => selectTab("movie")}>Movies <span>{counts.movie}</span></button>
+        <button id="library-tab-show" type="button" role="tab" tabIndex={tab === "show" ? 0 : -1} aria-selected={tab === "show"} aria-controls="library-results" onKeyDown={(event) => tabKeyDown(event, "show")} onClick={() => selectTab("show")}>Shows <span>{counts.show}</span></button>
+        <button id="library-tab-movie" type="button" role="tab" tabIndex={tab === "movie" ? 0 : -1} aria-selected={tab === "movie"} aria-controls="library-results" onKeyDown={(event) => tabKeyDown(event, "movie")} onClick={() => selectTab("movie")}>Movies <span>{counts.movie}</span></button>
       </div>
 
       <section className="library-filters" aria-label={`${tab === "show" ? "Show" : "Movie"} filters`}>
