@@ -236,6 +236,8 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 .library-badges { display: flex; min-height: 1.6rem; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; }
 .state-badge { padding: .2rem .5rem; border: 1px solid #8b948b; border-radius: 99rem; background: #edf2ed; color: #284331; font-size: .72rem; font-weight: 800; }
 .library-programme-card .button { margin-top: .65rem; }
+.library-card-actions { display: flex; flex-wrap: wrap; gap: .45rem; margin-top: .2rem; }
+.library-card-actions .button { margin-top: .45rem; white-space: normal; }
 .library-empty, .library-error { text-align: left; box-shadow: none; }
 .library-empty h2, .library-error h2 { margin: 0 0 .4rem; font-size: 1.25rem; }
 .library-empty p, .library-error p { margin: 0 0 1rem; color: #555b52; line-height: 1.5; }

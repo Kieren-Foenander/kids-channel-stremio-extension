@@ -22,6 +22,22 @@ describe("EpisodeSelector", () => {
     expect(onSelectionChange).toHaveBeenLastCalledWith("show:1:1");
   });
 
+  it("starts at the supplied current Show Progress for correction", () => {
+    const onSelectionChange = vi.fn();
+    render(<EpisodeSelector
+      episodes={episodes}
+      programmeTitle="The Example"
+      initialEpisodeId="show:2:1"
+      legend="Choose corrected Show Progress"
+      onSelectionChange={onSelectionChange}
+    />);
+
+    expect(screen.getByRole("group", { name: "Choose corrected Show Progress" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Season")).toHaveValue("2");
+    expect(screen.getByLabelText("Episode")).toHaveValue("show:2:1");
+    expect(onSelectionChange).toHaveBeenLastCalledWith("show:2:1");
+  });
+
   it("requires an explicit choice without S01E01 and resets the episode when season changes", async () => {
     const user = userEvent.setup();
     const onSelectionChange = vi.fn();
