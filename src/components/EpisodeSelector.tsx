@@ -10,23 +10,31 @@ export type SelectableEpisode = {
 
 type Selection = { season: number | null; episodeId: string };
 
-export function initialEpisodeSelection(episodes: SelectableEpisode[]): Selection {
-  const first = episodes.find((episode) => episode.season === 1 && episode.episode === 1);
-  return first ? { season: 1, episodeId: first.id } : { season: null, episodeId: "" };
+export function initialEpisodeSelection(episodes: SelectableEpisode[], initialEpisodeId?: string): Selection {
+  const selected = initialEpisodeId
+    ? episodes.find((episode) => episode.id === initialEpisodeId)
+    : episodes.find((episode) => episode.season === 1 && episode.episode === 1);
+  return selected ? { season: selected.season, episodeId: selected.id } : { season: null, episodeId: "" };
 }
 
 export function EpisodeSelector({
   episodes,
   programmeTitle,
   disabled = false,
+  initialEpisodeId,
+  legend = "Choose starting Show Progress",
+  helpText,
   onSelectionChange,
 }: {
   episodes: SelectableEpisode[];
   programmeTitle: string;
   disabled?: boolean;
+  initialEpisodeId?: string;
+  legend?: string;
+  helpText?: string;
   onSelectionChange: (episodeId: string | null) => void;
 }) {
-  const initial = useMemo(() => initialEpisodeSelection(episodes), [episodes]);
+  const initial = useMemo(() => initialEpisodeSelection(episodes, initialEpisodeId), [episodes, initialEpisodeId]);
   const [season, setSeason] = useState<number | null>(initial.season);
   const [episodeId, setEpisodeId] = useState(initial.episodeId);
   const seasons = useMemo(() => [...new Set(episodes.map((episode) => episode.season))].sort((a, b) => a - b), [episodes]);
@@ -39,8 +47,8 @@ export function EpisodeSelector({
   }, [initial, onSelectionChange]);
 
   return <fieldset className="episode-selector" disabled={disabled}>
-    <legend>Choose starting Show Progress</legend>
-    <p id="starting-episode-help">Choose a season, then a released regular episode for {programmeTitle}.</p>
+    <legend>{legend}</legend>
+    <p id="starting-episode-help">{helpText ?? `Choose a season, then a released regular episode for ${programmeTitle}.`}</p>
     <div className="episode-selector-fields">
       <div>
         <label htmlFor="starting-season">Season</label>

@@ -56,7 +56,7 @@ test("an empty Approved Library links directly to Add Programmes", async ({ page
   await expect(page.getByLabel("Search Cinemeta for shows and movies")).toBeVisible();
 });
 
-test("a Parent filters summary cards and cancels or confirms named movie removal", async ({ page }) => {
+test("a Parent manages approved shows and deliberately removes programmes", async ({ page }) => {
   await page.route("https://placehold.co/**", (route) => route.abort());
   const parentUrl = await createHousehold(page);
   const finishedImdbId = await approveExamples(page, parentUrl);
@@ -73,6 +73,7 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   await expect(moviesTab).toBeVisible();
   const finishedTitle = finishedImdbId === "tt1234567" ? "The Example" : "The Example (1990)";
   const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: finishedTitle, exact: true }) });
+  await expect(page.getByRole("article").getByText("Current", { exact: true })).toBeVisible();
   await expect(show.getByText("Paused", { exact: true })).toBeVisible();
   await expect(show.getByText("Finished", { exact: true })).toBeVisible();
   const cardBox = await show.boundingBox();
@@ -84,21 +85,9 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(320);
   expect(titleBox!.x).toBeGreaterThanOrEqual(posterBox!.x + posterBox!.width);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  const existingControls = page.getByRole("region", { name: `${finishedTitle} show controls` });
-  await expect(existingControls.getByRole("button", { name: "Resume show" })).toBeVisible();
-  await expect(existingControls.getByRole("button", { name: "Restart show" })).toBeVisible();
-  await expect(existingControls.getByRole("button", { name: "Remove show" })).toBeVisible();
-
-  let liveMetadataRequests = 0;
-  await page.route("**/cinemeta/title/**", (route) => {
-    liveMetadataRequests++;
-    return route.abort();
-  });
-  await existingControls.getByRole("button", { name: "Restart show" }).click();
-  const episodeChoices = existingControls.getByRole("combobox", { name: `Next episode for ${finishedTitle}` });
-  await expect(episodeChoices).toBeVisible();
-  expect(await episodeChoices.locator("option").count()).toBe(2);
-  expect(liveMetadataRequests).toBe(0);
+  await expect(show.getByRole("button", { name: "Resume show" })).toBeVisible();
+  await expect(show.getByRole("button", { name: "Restart show" })).toBeVisible();
+  await expect(show.getByRole("button", { name: "Remove show" })).toBeVisible();
 
   await showsTab.focus();
   await showsTab.press("ArrowLeft");
@@ -111,7 +100,7 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   const requestsAfterLoad = libraryRequests;
   await page.getByLabel("Search shows").fill("does not match");
   await expect(page.getByRole("heading", { name: "No programmes match these filters" })).toBeVisible();
-  await expect(existingControls).toBeHidden();
+  await expect(show).toBeHidden();
   expect(libraryRequests).toBe(requestsAfterLoad);
   await page.getByLabel("Search shows").fill("Example");
   await page.getByLabel("State", { exact: true }).selectOption("paused");
@@ -121,8 +110,43 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   await expect(show.getByText("Finished", { exact: true })).toBeVisible();
   expect(libraryRequests).toBe(requestsAfterLoad);
 
-  await moviesTab.click();
-  await expect(existingControls).toBeHidden();
+  let liveMetadataRequests = 0;
+  await page.route("**/cinemeta/title/**", (route) => {
+    liveMetadataRequests++;
+    return route.abort();
+  });
+  await show.getByRole("button", { name: "Restart show" }).click();
+  const progressDialog = page.getByRole("dialog");
+  await expect(progressDialog.getByRole("heading", { name: `Restart ${finishedTitle}` })).toBeVisible();
+  await expect(progressDialog).toContainText("Current Programme and active playback are not interrupted");
+  await expect(progressDialog.getByLabel("Season")).toHaveValue("1");
+  await expect(progressDialog.getByLabel("Episode")).toHaveValue(`${finishedImdbId}:1:1`);
+  await progressDialog.getByLabel("Episode").selectOption(`${finishedImdbId}:1:2`);
+  await progressDialog.getByRole("button", { name: "Restart show" }).click();
+  await expect(progressDialog).toBeHidden();
+  expect(liveMetadataRequests).toBe(0);
+  await expect(page.getByLabel("Stremio restart notice")).toBeVisible();
+
+  await page.getByLabel("State", { exact: true }).selectOption("all");
+  await expect(show.getByText(`Show Progress: S01E02`)).toBeVisible();
+  await show.getByRole("button", { name: "Resume show" }).click();
+  await expect(show.getByRole("button", { name: "Pause show" })).toBeVisible();
+  await expect(show.getByText(`Show Progress: S01E02`)).toBeVisible();
+  await show.getByRole("button", { name: "Pause show" }).click();
+  await expect(show.getByRole("button", { name: "Resume show" })).toBeVisible();
+  await expect(show.getByText(`Show Progress: S01E02`)).toBeVisible();
+  await expect(page.getByLabel("Stremio restart notice")).toHaveCount(1);
+
+  await show.getByRole("button", { name: "Remove show" }).click();
+  const showRemoval = page.getByRole("dialog");
+  await expect(showRemoval.getByRole("heading", { name: `Remove ${finishedTitle}?` })).toBeVisible();
+  await showRemoval.getByRole("button", { name: "Cancel" }).click();
+  await expect(show).toBeVisible();
+  await show.getByRole("button", { name: "Remove show" }).click();
+  await showRemoval.getByRole("button", { name: "Remove show" }).click();
+  await expect(show).toBeHidden();
+
+  await page.getByRole("tab", { name: "Movies 1" }).click();
   const movie = page.getByRole("article").filter({ hasText: "Example: The Movie" });
   await expect(movie.getByText("Current", { exact: true })).toBeVisible();
   await expect(movie.locator(".library-poster").getByText("Movie", { exact: true })).toBeVisible();
