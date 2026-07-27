@@ -25,16 +25,31 @@ const movie = {
   description: "A family film.", poster: "https://placehold.co/300x450?text=Example+Movie",
   releaseInfo: "2022", genres: ["Family"], imdbRating: "7.1",
 };
+const movies = [movie, ...Array.from({ length: 13 }, (_, index) => ({
+  ...movie,
+  id: `tt76543${String(index + 22).padStart(2, "0")}`,
+  imdb_id: `tt76543${String(index + 22).padStart(2, "0")}`,
+  name: `Example Movie ${index + 2}`,
+  description: `Details for example movie ${index + 2}.`,
+  poster: `https://placehold.co/300x450?text=Example+Movie+${index + 2}`,
+}))];
 
 const stub = http.createServer((request, response) => {
   let body;
+  if (request.url?.includes("search=failure")) {
+    response.writeHead(503); response.end(); return;
+  }
   if (request.url?.startsWith("/catalog/series/top/search=")) {
     body = { metas: [show, secondShow] };
-  } else if (request.url?.startsWith("/catalog/movie/top/search=")) body = { metas: [movie] };
+  } else if (request.url?.startsWith("/catalog/movie/top/search=")) body = { metas: movies };
   else if (request.url === "/meta/series/tt1234567.json") body = { meta: show };
   else if (request.url === "/meta/series/tt1111111.json") body = { meta: secondShow };
-  else if (request.url === "/meta/movie/tt7654321.json") body = { meta: movie };
-  else { response.writeHead(404); response.end(); return; }
+  else if (request.url?.startsWith("/meta/movie/")) {
+    const id = request.url.match(/^\/meta\/movie\/(tt\d+)\.json$/)?.[1];
+    const matchingMovie = movies.find((item) => item.imdb_id === id);
+    if (matchingMovie) body = { meta: matchingMovie };
+    else { response.writeHead(404); response.end(); return; }
+  } else { response.writeHead(404); response.end(); return; }
   response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(body));
 });
 await new Promise((resolve) => stub.listen(8791, "127.0.0.1", resolve));
