@@ -55,6 +55,24 @@ test("expiry preserves the intended route and manual lock clears access", async 
   await expect(page.getByRole("button", { name: "Unlock Household" })).toBeVisible();
 });
 
+test("a failed manual lock keeps authenticated access and reports the failure", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(parentUrl);
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+
+  await page.route("**/api/households/*/lock", async route => {
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "Lock failed." }) });
+  });
+  await page.getByRole("button", { name: "Lock Parent Page" }).click();
+
+  await expect(page.getByRole("alert").filter({ hasText: "The Parent Page could not be locked. Try again." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+
+  await page.unroute("**/api/households/*/lock");
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
+});
+
 test("narrow navigation is keyboard accessible and theme choice persists", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.setViewportSize({ width: 320, height: 700 });

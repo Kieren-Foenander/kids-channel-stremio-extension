@@ -24,6 +24,8 @@ export function ParentShell({ secret }: { secret: string }) {
   const [session, setSession] = useState<SessionState>("checking");
   const [error, setError] = useState("");
   const [isUnlocking, setIsUnlocking] = useState(false);
+  const [isLocking, setIsLocking] = useState(false);
+  const [lockError, setLockError] = useState("");
   const [theme, setTheme] = useState<Theme>("system");
   const [expiresIn, setExpiresIn] = useState(60 * 60);
   const wasAuthenticated = useRef(false);
@@ -109,9 +111,25 @@ export function ParentShell({ secret }: { secret: string }) {
   }
 
   async function lock() {
-    await fetch(`/api/households/${secret}/lock`, { method: "POST", credentials: "same-origin" });
-    wasAuthenticated.current = false;
-    setSession("locked");
+    if (isLocking) return;
+    setIsLocking(true);
+    setLockError("");
+    try {
+      const response = await fetch(`/api/households/${secret}/lock`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        setLockError("The Parent Page could not be locked. Try again.");
+        return;
+      }
+      wasAuthenticated.current = false;
+      setSession("locked");
+    } catch {
+      setLockError("The Parent Page could not be locked. Try again.");
+    } finally {
+      setIsLocking(false);
+    }
   }
 
   function chooseTheme(value: Theme) {
@@ -152,7 +170,7 @@ export function ParentShell({ secret }: { secret: string }) {
         <Navigation secret={secret} />
         <div className="sidebar-controls">
           <ThemeChoice id="theme-desktop" theme={theme} chooseTheme={chooseTheme} />
-          <Button type="button" className="button-secondary" onClick={() => void lock()}>Lock Parent Page</Button>
+          <Button type="button" className="button-secondary" disabled={isLocking} onClick={() => void lock()}>{isLocking ? "Locking…" : "Lock Parent Page"}</Button>
         </div>
       </aside>
       <header className="mobile-header">
@@ -163,12 +181,15 @@ export function ParentShell({ secret }: { secret: string }) {
             <Navigation secret={secret} closeOnNavigate />
             <div className="mobile-controls">
               <ThemeChoice id="theme-mobile" theme={theme} chooseTheme={chooseTheme} />
-              <Button type="button" className="button-secondary" onClick={() => void lock()}>Lock Parent Page</Button>
+              <Button type="button" className="button-secondary" disabled={isLocking} onClick={() => void lock()}>{isLocking ? "Locking…" : "Lock Parent Page"}</Button>
             </div>
           </div>
         </details>
       </header>
-      <main id="main" className="parent-content" key={location.pathname}><Outlet /></main>
+      <main id="main" className="parent-content" key={location.pathname}>
+        {lockError && <p className="field-error" role="alert">{lockError}</p>}
+        <Outlet />
+      </main>
     </div>
   );
 }
