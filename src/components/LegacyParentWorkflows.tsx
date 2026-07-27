@@ -31,7 +31,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
   const [libraryStatus, setLibraryStatus] = useState("");
   const [tvStatus, setTvStatus] = useState("");
   const [movieStatus, setMovieStatus] = useState("");
-  const [pinStatus, setPinStatus] = useState("");
   const [deleteStatus, setDeleteStatus] = useState("");
   const [tv, setTv] = useState<TvState>(emptyTv);
   const [movies, setMovies] = useState<MovieState>(emptyMovies);
@@ -98,16 +97,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
     if (response.ok) await reload();
   }
 
-  async function changePin(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const response = await fetch(`${base}/pin`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ currentPin: data.get("currentPin"), newPin: data.get("newPin") }) });
-    const result = await response.json() as { message?: string; error?: string };
-    setPinStatus(response.ok ? result.message! : result.error!);
-    if (response.ok) form.reset();
-  }
-
   async function deleteHousehold(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
@@ -151,9 +140,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
       <p id="movie-status" role="status">{movieStatus}</p>
     </section>
 
-    <section><h2>Parent access</h2><p>There is no forgotten-PIN or account recovery flow. Store the PIN somewhere safe.</p>
-      <form className="form" onSubmit={changePin}><label>Current PIN<input name="currentPin" type="password" inputMode="numeric" pattern="[0-9]{6}" required /></label><label>New six-digit PIN<input name="newPin" type="password" inputMode="numeric" pattern="[0-9]{6}" required /></label><Button type="submit">Change Parent PIN</Button><p id="pin-status" role="status">{pinStatus}</p></form>
-    </section>
     <section><h2>Delete Household</h2><p className="warning">Permanent deletion removes the Approved Library, Channel state, history, PIN, and synced addon access. This cannot be undone.</p>
       <form className="form" onSubmit={deleteHousehold}><label>Current PIN<input name="currentPin" type="password" inputMode="numeric" pattern="[0-9]{6}" required /></label><label>Type DELETE to confirm<input name="confirmation" pattern="DELETE" autoComplete="off" required /></label><Button type="submit">Permanently delete Household</Button><p id="delete-status" className="field-error" role="alert">{deleteStatus}</p></form>
     </section>

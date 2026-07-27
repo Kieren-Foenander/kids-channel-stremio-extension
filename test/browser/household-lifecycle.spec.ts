@@ -26,19 +26,21 @@ test("a Parent rotates the PIN, sees recovery limitations, and permanently delet
   await page.goto(household.parentUrl);
   await expect(page.getByText("There is no forgotten-PIN or account recovery flow").first()).toBeVisible();
   expect((await submitUnlock(page, "123456")).status()).toBe(200);
-  await page.locator(".parent-sidebar").getByRole("link", { name: "Approved Library" }).click();
+  await page.locator(".parent-sidebar").getByRole("link", { name: "Settings" }).click();
   await expect(page.getByRole("heading", { name: "Parent access" })).toBeVisible();
 
-  await page.getByLabel("Current PIN", { exact: true }).first().fill("000000");
+  await page.getByLabel("Current PIN", { exact: true }).fill("000000");
   await page.getByLabel("New six-digit PIN").fill("654321");
   await page.getByRole("button", { name: "Change Parent PIN" }).click();
   await expect(page.locator("#pin-status")).toHaveText("Current PIN is incorrect.");
 
-  await page.getByLabel("Current PIN", { exact: true }).first().fill("123456");
+  await page.getByLabel("Current PIN", { exact: true }).fill("123456");
   await page.getByRole("button", { name: "Change Parent PIN" }).click();
   await expect(page.locator("#pin-status")).toContainText("Previous Parent sessions have been signed out");
 
-  await page.getByLabel("Current PIN", { exact: true }).last().fill("654321");
+  await page.locator(".parent-sidebar").getByRole("link", { name: "Approved Library" }).click();
+  await expect(page.getByRole("heading", { name: "Delete Household" })).toBeVisible();
+  await page.getByLabel("Current PIN", { exact: true }).fill("654321");
   await page.getByLabel("Type DELETE to confirm").fill("DELETE");
   await page.getByRole("button", { name: "Permanently delete Household" }).click();
   await expect(page.getByRole("heading", { name: "Household deleted" })).toBeVisible();
