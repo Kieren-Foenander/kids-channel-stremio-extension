@@ -12,6 +12,14 @@ const show = {
     { id: "tt1234567:1:3", season: 1, episode: 3, title: "Unreleased", released: "2999-01-01T00:00:00.000Z" },
   ],
 };
+const secondShow = {
+  ...show,
+  id: "tt1111111",
+  imdb_id: "tt1111111",
+  name: "The Example (1990)",
+  releaseInfo: "1990",
+  videos: show.videos.map((episode) => ({ ...episode, id: episode.id.replace("tt1234567", "tt1111111") })),
+};
 const movie = {
   id: "tt7654321", imdb_id: "tt7654321", type: "movie", name: "Example: The Movie",
   description: "A family film.", poster: "https://placehold.co/300x450?text=Example+Movie",
@@ -21,9 +29,10 @@ const movie = {
 const stub = http.createServer((request, response) => {
   let body;
   if (request.url?.startsWith("/catalog/series/top/search=")) {
-    body = { metas: [show, { ...show, id: "tt1111111", imdb_id: "tt1111111", name: "The Example (1990)", releaseInfo: "1990" }] };
+    body = { metas: [show, secondShow] };
   } else if (request.url?.startsWith("/catalog/movie/top/search=")) body = { metas: [movie] };
   else if (request.url === "/meta/series/tt1234567.json") body = { meta: show };
+  else if (request.url === "/meta/series/tt1111111.json") body = { meta: secondShow };
   else if (request.url === "/meta/movie/tt7654321.json") body = { meta: movie };
   else { response.writeHead(404); response.end(); return; }
   response.writeHead(200, { "content-type": "application/json" }); response.end(JSON.stringify(body));

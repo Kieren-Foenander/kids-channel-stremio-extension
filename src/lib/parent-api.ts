@@ -64,6 +64,7 @@ export function apiErrorMessage(error: unknown, fallback: string) {
 export const parentKeys = {
   session: (secret: string) => ["household", secret, "session"] as const,
   overview: (secret: string) => ["household", secret, "overview"] as const,
+  library: (secret: string) => ["household", secret, "approved-library"] as const,
   tv: (secret: string) => ["household", secret, "tv-channel"] as const,
   movie: (secret: string) => ["household", secret, "movie-channel"] as const,
 };
