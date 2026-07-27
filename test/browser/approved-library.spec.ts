@@ -65,6 +65,7 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   page.on("request", (request) => {
     if (request.method() === "GET" && /\/api\/households\/[^/]+\/library$/.test(new URL(request.url()).pathname)) libraryRequests++;
   });
+  await page.setViewportSize({ width: 320, height: 800 });
   await page.goto(`${parentUrl}/approved-library`);
   const showsTab = page.getByRole("tab", { name: "Shows 2" });
   const moviesTab = page.getByRole("tab", { name: "Movies 1" });
@@ -74,6 +75,15 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: finishedTitle, exact: true }) });
   await expect(show.getByText("Paused", { exact: true })).toBeVisible();
   await expect(show.getByText("Finished", { exact: true })).toBeVisible();
+  const cardBox = await show.boundingBox();
+  const posterBox = await show.locator(".library-poster").boundingBox();
+  const titleBox = await show.getByRole("heading", { name: finishedTitle, exact: true }).boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(posterBox).not.toBeNull();
+  expect(titleBox).not.toBeNull();
+  expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(320);
+  expect(titleBox!.x).toBeGreaterThanOrEqual(posterBox!.x + posterBox!.width);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const existingControls = page.getByRole("region", { name: `${finishedTitle} show controls` });
   await expect(existingControls.getByRole("button", { name: "Resume show" })).toBeVisible();
   await expect(existingControls.getByRole("button", { name: "Restart show" })).toBeVisible();
@@ -90,6 +100,7 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   const requestsAfterLoad = libraryRequests;
   await page.getByLabel("Search shows").fill("does not match");
   await expect(page.getByRole("heading", { name: "No programmes match these filters" })).toBeVisible();
+  await expect(existingControls).toBeHidden();
   expect(libraryRequests).toBe(requestsAfterLoad);
   await page.getByLabel("Search shows").fill("Example");
   await page.getByLabel("State", { exact: true }).selectOption("paused");
@@ -100,6 +111,7 @@ test("a Parent filters summary cards and cancels or confirms named movie removal
   expect(libraryRequests).toBe(requestsAfterLoad);
 
   await moviesTab.click();
+  await expect(existingControls).toBeHidden();
   const movie = page.getByRole("article").filter({ hasText: "Example: The Movie" });
   await expect(movie.getByText("Current", { exact: true })).toBeVisible();
   await expect(movie.locator(".library-poster").getByText("Movie", { exact: true })).toBeVisible();

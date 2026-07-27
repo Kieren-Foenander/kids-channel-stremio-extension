@@ -149,7 +149,11 @@ function ApprovedLibraryPage() {
       </DialogContent>
     </Dialog>
 
-    <LegacyParentWorkflows secret={secret} surface="show-management" />
+    <LegacyParentWorkflows
+      secret={secret}
+      surface="show-management"
+      visibleProgrammeIds={tab === "show" ? visible.map((programme) => programme.id) : []}
+    />
   </div>;
 }
 

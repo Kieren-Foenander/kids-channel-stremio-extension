@@ -35,7 +35,15 @@ async function resultOf(response: Response) {
  * Temporary compatibility surface for workflows whose focused route replacements have not
  * shipped yet. Remove each surface only when its owning ticket supplies the replacement.
  */
-export function LegacyParentWorkflows({ secret, surface }: { secret: string; surface: CompatibilitySurface }) {
+export function LegacyParentWorkflows({
+  secret,
+  surface,
+  visibleProgrammeIds,
+}: {
+  secret: string;
+  surface: CompatibilitySurface;
+  visibleProgrammeIds?: readonly string[];
+}) {
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
   const [library, setLibrary] = useState<Programme[]>([]);
@@ -124,7 +132,8 @@ export function LegacyParentWorkflows({ secret, surface }: { secret: string; sur
     </section>;
   }
 
-  const shows = library.filter((programme) => programme.type === "show");
+  const visibleIds = visibleProgrammeIds ? new Set(visibleProgrammeIds) : null;
+  const shows = library.filter((programme) => programme.type === "show" && (!visibleIds || visibleIds.has(programme.id)));
   return <div className="legacy-workflows">
     {shows.length > 0 && <section aria-labelledby="existing-show-controls-heading">
       <h2 id="existing-show-controls-heading">Show controls</h2>
