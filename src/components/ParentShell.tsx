@@ -28,6 +28,7 @@ export function ParentShell({ secret }: { secret: string }) {
   const [lockError, setLockError] = useState("");
   const [theme, setTheme] = useState<Theme>("system");
   const [expiresIn, setExpiresIn] = useState(60 * 60);
+  const [restartNotice, setRestartNotice] = useState(false);
   const wasAuthenticated = useRef(false);
 
   useEffect(() => {
@@ -80,6 +81,12 @@ export function ParentShell({ secret }: { secret: string }) {
     const timer = setTimeout(() => setSession("expired"), expiresIn * 1000);
     return () => clearTimeout(timer);
   }, [expiresIn, session]);
+
+  useEffect(() => {
+    const showRestartNotice = () => setRestartNotice(true);
+    window.addEventListener("stremio-restart-required", showRestartNotice);
+    return () => window.removeEventListener("stremio-restart-required", showRestartNotice);
+  }, []);
 
   async function unlock(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -186,9 +193,13 @@ export function ParentShell({ secret }: { secret: string }) {
           </div>
         </details>
       </header>
-      <main id="main" className="parent-content" key={location.pathname}>
+      <main id="main" className="parent-content">
         {lockError && <p className="field-error" role="alert">{lockError}</p>}
-        <Outlet />
+        {restartNotice && <aside className="restart-notice" aria-label="Stremio restart notice">
+          <div><strong>Restart Stremio to see this change</strong><p>Fully close and reopen Stremio to refresh the Channel. Current playback is not interrupted.</p></div>
+          <Button type="button" className="button-secondary compact-button" onClick={() => setRestartNotice(false)}>Dismiss</Button>
+        </aside>}
+        <div key={location.pathname}><Outlet /></div>
       </main>
     </div>
   );
