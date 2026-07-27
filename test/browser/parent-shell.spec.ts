@@ -14,6 +14,37 @@ async function unlock(page: Page, pin = "123456") {
   await page.getByRole("button", { name: "Unlock Household" }).click();
 }
 
+test("browser and Stremio configure entry points use the hardened SPA shell", async ({ page }) => {
+  for (const path of ["/_shell", "/_shell.html"]) {
+    const internalShell = await page.request.get(path, { maxRedirects: 0 });
+    expect(internalShell.status()).toBe(404);
+    expect(internalShell.headers()["content-type"]).toContain("application/json");
+    expect(await internalShell.text()).not.toContain("<!DOCTYPE html>");
+  }
+
+  const rootResponse = await page.goto("/");
+  expect(rootResponse?.headers()["content-security-policy"]).toContain("default-src 'none'");
+  expect(rootResponse?.headers()["content-security-policy"]).toContain("script-src 'self'");
+  expect(rootResponse?.headers()["content-security-policy"]).not.toContain("unsafe-inline");
+  expect(rootResponse?.headers()["x-content-type-options"]).toBe("nosniff");
+  await expect(page.locator("script:not([src])")).toHaveCount(0);
+  await expect(page.locator("style")).toHaveCount(0);
+  await expect(page.locator('script[src^="/assets/"]')).not.toHaveCount(0);
+
+  const parentUrl = await createHousehold(page);
+  const secret = new URL(parentUrl, "http://127.0.0.1:8790").pathname.split("/")[2];
+  const configure = await page.request.get(`/addons/${secret}/configure`, { maxRedirects: 0 });
+  expect(configure.status()).toBe(302);
+  expect(configure.headers().location).toBe(`http://127.0.0.1:8790/households/${secret}`);
+
+  const deepResponse = await page.goto(`${parentUrl}/settings`);
+  expect(deepResponse?.status()).toBe(200);
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
+  await expect(page.locator("#unlock-form")).toHaveCount(0);
+});
+
 test("a Parent unlocks with a cookie and keeps access across routes, reloads, and tabs", async ({ page, context }) => {
   const parentUrl = await createHousehold(page);
   await context.clearCookies();
