@@ -39,7 +39,7 @@ test("a Parent creates a Household and saves truthful onboarding details", async
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(parentUrl);
 
   await page.getByRole("link", { name: "Continue to Parent Page" }).click();
-  await expect(page.getByRole("heading", { name: "Household unlocked" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Overview" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Unlock Household" })).toBeHidden();
 });
 
