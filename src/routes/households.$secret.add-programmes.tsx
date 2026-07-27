@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Button } from "../components/Button";
 import { DestinationPage } from "../components/DestinationPage";
+import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
 import {
   Dialog,
   DialogClose,
@@ -29,6 +30,8 @@ type SearchProgramme = {
 type ProgrammeSummary = { imdbId: string; type: ProgrammeType };
 type SearchResponse = { results: SearchProgramme[] };
 type LibraryResponse = { programmes: ProgrammeSummary[] };
+type ShowDetailResponse = { title: SearchProgramme & { type: "show"; episodes: SelectableEpisode[] } };
+type ApprovalInput = { programme: SearchProgramme; startingEpisodeId?: string };
 
 const PAGE_SIZE = 12;
 
@@ -57,6 +60,7 @@ function AddProgrammesPage() {
   const [input, setInput] = useState(searchState.q ?? "");
   const [inputError, setInputError] = useState("");
   const [detail, setDetail] = useState<SearchProgramme | null>(null);
+  const [startingEpisodeId, setStartingEpisodeId] = useState<string | null>(null);
 
   useEffect(() => setInput(searchState.q ?? ""), [searchState.q]);
 
@@ -79,11 +83,17 @@ function AddProgrammesPage() {
   const pageCount = Math.max(1, Math.ceil(typedResults.length / PAGE_SIZE));
   const visible = typedResults.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const approved = useMemo(() => new Set((library.data?.programmes ?? []).map((programme) => `${programme.type}:${programme.imdbId}`)), [library.data]);
+  const showDetail = useQuery({
+    queryKey: ["household", secret, "cinemeta-title", "show", detail?.type === "show" ? detail.id : ""],
+    queryFn: () => parentApi<ShowDetailResponse>(`/api/households/${secret}/cinemeta/title/show/${detail!.id}`),
+    enabled: detail?.type === "show" && !approved.has(`show:${detail.id}`),
+    retry: false,
+  });
 
   const approval = useMutation({
-    mutationFn: (programme: SearchProgramme) => parentApi<{ programme: unknown }>(`/api/households/${secret}/library`, {
+    mutationFn: ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<{ programme: unknown }>(`/api/households/${secret}/library`, {
       method: "POST",
-      body: { type: programme.type, imdbId: programme.id },
+      body: { type: programme.type, imdbId: programme.id, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
     }),
     onSuccess: async () => {
       window.dispatchEvent(new Event("stremio-restart-required"));
@@ -91,6 +101,7 @@ function AddProgrammesPage() {
         queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
         queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
         queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret) }),
+        queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) }),
       ]);
     },
   });
@@ -126,8 +137,13 @@ function AddProgrammesPage() {
 
   function openDetails(programme: SearchProgramme) {
     approval.reset();
+    setStartingEpisodeId(null);
     setDetail(programme);
   }
+
+  const selectStartingEpisode = useCallback((episodeId: string | null) => {
+    setStartingEpisodeId(episodeId);
+  }, []);
 
   const invalidRestoredQuery = Boolean(query) && (query.length < 2 || query.length > 100);
   return <div className="add-programmes-page">
@@ -178,18 +194,61 @@ function AddProgrammesPage() {
             <p className="programme-description">{detail?.description || "No description is available."}</p>
           </div></DialogDescription>
         </DialogHeader>
-        {approval.isError && <p className="inline-error" role="alert">{apiErrorMessage(approval.error, "The movie could not be approved. Try again.")}</p>}
+        {detail?.type === "show" && !approved.has(`show:${detail.id}`) && <ShowEpisodeChoice
+          key={detail.id}
+          query={showDetail}
+          programmeTitle={detail.title}
+          disabled={approval.isPending || approval.isSuccess}
+          onSelectionChange={selectStartingEpisode}
+        />}
+        {detail?.type === "show" && approved.has(`show:${detail.id}`) && !approval.isSuccess && <p className="approval-success" role="status">This show is already in the Approved Library.</p>}
+        {approval.isError && <p className="inline-error" role="alert">{apiErrorMessage(approval.error, "The programme could not be approved. Try again.")}</p>}
         {approval.isSuccess && <p className="approval-success" role="status">Added to the Approved Library.</p>}
         <DialogFooter>
           <DialogClose asChild><Button type="button" className="button-secondary" disabled={approval.isPending}>Close</Button></DialogClose>
-          {detail?.type === "movie" && <Button type="button" disabled={approval.isPending || approval.isSuccess || approved.has(`movie:${detail.id}`)} onClick={() => approval.mutate(detail)}>
+          {detail?.type === "movie" && <Button type="button" disabled={approval.isPending || approval.isSuccess || approved.has(`movie:${detail.id}`)} onClick={() => approval.mutate({ programme: detail })}>
             {approval.isPending ? "Approving…" : approval.isSuccess || approved.has(`movie:${detail.id}`) ? "Already approved" : "Approve movie"}
           </Button>}
-          {detail?.type === "show" && <p className="muted-copy">Show approval is available in the next update.</p>}
+          {detail?.type === "show" && <Button
+            type="button"
+            disabled={approval.isPending || approval.isSuccess || approved.has(`show:${detail.id}`) || !startingEpisodeId || !showDetail.isSuccess}
+            onClick={() => approval.mutate({ programme: detail, startingEpisodeId: startingEpisodeId ?? undefined })}
+          >
+            {approval.isPending ? "Approving…" : approval.isSuccess || approved.has(`show:${detail.id}`) ? "Already approved" : "Approve show"}
+          </Button>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
   </div>;
+}
+
+function ShowEpisodeChoice({
+  query,
+  programmeTitle,
+  disabled,
+  onSelectionChange,
+}: {
+  query: {
+    data?: ShowDetailResponse;
+    error: unknown;
+    isFetching: boolean;
+    isError: boolean;
+    isSuccess: boolean;
+    refetch: () => Promise<unknown>;
+  };
+  programmeTitle: string;
+  disabled: boolean;
+  onSelectionChange: (episodeId: string | null) => void;
+}) {
+  if (query.isFetching) return <p className="episode-status" role="status">Loading released episodes…</p>;
+  if (query.isError) return <div className="episode-feedback" role="alert">
+    <p>{apiErrorMessage(query.error, "Released episodes are temporarily unavailable. Try again.")}</p>
+    <Button type="button" className="button-secondary compact-button" onClick={() => void query.refetch()}>Try loading episodes again</Button>
+  </div>;
+  if (!query.isSuccess) return null;
+  const episodes = query.data?.title.episodes ?? [];
+  if (episodes.length === 0) return <p className="episode-feedback" role="alert">This show has no regular released episodes available to approve.</p>;
+  return <EpisodeSelector episodes={episodes} programmeTitle={programmeTitle} disabled={disabled} onSelectionChange={onSelectionChange} />;
 }
 
 function SearchCard({ programme, isApproved, onDetails }: { programme: SearchProgramme; isApproved: boolean; onDetails: (programme: SearchProgramme) => void }) {

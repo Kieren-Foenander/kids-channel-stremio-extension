@@ -457,6 +457,26 @@ describe("Cinemeta Approved Library", () => {
       expect.objectContaining({ id: "tt1234567", type: "show", title: "The Example", poster: "https://images.example/show.jpg", releaseInfo: "2020–", genres: ["Family", "Animation"] }),
       expect.objectContaining({ id: "tt7654321", type: "movie", title: "Example: The Movie", description: "A family film." }),
     ]));
+    expect(body.results.every((result: Record<string, unknown>) => !("episodes" in result) && !("videos" in result))).toBe(true);
+  });
+
+  it("loads only regular released show episodes from the on-demand title endpoint", async () => {
+    const created = await create();
+    const headers = await parentAccess(created);
+    mockCinemeta();
+
+    const response = await SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(created)}/cinemeta/title/show/tt1234567`,
+      { headers },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+    const body = await response.json<any>();
+    expect(body.title).toMatchObject({ id: "tt1234567", type: "show", title: "The Example" });
+    expect(body.title.episodes).toEqual([
+      expect.objectContaining({ id: "tt1234567:1:1", season: 1, episode: 1, title: "First", released: "2020-01-01T00:00:00.000Z" }),
+      expect.objectContaining({ id: "tt1234567:1:2", season: 1, episode: 2, title: "Second", released: "2020-01-08T00:00:00.000Z" }),
+    ]);
   });
 
   it("approves a show with regular released episodes and defaults Show Progress to S01E01", async () => {
@@ -517,7 +537,7 @@ describe("Cinemeta Approved Library", () => {
 
   it("accepts another valid starting episode and rejects specials, unreleased, and unknown episodes", async () => {
     mockCinemeta();
-    const choices = ["tt1234567:0:1", "tt1234567:1:3", "tt1234567:9:9"];
+    const choices = ["", "tt1234567:0:1", "tt1234567:1:3", "tt1234567:9:9"];
     for (const startingEpisodeId of choices) {
       const created = await create(); const headers = await parentAccess(created);
       const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, {

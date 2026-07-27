@@ -301,18 +301,30 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 .programme-detail-dialog .search-metadata { margin-top: .25rem; }
 .programme-description { max-height: min(40vh, 18rem); overflow-y: auto; color: inherit; line-height: 1.6; }
 .approval-success { margin: 0; color: #35604b; font-weight: 750; }
+.episode-selector { min-width: 0; margin: 0; padding: 1rem; border: 1px solid #d7d5cd; border-radius: .7rem; }
+.episode-selector legend { padding: 0 .25rem; font-weight: 800; }
+.episode-selector > p { margin: 0 0 .8rem; color: #5b6058; line-height: 1.45; }
+.episode-selector-fields { display: grid; grid-template-columns: minmax(7rem, .35fr) minmax(0, 1fr); gap: .8rem; }
+.episode-selector-fields label { margin-bottom: .35rem; font-size: .85rem; }
+.episode-selector-fields select { width: 100%; min-height: 3rem; padding: .6rem .7rem; border: 1px solid #969b92; border-radius: .6rem; background: #fff; color: #20231f; font: inherit; }
+.episode-status, .episode-feedback { margin: 0; line-height: 1.5; }
+.episode-feedback .button { margin-top: .65rem; }
+:root[data-theme="dark"] .episode-selector { border-color: #414741; }
+:root[data-theme="dark"] .episode-selector > p { color: #bcc1b9; }
 :root[data-theme="dark"] .search-programme-card { border-color: #414741; background: rgb(34 38 34 / 70%); }
 :root[data-theme="dark"] .search-poster { background: #343934; color: #ccd0ca; }
 :root[data-theme="dark"] .search-metadata, :root[data-theme="dark"] .search-status, :root[data-theme="dark"] .search-results-heading > p, :root[data-theme="dark"] .search-empty p, :root[data-theme="dark"] .search-error p { color: #bcc1b9; }
 :root[data-theme="dark"] .approval-success { color: #8fc5a7; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) .search-programme-card { border-color: #414741; background: rgb(34 38 34 / 70%); }
+  :root:not([data-theme]) .episode-selector { border-color: #414741; }
+  :root:not([data-theme]) .episode-selector > p { color: #bcc1b9; }
   :root:not([data-theme]) .search-poster { background: #343934; color: #ccd0ca; }
   :root:not([data-theme]) .search-metadata, :root:not([data-theme]) .search-status, :root:not([data-theme]) .search-results-heading > p, :root:not([data-theme]) .search-empty p, :root:not([data-theme]) .search-error p { color: #bcc1b9; }
 }
 @media (max-width: 680px) { .search-poster-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 520px) {
-  .programme-search-form { grid-template-columns: 1fr; }
+  .programme-search-form, .episode-selector-fields { grid-template-columns: 1fr; }
   .programme-search-form .button { width: 100%; }
   .search-poster-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
   .search-results-heading { align-items: flex-start; flex-direction: column; }
