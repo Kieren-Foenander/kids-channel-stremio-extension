@@ -64,6 +64,36 @@ test("movie search state, details, pagination, and approval survive navigation",
   await expect(dialog.getByRole("button", { name: "Already approved" })).toBeDisabled();
 });
 
+test("a show can be approved from a non-default released episode without losing search context", async ({ page }) => {
+  await page.route("https://placehold.co/**", (route) => route.abort());
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=show&page=1`);
+
+  const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "The Example", exact: true }) });
+  const metadataResponse = page.waitForResponse((response) => /\/cinemeta\/title\/show\/tt1234567$/.test(new URL(response.url()).pathname));
+  await show.getByRole("button", { name: "View details for The Example" }).click();
+  expect((await metadataResponse).status()).toBe(200);
+
+  const dialog = page.getByRole("dialog");
+  const season = dialog.getByLabel("Season");
+  const episode = dialog.getByLabel("Episode");
+  await expect(season).toHaveValue("1");
+  await expect(episode).toHaveValue("tt1234567:1:1");
+  await expect(episode.getByRole("option", { name: "E02 — Second — 8 Jan 2020" })).toBeAttached();
+  await expect(episode.getByRole("option", { name: /Special|Unreleased/ })).toHaveCount(0);
+
+  await episode.selectOption("tt1234567:1:2");
+  const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
+  await dialog.getByRole("button", { name: "Approve show" }).click();
+  const approval = await approvalResponse;
+  expect(approval.status()).toBe(201);
+  expect((await approval.json()).programme.showProgress.id).toBe("tt1234567:1:2");
+  await expect(dialog.getByRole("status")).toHaveText("Added to the Approved Library.");
+  await expect(page).toHaveURL(/\?q=Example&type=show&page=1$/);
+  await dialog.getByRole("button", { name: "Close" }).first().click();
+  await expect(show.getByText("Already approved")).toBeVisible();
+});
+
 test("a restored URL reruns search and search failures are announced", async ({ page }) => {
   const parentUrl = await createHousehold(page);
   await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=2`);

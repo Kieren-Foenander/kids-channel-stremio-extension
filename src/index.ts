@@ -710,9 +710,11 @@ export default {
       if (request.method === "GET") return json({ programmes: await approvedLibrary(env.DB, household.id) });
       let input: { type?: unknown; imdbId?: unknown; startingEpisodeId?: unknown } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
-      if ((input.type !== "show" && input.type !== "movie") || typeof input.imdbId !== "string" || !/^tt\d+$/.test(input.imdbId)
-        || (input.startingEpisodeId !== undefined && typeof input.startingEpisodeId !== "string")) {
+      if ((input.type !== "show" && input.type !== "movie") || typeof input.imdbId !== "string" || !/^tt\d+$/.test(input.imdbId)) {
         return json({ error: "Choose a valid Cinemeta show or movie." }, 400);
+      }
+      if (input.startingEpisodeId !== undefined && (typeof input.startingEpisodeId !== "string" || input.startingEpisodeId.length === 0)) {
+        return json({ error: "Choose a valid regular released starting episode." }, 400);
       }
       if (await hasApprovedProgramme(env.DB, household.id, input.type, input.imdbId)) {
         return json({ error: "This programme is already in the Approved Library." }, 409);
