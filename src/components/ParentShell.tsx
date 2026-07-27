@@ -34,6 +34,7 @@ export function ParentShell({ secret }: { secret: string }) {
   const [theme, setTheme] = useState<Theme>("system");
   const [expiresIn, setExpiresIn] = useState(60 * 60);
   const [restartNotice, setRestartNotice] = useState(false);
+  const [deleted, setDeleted] = useState(false);
   const wasAuthenticated = useRef(false);
 
   useEffect(() => {
@@ -95,8 +96,13 @@ export function ParentShell({ secret }: { secret: string }) {
 
   useEffect(() => {
     const showRestartNotice = () => setRestartNotice(true);
+    const showDeletedState = () => setDeleted(true);
     window.addEventListener("stremio-restart-required", showRestartNotice);
-    return () => window.removeEventListener("stremio-restart-required", showRestartNotice);
+    window.addEventListener("household-deleted", showDeletedState);
+    return () => {
+      window.removeEventListener("stremio-restart-required", showRestartNotice);
+      window.removeEventListener("household-deleted", showDeletedState);
+    };
   }, []);
 
   const unlockMutation = useMutation({
@@ -144,6 +150,17 @@ export function ParentShell({ secret }: { secret: string }) {
     applyTheme(value);
     if (value === "system") localStorage.removeItem("kids-channels-theme");
     else localStorage.setItem("kids-channels-theme", value);
+  }
+
+  if (deleted) {
+    return (
+      <main id="main" className="page-shell deleted-shell">
+        <p className="eyebrow">Kids Channels</p>
+        <h1>Household deleted</h1>
+        <p>The Household, all Channel state, Parent access, and synced addon access have been permanently removed.</p>
+        <a className="button" href="/">Create a new Household</a>
+      </main>
+    );
   }
 
   if (session === "checking") {

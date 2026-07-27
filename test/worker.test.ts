@@ -1120,6 +1120,12 @@ describe("Household deletion", () => {
     });
     expect(deleted.status).toBe(200);
     expect(await deleted.json()).toEqual({ message: "Household permanently deleted." });
+    expect(deleted.headers.get("set-cookie")).toContain("kids_parent_session=;");
+    expect(deleted.headers.get("set-cookie")).toContain("Max-Age=0");
+
+    const invalidSession = await SELF.fetch(`https://kids.test/api/households/${secret}/session`, { headers });
+    expect(invalidSession.status).toBe(401);
+    expect(await invalidSession.json()).toEqual({ error: "Parent authentication is required." });
 
     for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
@@ -1139,6 +1145,20 @@ describe("Household deletion", () => {
       const response = await SELF.fetch(route);
       expect(response.status).toBe(404);
       expect(await response.text()).not.toContain(secret);
+    }
+  });
+
+  it("renders the same neutral not-found state for unknown and deleted Parent Page URLs", async () => {
+    const unknownSecret = "unknown-private-household";
+    for (const path of [`/households/${unknownSecret}`, `/households/${unknownSecret}/settings`]) {
+      const response = await SELF.fetch(`https://kids.test${path}`);
+      const body = await response.text();
+      expect(response.status).toBe(404);
+      expect(response.headers.get("content-type")).toContain("text/html");
+      expect(body).toContain("Household not found");
+      expect(body).toContain("Create a new Household");
+      expect(body).not.toContain(unknownSecret);
+      expect(body).not.toMatch(/PIN|Approved Library|Channel Schedule/);
     }
   });
 });

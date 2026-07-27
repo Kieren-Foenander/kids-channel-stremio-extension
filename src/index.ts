@@ -69,6 +69,13 @@ function html(body: string, status = 200): Response {
   });
 }
 
+function householdNotFoundPage(): string {
+  return shell(`<p class="eyebrow">Kids Channels</p>
+<h1>Household not found</h1>
+<p>This private Household URL is unavailable. Check the complete URL, or create a new Household.</p>
+<a class="button" href="/">Create a new Household</a>`, "Household not found — Kids Channels");
+}
+
 function shell(content: string, title = "Kids Channels"): string {
   return `<!doctype html>
 <html lang="en">
@@ -528,9 +535,9 @@ export default {
     if (request.method === "GET" && path === "/") {
       return env.ASSETS ? spaResponse(request, env.ASSETS) : html(homePage());
     }
-    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/(?:onboarding|add-programmes|approved-library|tv-channel|movie-channel|settings))?$/);
+    const spaHouseholdMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/.*)?$/);
     if (request.method === "GET" && spaHouseholdMatch && env.ASSETS) {
-      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
+      if (!(await findHousehold(env.DB, spaHouseholdMatch[1]))) return html(householdNotFoundPage(), 404);
       return spaResponse(request, env.ASSETS);
     }
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
@@ -812,9 +819,10 @@ export default {
       return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress. Restart Stremio to refresh the Channel." });
     }
 
-    const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)$/);
+    const parentMatch = path.match(/^\/households\/([A-Za-z0-9_-]+)(?:\/.*)?$/);
     if (request.method === "GET" && parentMatch) {
-      if (!(await findHousehold(env.DB, parentMatch[1]))) return html(shell("<h1>Household not found</h1>"), 404);
+      if (!(await findHousehold(env.DB, parentMatch[1]))) return html(householdNotFoundPage(), 404);
+      if (path !== `/households/${parentMatch[1]}`) return html(shell("<h1>Page not found</h1>"), 404);
       return html(parentPage(parentMatch[1]));
     }
 
