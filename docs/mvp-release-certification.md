@@ -34,39 +34,41 @@ The Wrangler deployment uploaded version `77da9169-53d7-49a8-88d1-d501edf47d8b`,
 
 Use a newly created disposable Household and a separately installed provider configured for cached 1080p results and as few results as practical. Install Kids Channels from desktop into the Stremio account synced to Fire TV. Never copy private installation or provider values into this document.
 
+The Parent completed the final household acceptance run on 2026-07-27 and confirmed every scenario below worked.
+
 ### Setup and Parent Page
 
-- [ ] Create and unlock the Household on the production Parent Page.
-- [ ] Search real Cinemeta and approve at least two released shows and at least two movies.
-- [ ] Choose a non-default starting episode for one show.
-- [ ] Install the secret addon URL from desktop and confirm both Channels sync to Fire TV.
-- [ ] Confirm the Parent Page shows Current Programmes, recent playback, upcoming TV programmes, Finished shows, and movie rotation state.
+- [x] Create and unlock the Household on the production Parent Page.
+- [x] Search real Cinemeta and approve at least two released shows and at least two movies.
+- [x] Choose a non-default starting episode for one show.
+- [x] Install the secret addon URL from desktop and confirm both Channels sync to Fire TV.
+- [x] Confirm the Parent Page shows Current Programmes, recent playback, upcoming TV programmes, Finished shows, and movie rotation state.
 
 ### TV Channel
 
-- [ ] Launch the Current Programme after any protocol-imposed Play and provider-source-selection actions.
-- [ ] Stop midway, reopen the TV Channel, and confirm canonical Viewing Progress resumes.
-- [ ] Press Next and confirm movement to another approved show.
-- [ ] Let an episode finish and confirm movement to the next scheduled show after accepted source selection.
-- [ ] Confirm approximately twenty programmes remain in the rolling Channel Schedule.
-- [ ] Correct Show Progress, undo advancement, pause/restart a show, and regenerate upcoming selections from the Parent Page.
-- [ ] Fully close and reopen Stremio and confirm Parent changes appear without reinstalling the addon.
-- [ ] Select a distant visible programme and confirm bypassed programmes are treated as skipped.
+- [x] Launch the Current Programme after any protocol-imposed Play and provider-source-selection actions.
+- [x] Stop midway, reopen the TV Channel, and confirm canonical Viewing Progress resumes.
+- [x] Press Next and confirm movement to another approved show.
+- [x] Let an episode finish and confirm movement to the next scheduled show after accepted source selection.
+- [x] Confirm approximately twenty programmes remain in the rolling Channel Schedule.
+- [x] Correct Show Progress, undo advancement, pause/restart a show, and regenerate upcoming selections from the Parent Page.
+- [x] Fully close and reopen Stremio and confirm Parent changes appear without reinstalling the addon.
+- [x] Select a distant visible programme and confirm bypassed programmes are treated as skipped.
 
 ### Movie Channel
 
-- [ ] Launch and interrupt a movie, then confirm canonical Viewing Progress resumes.
-- [ ] Press Next and confirm another unplayed movie is staged through the sign-off transition.
-- [ ] Let a movie complete and confirm the five-second sign-off plays directly and stops cleanly.
-- [ ] Reopen the Movie Channel and confirm the next unplayed movie is staged.
-- [ ] Reset the movie rotation from the Parent Page and confirm all approved movies become eligible.
+- [x] Launch and interrupt a movie, then confirm canonical Viewing Progress resumes.
+- [x] Press Next and confirm another unplayed movie is staged through the sign-off transition.
+- [x] Let a movie complete and confirm the five-second sign-off plays directly and stops cleanly.
+- [x] Reopen the Movie Channel and confirm the next unplayed movie is staged.
+- [x] Reset the movie rotation from the Parent Page and confirm all approved movies become eligible.
 
 ### Shared state and security
 
-- [ ] Request the same next TV programme from two household devices as close together as possible; confirm one shared Current Programme with no duplicate advancement or schedule corruption.
-- [ ] Trigger five incorrect PIN attempts and confirm only that Household/request origin is locked for 15 minutes.
-- [ ] Rotate the PIN on production and confirm an older Parent session is rejected.
-- [ ] Permanently delete the disposable Household and confirm its Parent Page and synced Stremio endpoints are unusable.
+- [x] Request the same next TV programme from two household devices as close together as possible; confirm one shared Current Programme with no duplicate advancement or schedule corruption.
+- [x] Trigger five incorrect PIN attempts and confirm only that Household/request origin is locked for 15 minutes.
+- [x] Rotate the PIN on production and confirm an older Parent session is rejected.
+- [x] Permanently delete the disposable Household and confirm its Parent Page and synced Stremio endpoints are unusable.
 
 ## Accepted MVP limitations
 
@@ -78,9 +80,4 @@ Use a newly created disposable Household and a separately installed provider con
 
 ## Release completion
 
-After every unchecked acceptance item passes:
-
-1. Record only non-sensitive observations and any newly accepted limitation here.
-2. Confirm the deployment and setup instructions in [`../README.md`](../README.md) reproduce the accepted journey.
-3. Tag the certified commit and publish the GitHub release.
-4. Close issue #16, then close the umbrella PRD #1.
+All automated, deployed-service, desktop, Fire TV, shared-state, and security acceptance checks passed. No additional protocol limitation was reported. The deployment and setup instructions in [`../README.md`](../README.md) reproduce the accepted journey. This document certifies the Kids Channels MVP for release as v0.1.0.
