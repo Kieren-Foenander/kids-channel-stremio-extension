@@ -24,7 +24,7 @@ A Parent can:
 - Search Cinemeta for shows and movies.
 - Manage the Approved Library.
 - Choose a show's starting episode, defaulting to S01E01.
-- See Current Programmes, recently played items, failures, finished shows, and upcoming schedules.
+- See Current Programmes, recently played items, finished shows, and upcoming schedules.
 - Correct Show Progress, undo advancement, restart or pause a show, reset movie rotation, and regenerate upcoming selections.
 - Change the PIN after entering the current PIN.
 - Permanently delete the Household and its state.
