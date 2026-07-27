@@ -37,6 +37,10 @@ test("a Parent creates a Household and saves truthful onboarding details", async
   await page.getByRole("button", { name: "Copy Parent Page URL" }).click();
   await expect(page.getByRole("status").last()).toHaveText("Private Parent Page URL copied.");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(parentUrl);
+
+  await page.getByRole("link", { name: "Continue to Parent Page" }).click();
+  await expect(page.getByRole("heading", { name: "Household unlocked" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Unlock Household" })).toBeHidden();
 });
 
 test("onboarding remains usable at 320px and directs phone installation to desktop", async ({ page }) => {

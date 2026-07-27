@@ -12,6 +12,8 @@ async function unlockHousehold(page: import("@playwright/test").Page) {
   const parentUrl = await page.getByRole("link", { name: "Continue to Parent Page" }).getAttribute("href");
   expect(parentUrl).toBeTruthy();
 
+  // This journey covers explicit PIN unlock independently of creation's automatic session.
+  await page.context().clearCookies();
   await page.goto(parentUrl!);
   await page.getByLabel("Parent PIN").fill("123456");
   await page.getByRole("button", { name: "Unlock Household" }).click();

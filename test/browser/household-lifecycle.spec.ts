@@ -9,6 +9,8 @@ async function createHousehold(page: Page, pin: string) {
   const manifestUrl = await page.locator("code").first().textContent();
   expect(parentUrl).toBeTruthy();
   expect(manifestUrl).toBeTruthy();
+  // Lifecycle journeys below deliberately exercise explicit PIN unlock.
+  await page.context().clearCookies();
   return { parentUrl: parentUrl!, manifestUrl: manifestUrl! };
 }
 

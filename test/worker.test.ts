@@ -1,5 +1,18 @@
-import { env, SELF } from "cloudflare:test";
+import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const SELF = {
+  fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    let request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/api/households") && !["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+      const headers = new Headers(request.headers);
+      if (!headers.has("origin")) headers.set("origin", url.origin);
+      request = new Request(request, { headers });
+    }
+    return worker.fetch(request);
+  },
+};
 
 interface CreatedHousehold {
   householdId: string;
@@ -132,6 +145,42 @@ describe("Parent Page Household creation", () => {
       });
       expect(response.status).toBe(400);
     }
+  });
+
+  it("rejects cross-origin Parent mutations and does not expose private API CORS", async () => {
+    const missingOrigin = await worker.fetch("https://kids.test/api/households", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    expect(missingOrigin.status).toBe(403);
+    expect(missingOrigin.headers.get("access-control-allow-origin")).toBeNull();
+
+    const crossOrigin = await worker.fetch("https://kids.test/api/households", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://other.kids.test" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const preflight = await worker.fetch("https://kids.test/api/households", {
+      method: "OPTIONS",
+      headers: { origin: "https://other.kids.test" },
+    });
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+
+    const createdResponse = await worker.fetch("https://kids.test/api/households", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://kids.test" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    const created = await createdResponse.json<CreatedHousehold>();
+    const cookie = createdResponse.headers.get("set-cookie")!.split(";")[0];
+    const cookieAttack = await worker.fetch(
+      `https://kids.test/api/households/${secretFrom(created)}/tv-schedule/regenerate`,
+      { method: "POST", headers: { cookie, origin: "https://other.kids.test" } },
+    );
+    expect(cookieAttack.status).toBe(403);
   });
 
   it("creates a one-hour HttpOnly Parent session without returning its credential", async () => {
