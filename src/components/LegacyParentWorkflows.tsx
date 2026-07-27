@@ -31,10 +31,8 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
   const [libraryStatus, setLibraryStatus] = useState("");
   const [tvStatus, setTvStatus] = useState("");
   const [movieStatus, setMovieStatus] = useState("");
-  const [deleteStatus, setDeleteStatus] = useState("");
   const [tv, setTv] = useState<TvState>(emptyTv);
   const [movies, setMovies] = useState<MovieState>(emptyMovies);
-  const [deleted, setDeleted] = useState(false);
 
   const loadLibrary = useCallback(async () => {
     const response = await fetch(`${base}/library`, { cache: "no-store" });
@@ -60,8 +58,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
     exposed.loadMovieState = loadMovieState;
     return () => { delete exposed.loadTvState; delete exposed.loadMovieState; };
   }, [loadMovieState, loadTvState]);
-
-  if (deleted) return <section><h2>Household deleted</h2><p>All Household data and synced addon access have been permanently removed.</p></section>;
 
   async function search(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -95,15 +91,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
     const setStatus = target === "tv" ? setTvStatus : target === "movie" ? setMovieStatus : setLibraryStatus;
     setStatus(response.ok ? result.message : result.error);
     if (response.ok) await reload();
-  }
-
-  async function deleteHousehold(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const response = await fetch(base, { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ currentPin: data.get("currentPin"), confirmation: data.get("confirmation") }) });
-    const result = await response.json() as { error?: string };
-    if (!response.ok) { setDeleteStatus(result.error || "Deletion failed."); return; }
-    setDeleted(true);
   }
 
   const manifestUrl = `${location.origin}/addons/${secret}/manifest.json`;
@@ -140,9 +127,6 @@ export function LegacyParentWorkflows({ secret }: { secret: string }) {
       <p id="movie-status" role="status">{movieStatus}</p>
     </section>
 
-    <section><h2>Delete Household</h2><p className="warning">Permanent deletion removes the Approved Library, Channel state, history, PIN, and synced addon access. This cannot be undone.</p>
-      <form className="form" onSubmit={deleteHousehold}><label>Current PIN<input name="currentPin" type="password" inputMode="numeric" pattern="[0-9]{6}" required /></label><label>Type DELETE to confirm<input name="confirmation" pattern="DELETE" autoComplete="off" required /></label><Button type="submit">Permanently delete Household</Button><p id="delete-status" className="field-error" role="alert">{deleteStatus}</p></form>
-    </section>
   </div>;
 }
 

@@ -355,9 +355,25 @@ input[aria-invalid="true"] { border-color: #a12e2e; }
 .pin-form { align-content: start; }
 .pin-form input { letter-spacing: .22em; }
 .pin-result { min-height: 1.5rem; margin: 0; }
-:root[data-theme="dark"] .settings-heading > p:last-child, :root[data-theme="dark"] .stream-guidance p, :root[data-theme="dark"] .parent-access .settings-heading p { color: #bcc1b9; }
+.danger-zone { margin-top: 1rem; padding-top: 2.25rem; border-top: 1px solid #c9aaa5; }
+.danger-zone .settings-heading { max-width: 46rem; }
+.danger-zone .settings-heading h2 { color: #8e2929; }
+.deletion-dialog { width: min(100% - 2rem, 32rem); padding: 1.5rem; }
+.deletion-dialog [data-slot="dialog-title"] { font-size: 1.35rem; line-height: 1.25; }
+.deletion-dialog [data-slot="dialog-description"] { line-height: 1.55; }
+.deletion-form input { letter-spacing: normal; }
+.deletion-form input[type="password"] { letter-spacing: .22em; }
+.deletion-result { min-height: 1.4rem; margin: 0; }
+.deleted-shell h1 { margin-bottom: .75rem; font-size: clamp(2rem, 9vw, 3.5rem); }
+.deleted-shell p:not(.eyebrow) { color: #555b52; line-height: 1.6; }
+.deleted-shell .button { margin-top: 1rem; }
+:root[data-theme="dark"] .settings-heading > p:last-child, :root[data-theme="dark"] .stream-guidance p, :root[data-theme="dark"] .parent-access .settings-heading p, :root[data-theme="dark"] .deleted-shell p:not(.eyebrow) { color: #bcc1b9; }
+:root[data-theme="dark"] .danger-zone { border-top-color: #6e4642; }
+:root[data-theme="dark"] .danger-zone .settings-heading h2 { color: #ffaaa1; }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) .settings-heading > p:last-child, :root:not([data-theme]) .stream-guidance p, :root:not([data-theme]) .parent-access .settings-heading p { color: #bcc1b9; }
+  :root:not([data-theme]) .settings-heading > p:last-child, :root:not([data-theme]) .stream-guidance p, :root:not([data-theme]) .parent-access .settings-heading p, :root:not([data-theme]) .deleted-shell p:not(.eyebrow) { color: #bcc1b9; }
+  :root:not([data-theme]) .danger-zone { border-top-color: #6e4642; }
+  :root:not([data-theme]) .danger-zone .settings-heading h2 { color: #ffaaa1; }
 }
 @media (max-width: 960px) {
   .settings-page .installation-grid { grid-template-columns: 1fr; }
