@@ -11,7 +11,13 @@ async function createHousehold(page: Page) {
 
 async function errorContrastRatio(page: Page) {
   return page.getByRole("alert").evaluate((alert) => {
-    const channels = (value: string) => (value.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    const channels = (value: string) => {
+      const context = document.createElement("canvas").getContext("2d")!;
+      context.fillStyle = value;
+      const serialized = context.fillStyle;
+      if (serialized.startsWith("#")) return [1, 3, 5].map((index) => parseInt(serialized.slice(index, index + 2), 16));
+      return (serialized.match(/[\d.]+/g) ?? []).slice(0, 3).map(Number);
+    };
     const luminance = (value: string) => {
       const [red, green, blue] = channels(value).map((channel) => {
         const normalized = channel / 255;
@@ -85,14 +91,14 @@ test("Overview keeps its structure while loading and reports API failure accessi
 
   await page.goto(parentUrl);
   await expect(page.getByLabel("Loading Household overview")).toHaveAttribute("aria-busy", "true");
-  await expect(page.locator(".skeleton-card")).toHaveCount(2);
+  await expect(page.locator('[data-slot="skeleton-card"]')).toHaveCount(2);
   release!();
   await expect(page.getByRole("alert")).toContainText("Summary service is temporarily unavailable.");
   await expect(page.getByRole("button", { name: "Try again" })).toBeVisible();
   await expect(page.locator("html")).not.toHaveAttribute("data-theme");
   expect(await errorContrastRatio(page)).toBeGreaterThanOrEqual(4.5);
 
-  await page.locator(".parent-sidebar").getByLabel("Theme").selectOption("dark");
+  await page.locator('[data-slot="parent-sidebar"]').getByLabel("Theme").selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   expect(await errorContrastRatio(page)).toBeGreaterThanOrEqual(4.5);
 });

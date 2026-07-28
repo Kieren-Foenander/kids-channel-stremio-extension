@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { NativeSelect } from "./ui/native-select";
 
 export type SelectableEpisode = {
   id: string;
@@ -46,47 +47,49 @@ export function EpisodeSelector({
     onSelectionChange(initial.episodeId || null);
   }, [initial, onSelectionChange]);
 
-  return <fieldset className="episode-selector" disabled={disabled}>
-    <legend>{legend}</legend>
-    <p id="starting-episode-help">{helpText ?? `Choose a season, then a released regular episode for ${programmeTitle}.`}</p>
-    <div className="episode-selector-fields">
-      <div>
-        <label htmlFor="starting-season">Season</label>
-        <select
-          id="starting-season"
-          value={season ?? ""}
-          aria-describedby="starting-episode-help"
-          onChange={(event) => {
-            const nextSeason = event.target.value ? Number(event.target.value) : null;
-            setSeason(nextSeason);
-            setEpisodeId("");
-            onSelectionChange(null);
-          }}
-        >
-          <option value="">Choose a season</option>
-          {seasons.map((number) => <option key={number} value={number}>Season {number}</option>)}
-        </select>
+  return (
+    <fieldset className="min-w-0 rounded-[4px] border p-4" disabled={disabled}>
+      <legend className="px-1 text-sm font-bold">{legend}</legend>
+      <p id="starting-episode-help" className="mb-3 text-sm leading-relaxed text-muted-foreground">{helpText ?? `Choose a season, then a released regular episode for ${programmeTitle}.`}</p>
+      <div className="grid gap-3 sm:grid-cols-[minmax(7rem,0.35fr)_minmax(0,1fr)]">
+        <div>
+          <label htmlFor="starting-season" className="mb-1.5 block text-sm font-semibold">Season</label>
+          <NativeSelect
+            id="starting-season"
+            value={season ?? ""}
+            aria-describedby="starting-episode-help"
+            onChange={(event) => {
+              const nextSeason = event.target.value ? Number(event.target.value) : null;
+              setSeason(nextSeason);
+              setEpisodeId("");
+              onSelectionChange(null);
+            }}
+          >
+            <option value="">Choose a season</option>
+            {seasons.map((number) => <option key={number} value={number}>Season {number}</option>)}
+          </NativeSelect>
+        </div>
+        <div>
+          <label htmlFor="starting-episode" className="mb-1.5 block text-sm font-semibold">Episode</label>
+          <NativeSelect
+            id="starting-episode"
+            value={episodeId}
+            disabled={disabled || season === null}
+            aria-describedby="starting-episode-help"
+            onChange={(event) => {
+              setEpisodeId(event.target.value);
+              onSelectionChange(event.target.value || null);
+            }}
+          >
+            <option value="">Choose an episode</option>
+            {seasonEpisodes.map((episode) => <option key={episode.id} value={episode.id}>
+              {episodeLabel(episode)}
+            </option>)}
+          </NativeSelect>
+        </div>
       </div>
-      <div>
-        <label htmlFor="starting-episode">Episode</label>
-        <select
-          id="starting-episode"
-          value={episodeId}
-          disabled={disabled || season === null}
-          aria-describedby="starting-episode-help"
-          onChange={(event) => {
-            setEpisodeId(event.target.value);
-            onSelectionChange(event.target.value || null);
-          }}
-        >
-          <option value="">Choose an episode</option>
-          {seasonEpisodes.map((episode) => <option key={episode.id} value={episode.id}>
-            {episodeLabel(episode)}
-          </option>)}
-        </select>
-      </div>
-    </div>
-  </fieldset>;
+    </fieldset>
+  );
 }
 
 function episodeLabel(episode: SelectableEpisode) {

@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Button } from "../components/Button";
+import { Ident } from "../components/Ident";
+import { PageHeader } from "../components/PageHeader";
+import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Card } from "../components/ui/card";
 import { Skeleton } from "../components/ui/skeleton";
 import { useMovieChannel } from "../lib/channel-queries";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
@@ -73,73 +74,83 @@ function MovieChannelPage() {
   const visibleHistory = historyExpanded ? history : history.slice(0, HISTORY_PREVIEW_SIZE);
 
   return (
-    <section className="destination movie-channel-page" aria-labelledby="page-heading">
-      <header className="destination-header">
-        <p className="eyebrow">Channel</p>
-        <h1 id="page-heading">Movie Channel</h1>
-        <p>Inspect the movie that will resume and review what remains in this rotation.</p>
-      </header>
+    <section className="grid gap-10" aria-labelledby="page-heading">
+      <PageHeader ident="Channel" title="Movie Channel" description="Inspect the movie that will resume and review what remains in this rotation." />
 
       {!state ? (
         channelQuery.isError ? (
-          <Card className="channel-load-error">
-            <h2>Movie Channel unavailable</h2>
-            <p role="alert">{apiErrorMessage(channelQuery.error, "Movie Channel data could not be loaded. Check your connection and try again.")}</p>
-            <Button type="button" className="button-secondary" onClick={() => void channelQuery.refetch()}>Try again</Button>
-          </Card>
+          <section className="rounded-[4px] border bg-card p-5" role="alert">
+            <h2 className="text-lg font-semibold">Movie Channel unavailable</h2>
+            <p className="mt-1 text-sm text-muted-foreground">{apiErrorMessage(channelQuery.error, "Movie Channel data could not be loaded. Check your connection and try again.")}</p>
+            <Button type="button" variant="outline" className="mt-4" onClick={() => void channelQuery.refetch()}>Try again</Button>
+          </section>
         ) : <ChannelSkeleton />
       ) : (
         <>
-          {channelQuery.isError && <p className="inline-error" role="alert">Movie Channel data may be out of date.</p>}
-          <p className="sr-status" role="status" aria-live="polite">{channelQuery.isFetching ? "Refreshing Movie Channel data…" : ""}</p>
+          {channelQuery.isError && <p className="rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">Movie Channel data may be out of date.</p>}
+          <p className="sr-only" role="status" aria-live="polite">{channelQuery.isFetching ? "Refreshing Movie Channel data…" : ""}</p>
 
-          <Card className="current-programme movie-current-programme" aria-labelledby="current-programme-heading">
-            <div>
-              <h2 id="current-programme-heading" className="eyebrow">Current Programme</h2>
-              <h3>{state.current?.title || "Nothing selected"}</h3>
+          <section className="relative flex min-h-48 items-center gap-6 rounded-[4px] border bg-card p-6 before:absolute before:inset-y-4 before:left-0 before:w-0.5 before:rounded-full before:bg-signal" aria-labelledby="current-programme-heading">
+            <div className="min-w-0 flex-1">
+              <h2 id="current-programme-heading" className="sr-only">Current Programme</h2>
+              <Ident className="mb-3">On now</Ident>
+              <h3 className="text-[clamp(1.4rem,4vw,2rem)] leading-tight font-semibold tracking-[-0.02em] break-words">{state.current?.title || "Nothing selected"}</h3>
               {state.current
-                ? <p className="current-episode">{state.current.releaseInfo || "Ready to resume in Stremio"}</p>
-                : <p>Add an approved movie to start the Movie Channel.</p>}
+                ? <p className="mt-2 font-mono text-sm text-muted-foreground">{state.current.releaseInfo || "Ready to resume in Stremio"}</p>
+                : <p className="mt-2 text-sm text-muted-foreground">Add an approved movie to start the Movie Channel.</p>}
             </div>
-            {state.current?.poster && <img src={state.current.poster} alt={`Poster for ${state.current.title}`} />}
-          </Card>
+            {state.current?.poster && <img src={state.current.poster} alt={`Poster for ${state.current.title}`} className="h-36 w-24 shrink-0 rounded-[3px] object-cover max-sm:h-27 max-sm:w-18" />}
+          </section>
 
-          <section className="channel-section" aria-labelledby="rotation-heading">
-            <div className="section-heading-row">
-              <div><p className="eyebrow">Up next</p><h2 id="rotation-heading">Remaining rotation</h2></div>
-              <span className="item-count">{remaining.length} movie{remaining.length === 1 ? "" : "s"}</span>
+          <section aria-labelledby="rotation-heading">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+              <h2 id="rotation-heading" className="text-xl font-semibold tracking-[-0.01em]">Remaining rotation</h2>
+              <span className="font-mono text-xs font-medium text-muted-foreground">{remaining.length} movie{remaining.length === 1 ? "" : "s"}</span>
             </div>
             {remaining.length ? (
-              <ol id="remaining-rotation-list" className="schedule-list movie-rotation-list" aria-labelledby="rotation-heading">
+              <ol id="remaining-rotation-list" className="divide-y border-y" aria-labelledby="rotation-heading">
                 {visibleRotation.map((movie, index) => (
-                  <li key={`${movie.position}-${movie.programmeId}`}>
-                    <span className="schedule-marker" aria-hidden="true">{index + 1}</span>
-                    <div><strong>{movie.title}</strong>{movie.releaseInfo && <span>{movie.releaseInfo}</span>}</div>
+                  <li key={`${movie.position}-${movie.programmeId}`} className="flex min-w-0 items-center gap-3 px-2 py-3">
+                    <span className="flex size-7 shrink-0 items-center justify-center rounded-[3px] border font-mono text-xs font-semibold text-muted-foreground" aria-hidden="true">{index + 1}</span>
+                    <div className="grid min-w-0 gap-0.5">
+                      <strong className="truncate text-sm font-medium">{movie.title}</strong>
+                      {movie.releaseInfo && <span className="truncate font-mono text-xs text-muted-foreground">{movie.releaseInfo}</span>}
+                    </div>
                   </li>
                 ))}
               </ol>
-            ) : <div className="card channel-empty"><p>{state.current ? "No movies remain after the Current Programme." : "No movies are available. Add movies in the Approved Library."}</p></div>}
-            {remaining.length > ROTATION_PREVIEW_SIZE && <Button type="button" className="button-secondary disclosure-button" aria-expanded={rotationExpanded} aria-controls="remaining-rotation-list" onClick={() => setRotationExpanded(value => !value)}>{rotationExpanded ? "Show fewer movies" : `Show all ${remaining.length} movies`}</Button>}
+            ) : <p className="text-sm text-muted-foreground">{state.current ? "No movies remain after the Current Programme." : "No movies are available. Add movies in the Approved Library."}</p>}
+            {remaining.length > ROTATION_PREVIEW_SIZE && <Button type="button" variant="outline" size="sm" className="mt-3" aria-expanded={rotationExpanded} aria-controls="remaining-rotation-list" onClick={() => setRotationExpanded(value => !value)}>{rotationExpanded ? "Show fewer movies" : `Show all ${remaining.length} movies`}</Button>}
           </section>
 
-          <section className="channel-section" aria-labelledby="history-heading">
-            <div className="section-heading-row">
-              <div><p className="eyebrow">Playback</p><h2 id="history-heading">Recent playback</h2></div>
+          <section aria-labelledby="history-heading">
+            <div className="mb-4 flex flex-wrap items-end justify-between gap-2">
+              <h2 id="history-heading" className="text-xl font-semibold tracking-[-0.01em]">Recent playback</h2>
             </div>
             {history.length ? (
-              <ol id="movie-playback-list" className="history-list" aria-labelledby="history-heading">
-                {visibleHistory.map((item, index) => <li key={`${item.playedAt}-${item.programmeId}-${index}`}><div><strong>{item.title}</strong></div><time dateTime={item.playedAt}>{new Date(item.playedAt).toLocaleDateString()}</time></li>)}
+              <ol id="movie-playback-list" className="divide-y border-y" aria-labelledby="history-heading">
+                {visibleHistory.map((item, index) => (
+                  <li key={`${item.playedAt}-${item.programmeId}-${index}`} className="flex min-w-0 items-center gap-3 px-2 py-3">
+                    <div className="grid min-w-0 gap-0.5">
+                      <strong className="truncate text-sm font-medium">{item.title}</strong>
+                    </div>
+                    <time dateTime={item.playedAt} className="ml-auto shrink-0 font-mono text-xs text-muted-foreground max-sm:hidden">{new Date(item.playedAt).toLocaleDateString()}</time>
+                  </li>
+                ))}
               </ol>
-            ) : <p className="muted-copy">No recent playback.</p>}
-            {history.length > HISTORY_PREVIEW_SIZE && <Button type="button" className="button-secondary disclosure-button" aria-expanded={historyExpanded} aria-controls="movie-playback-list" onClick={() => setHistoryExpanded(value => !value)}>{historyExpanded ? "Show fewer" : `Show all ${history.length}`}</Button>}
+            ) : <p className="text-sm text-muted-foreground">No recent playback.</p>}
+            {history.length > HISTORY_PREVIEW_SIZE && <Button type="button" variant="outline" size="sm" className="mt-3" aria-expanded={historyExpanded} aria-controls="movie-playback-list" onClick={() => setHistoryExpanded(value => !value)}>{historyExpanded ? "Show fewer" : `Show all ${history.length}`}</Button>}
           </section>
 
-          <section className="card regeneration movie-reset" aria-labelledby="reset-heading">
-            <div><h2 id="reset-heading">Reset movie rotation</h2><p>Return every approved movie to the remaining rotation without interrupting the Current Programme.</p></div>
-            <Button type="button" className="button-secondary" disabled={resetting || !state.current} onClick={() => setConfirmingReset(true)}>Reset rotation</Button>
+          <section className="flex flex-col gap-4 border-t pt-6 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="reset-heading">
+            <div>
+              <h2 id="reset-heading" className="text-base font-semibold">Reset movie rotation</h2>
+              <p className="mt-1 text-sm leading-relaxed text-muted-foreground">Return every approved movie to the remaining rotation without interrupting the Current Programme.</p>
+            </div>
+            <Button type="button" variant="outline" className="shrink-0 max-sm:w-full" disabled={resetting || !state.current} onClick={() => setConfirmingReset(true)}>Reset rotation</Button>
           </section>
 
-          <p className={mutationFailed ? "inline-error" : "action-status"} role={mutationFailed ? "alert" : "status"} aria-live="polite">{mutationStatus}</p>
+          <p className={mutationFailed ? "rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" : "min-h-5 text-sm font-medium text-accent"} role={mutationFailed ? "alert" : "status"} aria-live="polite">{mutationStatus}</p>
         </>
       )}
 
@@ -149,21 +160,29 @@ function MovieChannelPage() {
 }
 
 function ChannelSkeleton() {
-  return <div className="channel-skeleton" role="status" aria-live="polite" aria-busy="true" aria-label="Loading Movie Channel"><Skeleton className="skeleton-block skeleton-current" /><Skeleton className="skeleton-block skeleton-list" /><span className="sr-only">Loading Movie Channel…</span></div>;
+  return (
+    <div className="grid gap-6" role="status" aria-live="polite" aria-busy="true" aria-label="Loading Movie Channel">
+      <Skeleton className="h-48" />
+      <Skeleton className="h-96" />
+      <span className="sr-only">Loading Movie Channel…</span>
+    </div>
+  );
 }
 
 function ResetConfirmationDialog({ open, pending, error, onOpenChange, onConfirm }: { open: boolean; pending: boolean; error: string; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
-  return <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
-    <DialogContent className="data-closed:hidden" showCloseButton={false}>
-      <DialogHeader>
-        <DialogTitle>Reset movie rotation?</DialogTitle>
-        <DialogDescription>Every approved movie will return to the remaining rotation. The Current Programme will not be interrupted.</DialogDescription>
-      </DialogHeader>
-      {error && <p className="inline-error" role="alert">{error}</p>}
-      <DialogFooter>
-        <Button type="button" className="button-secondary" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
-        <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Resetting…" : "Reset rotation"}</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>;
+  return (
+    <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
+      <DialogContent className="data-closed:hidden" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Reset movie rotation?</DialogTitle>
+          <DialogDescription>Every approved movie will return to the remaining rotation. The Current Programme will not be interrupted.</DialogDescription>
+        </DialogHeader>
+        {error && <p className="rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">{error}</p>}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Resetting…" : "Reset rotation"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }

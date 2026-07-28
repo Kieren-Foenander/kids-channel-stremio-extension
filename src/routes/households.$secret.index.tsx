@@ -1,15 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { HouseholdOverview } from "../components/HouseholdOverview";
+import { PageHeader } from "../components/PageHeader";
 
 export const Route = createFileRoute("/households/$secret/")({ component: Overview });
 function Overview() {
   const { secret } = Route.useParams();
-  return <section className="destination" aria-labelledby="page-heading">
-    <header className="destination-header">
-      <p className="eyebrow">Household</p>
-      <h1 id="page-heading">Overview</h1>
-      <p>Current Programmes, the immediate TV schedule, and useful next steps.</p>
-    </header>
-    <HouseholdOverview secret={secret} />
-  </section>;
+  return (
+    <section aria-labelledby="page-heading">
+      <PageHeader ident="Household" title="Overview" description="Current Programmes, the immediate TV schedule, and useful next steps." />
+      <HouseholdOverview secret={secret} />
+    </section>
+  );
 }
