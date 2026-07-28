@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import type { HouseholdOverview as OverviewData, OverviewTvProgramme } from "../overview";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
-import { Button } from "./Button";
-import { Card } from "./ui/card";
+import { Ident } from "./Ident";
+import { Button, buttonVariants } from "./ui/button";
 import { Skeleton } from "./ui/skeleton";
 
 const OVERVIEW_LOAD_ERROR = "The Household summary could not be loaded.";
@@ -22,32 +22,30 @@ export function HouseholdOverview({ secret }: { secret: string }) {
 
   if (!overview) {
     return (
-      <Card className="overview-error" role="alert">
-        <h2>Household summary unavailable</h2>
-        <p>{apiErrorMessage(overviewQuery.error, OVERVIEW_LOAD_ERROR)}</p>
-        <Button type="button" className="button-secondary" onClick={() => void overviewQuery.refetch()}>Try again</Button>
-      </Card>
+      <section className="rounded-[4px] border bg-card p-5" role="alert">
+        <h2 className="text-lg font-semibold">Household summary unavailable</h2>
+        <p className="mt-1 text-sm text-destructive">{apiErrorMessage(overviewQuery.error, OVERVIEW_LOAD_ERROR)}</p>
+        <Button type="button" variant="outline" className="mt-4" onClick={() => void overviewQuery.refetch()}>Try again</Button>
+      </section>
     );
   }
 
   const noProgrammes = overview.approved.shows === 0 && overview.approved.movies === 0;
   return (
-    <div className="overview" aria-live="polite">
+    <div className="grid gap-10" aria-live="polite">
       {noProgrammes && (
-        <section className="setup-callout" aria-labelledby="empty-household-heading">
+        <section className="flex flex-col gap-4 rounded-[4px] border bg-card p-5 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="empty-household-heading">
           <div>
-            <h2 id="empty-household-heading">Build your Approved Library</h2>
-            <p>Approve at least one show or movie before a Channel can choose its Current Programme.</p>
+            <h2 id="empty-household-heading" className="text-lg font-semibold">Build your Approved Library</h2>
+            <p className="mt-1 max-w-[40rem] text-sm leading-relaxed text-muted-foreground">Approve at least one show or movie before a Channel can choose its Current Programme.</p>
           </div>
-          <Link className="button" to="/households/$secret/add-programmes" params={{ secret }}>Add Programmes</Link>
+          <Link className={buttonVariants({ className: "shrink-0" })} to="/households/$secret/add-programmes" params={{ secret }}>Add Programmes</Link>
         </section>
       )}
 
       <section aria-labelledby="channels-heading">
-        <div className="overview-section-heading">
-          <div><p className="eyebrow">At a glance</p><h2 id="channels-heading">Current Programmes</h2></div>
-        </div>
-        <div className="current-grid">
+        <h2 id="channels-heading" className="mb-4 text-xl font-semibold tracking-[-0.01em]">On now</h2>
+        <div className="grid gap-4 sm:grid-cols-2">
           <ChannelCurrent
             kind="TV Channel"
             programme={overview.tv.current && {
@@ -77,34 +75,49 @@ export function HouseholdOverview({ secret }: { secret: string }) {
         </div>
       </section>
 
-      <section className="overview-panel" aria-labelledby="next-tv-heading">
-        <div className="overview-section-heading">
-          <div><p className="eyebrow">TV Channel</p><h2 id="next-tv-heading">Coming up next</h2></div>
-          <Link className="text-link" to="/households/$secret/tv-channel" params={{ secret }}>View TV Channel</Link>
+      <section aria-labelledby="next-tv-heading">
+        <div className="mb-4 flex items-end justify-between gap-4">
+          <h2 id="next-tv-heading" className="text-xl font-semibold tracking-[-0.01em]">Coming up on the TV Channel</h2>
+          <Link className="shrink-0 text-sm font-medium text-accent underline-offset-4 hover:underline" to="/households/$secret/tv-channel" params={{ secret }}>View TV Channel</Link>
         </div>
         {overview.tv.next.length ? (
-          <ol className="next-programmes">
-            {overview.tv.next.map((programme) => (
-              <li key={`${programme.programmeId}-${programme.episode.id}`}>
-                <span className="schedule-position" aria-hidden="true">{String(overview.tv.next.indexOf(programme) + 1).padStart(2, "0")}</span>
-                <span><strong>{programme.title}</strong><small>{episodeLabel(programme)}</small></span>
+          <ol className="divide-y border-y">
+            {overview.tv.next.map((programme, index) => (
+              <li key={`${programme.programmeId}-${programme.episode.id}`} className="flex items-center gap-3 px-4 py-3">
+                <span className="w-6 shrink-0 font-mono text-xs font-semibold text-muted-foreground" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                <span className="min-w-0">
+                  <strong className="block truncate text-sm font-medium">{programme.title}</strong>
+                  <small className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">{episodeLabel(programme)}</small>
+                </span>
               </li>
             ))}
           </ol>
-        ) : <p className="overview-empty">{overview.approved.shows ? "No upcoming TV programmes are scheduled." : "Approve a show to create the TV Channel Schedule."}</p>}
+        ) : <p className="text-sm leading-relaxed text-muted-foreground">{overview.approved.shows ? "No upcoming TV programmes are scheduled." : "Approve a show to create the TV Channel Schedule."}</p>}
       </section>
 
-      <section className="library-summary card" aria-labelledby="library-summary-heading">
-        <div><p className="eyebrow">Approved Library</p><h2 id="library-summary-heading">Your programmes</h2></div>
-        <dl><div><dt>Shows</dt><dd>{overview.approved.shows}</dd></div><div><dt>Movies</dt><dd>{overview.approved.movies}</dd></div></dl>
-      </section>
-
-      <nav className="quick-actions" aria-label="Overview quick actions">
-        <h2>Next actions</h2>
+      <section className="flex flex-col gap-4 border-y py-5 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="library-summary-heading">
         <div>
-          <Link className="button" to="/households/$secret/add-programmes" params={{ secret }}>Add Programmes</Link>
-          <Link className="button button-secondary" to="/households/$secret/approved-library" params={{ secret }}>Approved Library</Link>
-          <Link className="button button-secondary" to="/households/$secret/settings" hash="installation" params={{ secret }}>Install in Stremio</Link>
+          <h2 id="library-summary-heading" className="text-lg font-semibold">Approved Library</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Programmes your Channels may choose from.</p>
+        </div>
+        <dl className="flex gap-8">
+          <div className="flex flex-col-reverse">
+            <dt className="text-xs font-semibold text-muted-foreground">Shows</dt>
+            <dd className="font-mono text-2xl font-bold">{overview.approved.shows}</dd>
+          </div>
+          <div className="flex flex-col-reverse">
+            <dt className="text-xs font-semibold text-muted-foreground">Movies</dt>
+            <dd className="font-mono text-2xl font-bold">{overview.approved.movies}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <nav aria-label="Overview quick actions">
+        <h2 className="mb-3 text-lg font-semibold">Next actions</h2>
+        <div className="flex flex-wrap gap-2">
+          <Link className={buttonVariants()} to="/households/$secret/add-programmes" params={{ secret }}>Add Programmes</Link>
+          <Link className={buttonVariants({ variant: "outline" })} to="/households/$secret/approved-library" params={{ secret }}>Approved Library</Link>
+          <Link className={buttonVariants({ variant: "outline" })} to="/households/$secret/settings" hash="installation" params={{ secret }}>Install in Stremio</Link>
         </div>
       </nav>
     </div>
@@ -119,24 +132,49 @@ function ChannelCurrent({ kind, programme, empty, linkTo, secret }: {
   secret: string;
 }) {
   return (
-    <article className={`current-programme ${kind === "TV Channel" ? "current-tv" : "current-movie"}`}>
-      <div className="current-copy">
-        <p className="channel-label">{kind}</p>
-        {programme ? <><h3>{programme.title}</h3>{programme.detail && <p>{programme.detail}</p>}</> : <><h3>No Current Programme</h3><p>{empty}</p></>}
-        {!programme && <Link className="text-link" to={`/households/$secret/${linkTo}`} params={{ secret }}>{linkTo === "add-programmes" ? "Add Programmes" : "Review Approved Library"}</Link>}
+    <article className="flex min-h-40 gap-4 rounded-[4px] border bg-card p-5">
+      <div className="min-w-0 flex-1 self-center">
+        <Ident className="mb-2">{kind === "TV Channel" ? "TV" : "Movie"}</Ident>
+        {programme ? (
+          <>
+            <h3 className="text-lg leading-snug font-semibold break-words">{programme.title}</h3>
+            {programme.detail && <p className="mt-1 font-mono text-xs text-muted-foreground">{programme.detail}</p>}
+          </>
+        ) : (
+          <>
+            <h3 className="text-lg leading-snug font-semibold">No Current Programme</h3>
+            <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{empty}</p>
+          </>
+        )}
+        {!programme && (
+          <Link className="mt-2 inline-block text-sm font-medium text-accent underline-offset-4 hover:underline" to={`/households/$secret/${linkTo}`} params={{ secret }}>
+            {linkTo === "add-programmes" ? "Add Programmes" : "Review Approved Library"}
+          </Link>
+        )}
       </div>
-      {programme?.poster && <img src={programme.poster} alt={`${programme.title} poster`} />}
+      {programme?.poster && <img src={programme.poster} alt={`${programme.title} poster`} className="h-27 w-18 shrink-0 self-center rounded-[3px] object-cover" />}
     </article>
   );
 }
 
 function OverviewSkeleton() {
   return (
-    <div className="overview overview-skeleton" aria-busy="true" aria-label="Loading Household overview">
+    <div className="grid gap-10" aria-busy="true" aria-label="Loading Household overview">
       <span className="sr-only">Loading Household overview…</span>
-      <section><Skeleton className="skeleton-line skeleton-heading" /><div className="current-grid"><Skeleton className="skeleton-card" /><Skeleton className="skeleton-card" /></div></section>
-      <section className="overview-panel"><Skeleton className="skeleton-line skeleton-heading" /><Skeleton className="skeleton-row" /><Skeleton className="skeleton-row" /></section>
-      <Card className="library-summary"><Skeleton className="skeleton-line skeleton-heading" /><Skeleton className="skeleton-row" /></Card>
+      <section>
+        <Skeleton className="mb-4 h-7 w-40" />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Skeleton data-slot="skeleton-card" className="h-40" />
+          <Skeleton data-slot="skeleton-card" className="h-40" />
+        </div>
+      </section>
+      <section>
+        <Skeleton className="mb-4 h-7 w-64" />
+        <Skeleton className="h-12 rounded-t-[4px]" />
+        <Skeleton className="h-12" />
+        <Skeleton className="h-12 rounded-b-[4px]" />
+      </section>
+      <Skeleton className="h-24" />
     </div>
   );
 }

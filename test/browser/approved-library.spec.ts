@@ -77,7 +77,7 @@ test("a Parent manages approved shows and deliberately removes programmes", asyn
   await expect(show.getByText("Paused", { exact: true })).toBeVisible();
   await expect(show.getByText("Finished", { exact: true })).toBeVisible();
   const cardBox = await show.boundingBox();
-  const posterBox = await show.locator(".library-poster").boundingBox();
+  const posterBox = await show.locator('[data-slot="library-poster"]').boundingBox();
   const titleBox = await show.getByRole("heading", { name: finishedTitle, exact: true }).boundingBox();
   expect(cardBox).not.toBeNull();
   expect(posterBox).not.toBeNull();
@@ -149,7 +149,7 @@ test("a Parent manages approved shows and deliberately removes programmes", asyn
   await page.getByRole("tab", { name: "Movies 1" }).click();
   const movie = page.getByRole("article").filter({ hasText: "Example: The Movie" });
   await expect(movie.getByText("Current", { exact: true })).toBeVisible();
-  await expect(movie.locator(".library-poster").getByText("Movie", { exact: true })).toBeVisible();
+  await expect(movie.locator('[data-slot="library-poster"]').getByText("Movie", { exact: true })).toBeVisible();
 
   await movie.getByRole("button", { name: "Remove movie" }).click();
   const dialog = page.getByRole("dialog");

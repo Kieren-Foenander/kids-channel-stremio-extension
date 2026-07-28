@@ -114,15 +114,23 @@ test("narrow navigation is keyboard accessible and theme choice persists", async
   const menu = page.getByText("Menu", { exact: true });
   await menu.focus();
   await page.keyboard.press("Enter");
-  await page.locator(".mobile-menu-panel").getByRole("link", { name: "Add Programmes" }).click();
+  await page.locator('[data-slot="mobile-menu-panel"]').getByRole("link", { name: "Add Programmes" }).click();
   await expect(page.getByRole("heading", { name: "Add Programmes" })).toBeVisible();
 
   await page.setViewportSize({ width: 1024, height: 800 });
-  const theme = page.locator(".parent-sidebar").getByLabel("Theme");
+  const theme = page.locator('[data-slot="parent-sidebar"]').getByLabel("Theme");
   await theme.selectOption("light");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
-  expect(await page.locator(".eyebrow").first().evaluate(element => getComputedStyle(element).color)).toBe("rgb(53, 96, 75)");
-  expect(await page.getByRole("button", { name: "Lock Parent Page" }).first().evaluate(element => getComputedStyle(element).color)).toBe("rgb(32, 35, 31)");
+  expect(await page.locator("[data-slot=ident]").first().evaluate((element) => {
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.fillStyle = getComputedStyle(element).backgroundColor;
+    return context.fillStyle;
+  })).toBe("#d40c1a");
+  expect(await page.getByRole("button", { name: "Lock Parent Page" }).first().evaluate((element) => {
+    const context = document.createElement("canvas").getContext("2d")!;
+    context.fillStyle = getComputedStyle(element).color;
+    return context.fillStyle;
+  })).toBe("#1a2026");
 
   await theme.selectOption("dark");
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
