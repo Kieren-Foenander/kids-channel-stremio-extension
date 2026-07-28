@@ -3,6 +3,11 @@
   "name": "kids-channels",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-24",
+  "assets": {
+    "directory": "./dist/client",
+    "binding": "ASSETS",
+    "run_worker_first": ["/_shell*"]
+  },
   "d1_databases": [
     {
       "binding": "DB",
