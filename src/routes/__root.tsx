@@ -2,6 +2,7 @@
 import { HeadContent, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
 import { Ident } from "../components/Ident";
 import { QueryProvider } from "../components/QueryProvider";
+import { Toaster } from "../components/ui/sonner";
 import "../styles.css";
 
 export const Route = createRootRoute({
@@ -35,6 +36,7 @@ export const Route = createRootRoute({
           Skip to content
         </a>
         <QueryProvider>{children}</QueryProvider>
+        <Toaster position="bottom-right" richColors closeButton />
         <Scripts />
       </body>
     </html>

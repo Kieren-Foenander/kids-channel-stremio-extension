@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { toast } from "sonner";
 import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
@@ -94,19 +95,36 @@ function AddProgrammesPage() {
     retry: false,
   });
 
+  const approveProgramme = ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<{ programme: unknown }>(`/api/households/${secret}/library`, {
+    method: "POST",
+    body: { type: programme.type, imdbId: programme.id, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
+  });
+  const invalidateAfterApproval = () => Promise.all([
+    queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
+    queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
+    queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret) }),
+    queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) }),
+  ]);
+
   const approval = useMutation({
-    mutationFn: ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<{ programme: unknown }>(`/api/households/${secret}/library`, {
-      method: "POST",
-      body: { type: programme.type, imdbId: programme.id, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
-    }),
-    onSuccess: async () => {
+    mutationFn: approveProgramme,
+    onSuccess: async (_data, { programme }) => {
       window.dispatchEvent(new Event("stremio-restart-required"));
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
-        queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-        queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret) }),
-        queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) }),
-      ]);
+      toast.success(`“${programme.title}” added to the Approved Library.`);
+      setDetail(null);
+      await invalidateAfterApproval();
+    },
+  });
+
+  const quickApproval = useMutation({
+    mutationFn: approveProgramme,
+    onSuccess: async (_data, { programme }) => {
+      window.dispatchEvent(new Event("stremio-restart-required"));
+      toast.success(`“${programme.title}” added to the Approved Library.`);
+      await invalidateAfterApproval();
+    },
+    onError: (error, { programme }) => {
+      toast.error(apiErrorMessage(error, `“${programme.title}” could not be approved. Try again.`));
     },
   });
 
@@ -189,7 +207,14 @@ function AddProgrammesPage() {
             <>
               <p className="text-sm text-muted-foreground" role="status">Showing {visible.length} of {typedResults.length} {tab === "show" ? "shows" : "movies"}, page {page} of {pageCount}</p>
               <div id="search-result-grid" role="tabpanel" aria-labelledby={`search-tab-${tab}`} className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-                {visible.map((programme) => <SearchCard key={`${programme.type}:${programme.id}`} programme={programme} isApproved={approved.has(`${programme.type}:${programme.id}`)} onDetails={openDetails} />)}
+                {visible.map((programme) => <SearchCard
+                  key={`${programme.type}:${programme.id}`}
+                  programme={programme}
+                  isApproved={approved.has(`${programme.type}:${programme.id}`)}
+                  isApproving={quickApproval.isPending && quickApproval.variables?.programme.id === programme.id}
+                  onApprove={(movie) => quickApproval.mutate({ programme: movie })}
+                  onDetails={openDetails}
+                />)}
               </div>
               {pageCount > 1 && (
                 <nav className="flex items-center justify-center gap-4 max-sm:justify-between" aria-label="Search result pages">
@@ -222,7 +247,6 @@ function AddProgrammesPage() {
           />}
           {detail?.type === "show" && approved.has(`show:${detail.id}`) && !approval.isSuccess && <p className="text-sm font-medium text-accent" role="status">This show is already in the Approved Library.</p>}
           {approval.isError && <p className="rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">{apiErrorMessage(approval.error, "The programme could not be approved. Try again.")}</p>}
-          {approval.isSuccess && <p className="text-sm font-medium text-accent" role="status">Added to the Approved Library.</p>}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline" disabled={approval.isPending}>Close</Button></DialogClose>
             {detail?.type === "movie" && <Button type="button" disabled={approval.isPending || approval.isSuccess || approved.has(`movie:${detail.id}`)} onClick={() => approval.mutate({ programme: detail })}>
@@ -273,7 +297,7 @@ function ShowEpisodeChoice({
   return <EpisodeSelector episodes={episodes} programmeTitle={programmeTitle} disabled={disabled} onSelectionChange={onSelectionChange} />;
 }
 
-function SearchCard({ programme, isApproved, onDetails }: { programme: SearchProgramme; isApproved: boolean; onDetails: (programme: SearchProgramme) => void }) {
+function SearchCard({ programme, isApproved, isApproving, onApprove, onDetails }: { programme: SearchProgramme; isApproved: boolean; isApproving: boolean; onApprove: (programme: SearchProgramme) => void; onDetails: (programme: SearchProgramme) => void }) {
   return (
     <article className="flex min-w-0 flex-col overflow-hidden rounded-[4px] border bg-card">
       <div className="relative grid aspect-[2/3] w-full place-items-center overflow-hidden bg-muted text-xs font-bold text-muted-foreground uppercase">
@@ -284,7 +308,12 @@ function SearchCard({ programme, isApproved, onDetails }: { programme: SearchPro
         <h3 className="text-sm leading-snug font-semibold break-words">{programme.title}</h3>
         <ProgrammeMetadata programme={programme} />
         {isApproved && <StateBadge>Already approved</StateBadge>}
-        <Button type="button" variant="outline" size="sm" className="mt-auto w-full" onClick={() => onDetails(programme)}>View details<span className="sr-only"> for {programme.title}</span></Button>
+        <div className="mt-auto grid w-full gap-1.5">
+          {programme.type === "movie" && !isApproved && <Button type="button" size="sm" className="w-full" disabled={isApproving} onClick={() => onApprove(programme)}>
+            {isApproving ? "Approving…" : "Approve"}<span className="sr-only"> {programme.title}</span>
+          </Button>}
+          <Button type="button" variant="outline" size="sm" className="w-full" onClick={() => onDetails(programme)}>View details<span className="sr-only"> for {programme.title}</span></Button>
+        </div>
       </div>
     </article>
   );

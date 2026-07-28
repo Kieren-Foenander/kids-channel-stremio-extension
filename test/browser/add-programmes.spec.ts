@@ -56,12 +56,26 @@ test("movie search state, details, pagination, and approval survive navigation",
   const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
   await dialog.getByRole("button", { name: "Approve movie" }).click();
   expect((await approvalResponse).status()).toBe(201);
-  await expect(dialog.getByRole("button", { name: "Already approved" })).toBeDisabled();
-  await expect(dialog.getByRole("status")).toHaveText("Added to the Approved Library.");
-  await dialog.getByRole("button", { name: "Close" }).first().click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("added to the Approved Library.")).toBeVisible();
   await expect(movie.getByText("Already approved")).toBeVisible();
   await movie.getByRole("button", { name: "View details for Example: The Movie" }).click();
   await expect(dialog.getByRole("button", { name: "Already approved" })).toBeDisabled();
+});
+
+test("a movie can be approved in one click from the search results", async ({ page }) => {
+  await page.route("https://placehold.co/**", (route) => route.abort());
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=1`);
+
+  const movie = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Example: The Movie" }) });
+  const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
+  await movie.getByRole("button", { name: "Approve Example: The Movie" }).click();
+  expect((await approvalResponse).status()).toBe(201);
+  await expect(page.getByText("added to the Approved Library.")).toBeVisible();
+  await expect(page.locator("[data-sonner-toaster]")).toHaveCSS("position", "fixed");
+  await expect(movie.getByText("Already approved")).toBeVisible();
+  await expect(movie.getByRole("button", { name: "Approve Example: The Movie" })).toHaveCount(0);
 });
 
 test("a show can be approved from a non-default released episode without losing search context", async ({ page }) => {
@@ -88,9 +102,9 @@ test("a show can be approved from a non-default released episode without losing 
   const approval = await approvalResponse;
   expect(approval.status()).toBe(201);
   expect((await approval.json()).programme.showProgress.id).toBe("tt1234567:1:2");
-  await expect(dialog.getByRole("status")).toHaveText("Added to the Approved Library.");
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("added to the Approved Library.")).toBeVisible();
   await expect(page).toHaveURL(/\?q=Example&type=show&page=1$/);
-  await dialog.getByRole("button", { name: "Close" }).first().click();
   await expect(show.getByText("Already approved")).toBeVisible();
 });
 
