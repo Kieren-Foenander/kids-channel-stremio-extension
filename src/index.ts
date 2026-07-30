@@ -1,5 +1,6 @@
 import { approveProgramme, approvedLibrary, approvedProgrammeDetail, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
+import { firstPartyProviderProbeResponse } from "./first-party-provider-probe";
 import {
   authenticatePin,
   createHousehold,
@@ -39,6 +40,11 @@ export interface Env {
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
   MOVIE_ROTATION_SEED?: string;
+  REAL_DEBRID_TOKEN?: string;
+  PROVIDER_PROBE_SECRET?: string;
+  REAL_DEBRID_ORIGIN?: string;
+  ZILEAN_ORIGIN?: string;
+  KNABEN_ORIGIN?: string;
 }
 
 const jsonHeaders = {
@@ -195,6 +201,13 @@ export default {
         return new Response(null, { status: 204, headers: { "access-control-allow-origin": "*", "access-control-allow-methods": "GET, HEAD, OPTIONS" } });
       }
       return new Response(null, { status: 204 });
+    }
+
+    if (path === "/_probes/first-party-provider") {
+      return firstPartyProviderProbeResponse(request, env, false);
+    }
+    if (path === "/_probes/first-party-provider/redirect") {
+      return firstPartyProviderProbeResponse(request, env, true);
     }
 
     if (isStateChangingParentRequest(request, path) && !hasSameOrigin(request)) {
