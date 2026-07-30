@@ -153,7 +153,7 @@ describe("first-party provider feasibility probe", () => {
     expect(await result.text()).toBe("");
   });
 
-  it("records a discovery rejection without retaining its response body", async () => {
+  it("falls back to the remaining discovery provider without retaining a rejected response body", async () => {
     const providers = mockedProviders();
     providers.mockImplementationOnce(async () => response({ sensitive: "provider-body" }, 403));
     const result = await SELF.fetch(endpoint, {
@@ -166,8 +166,31 @@ describe("first-party provider feasibility probe", () => {
       discovery: { zilean: { status: number; reachable: boolean } };
     }>();
 
-    expect(report.success).toBe(false);
+    expect(report.success).toBe(true);
     expect(report.discovery.zilean).toMatchObject({ status: 403, reachable: false });
     expect(JSON.stringify(report)).not.toContain("provider-body");
+  });
+
+  it("fails discovery only when every discovery provider is unavailable", async () => {
+    const providers = mockedProviders();
+    providers
+      .mockImplementationOnce(async () => response([], 404))
+      .mockImplementationOnce(async () => response({}, 503));
+    const result = await SELF.fetch(endpoint, {
+      method: "POST",
+      headers: parentHeaders,
+      body: JSON.stringify(input),
+    });
+    const report = await result.json<{
+      success: boolean;
+      discovery: {
+        zilean: { status: number; reachable: boolean };
+        knaben: { status: number; reachable: boolean };
+      };
+    }>();
+
+    expect(report.success).toBe(false);
+    expect(report.discovery.zilean).toMatchObject({ status: 404, reachable: false });
+    expect(report.discovery.knaben).toMatchObject({ status: 503, reachable: false });
   });
 });

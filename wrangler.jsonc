@@ -23,6 +23,9 @@
     "development": {
       "name": "kids-channels-development",
       "workers_dev": true,
+      "vars": {
+        "ZILEAN_ORIGIN": "https://zileanfortheweebs.midnightignite.me"
+      },
       "d1_databases": [
         {
           "binding": "DB",

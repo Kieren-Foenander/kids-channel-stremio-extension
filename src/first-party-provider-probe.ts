@@ -385,8 +385,9 @@ export async function firstPartyProviderProbeResponse(
     };
   }
   const discovery = await discoveryPromise;
+  const discoveryReachable = discovery.zilean.reachable || discovery.knaben.reachable;
   const report: FirstPartyProviderProbeReport = {
-    success: realDebrid.redirectReady && discovery.zilean.reachable && discovery.knaben.reachable,
+    success: realDebrid.redirectReady && discoveryReachable,
     realDebrid,
     discovery,
   };
