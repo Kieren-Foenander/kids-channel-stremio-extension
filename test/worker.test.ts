@@ -1,6 +1,7 @@
 import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeRealDebridCredential } from "../src/real-debrid-credentials";
+import { issueStreamToken } from "../src/secrets";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -785,7 +786,7 @@ describe("TV Channel client-side stream resolution", () => {
       if (url.pathname.endsWith("/torrents/info/rd-torrent-one")) {
         return Response.json({
           status: selected ? "downloaded" : "waiting_files_selection",
-          files: [{ id: 7, path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", bytes: 1_000 }],
+          files: [{ id: 7, path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", bytes: 1_000, selected: selected ? 1 : 0 }],
           links: selected ? ["https://restricted.test/link"] : [],
         });
       }
@@ -794,13 +795,17 @@ describe("TV Channel client-side stream resolution", () => {
         selected = true;
         return new Response(null, { status: 204 });
       }
+      if (url.pathname.endsWith("/unrestrict/link")) {
+        expect((init?.body as URLSearchParams).get("link")).toBe("https://restricted.test/link");
+        return Response.json({ download: "https://download.real-debrid.test/fresh-signed-media" });
+      }
       throw new Error(`unexpected outbound request: ${url}`);
     });
 
     const streamUrl = `${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`;
     const first = await SELF.fetch(streamUrl);
     expect(first.status).toBe(200);
-    const firstBody = await first.json();
+    const firstBody = await first.json<{ streams: Array<{ url: string }> }>();
     expect(firstBody).toEqual({
       streams: [{
         name: "Kids Channels",
@@ -820,6 +825,95 @@ describe("TV Channel client-side stream resolution", () => {
       file_id: 7,
       video_id: canonicalEpisodeId,
     });
+
+    const resolve = await SELF.fetch(firstBody.streams[0].url, { redirect: "manual" });
+    expect(resolve.status).toBe(302);
+    expect(resolve.headers.get("location")).toBe("https://download.real-debrid.test/fresh-signed-media");
+    expect(resolve.headers.get("cache-control")).toBe("no-store");
+    expect(resolve.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(await resolve.text()).toBe("");
+  });
+
+  it("rejects forged resolution and invalidates a dead Real-Debrid selection", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'dead-torrent', ?, 7, 'Playback.Show.S01E01.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "dead-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      expect(url.pathname).toContain("/torrents/info/dead-torrent");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
+      return Response.json({ status: "dead", files: [], links: [] });
+    });
+
+    const forged = await SELF.fetch(`${base}/resolve/${token.slice(0, -1)}x`, { redirect: "manual" });
+    expect(forged.status).toBe(403);
+    expect(realDebrid).not.toHaveBeenCalled();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
+
+    const dead = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    const deadBody = await dead.text();
+    expect(dead.status).toBe(410);
+    expect(deadBody).toContain("Request the stream again");
+    expect(deadBody).not.toContain("dead-torrent");
+    expect(deadBody).not.toContain("household-rd-token");
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 0 });
+    expect(realDebrid).toHaveBeenCalledOnce();
+
+    const gone = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    expect(gone.status).toBe(410);
+    expect(realDebrid).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a valid selection when Real-Debrid is transiently rate limited", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'limited-torrent', ?, 7, 'Playback.Show.S01E01.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "limited-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ error: "rate limited", error_code: 34 }),
+      { status: 429, headers: { "content-type": "application/json", "retry-after": "17" } },
+    ));
+
+    const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("17");
+    expect(await response.json()).toEqual({ error: "Real-Debrid could not resolve this stream. Try again." });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
   });
 });
 

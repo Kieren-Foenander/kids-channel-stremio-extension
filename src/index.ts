@@ -29,9 +29,21 @@ import {
   validateRealDebridToken,
   validRealDebridToken,
 } from "./real-debrid-credentials";
-import { issueParentToken, issueStreamToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
+import {
+  issueParentToken,
+  issueStreamToken,
+  parentTokenSecondsRemaining,
+  verifyParentToken,
+  verifyStreamToken,
+} from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import {
+  invalidateStreamSelection,
+  RealDebridResolutionError,
+  resolveCachedStream,
+  StreamSelectionGoneError,
+} from "./stream-resolution";
 import { selectCachedStream, type StreamContentType } from "./stream-selection";
 import {
   parentTvChannelState,
@@ -616,6 +628,64 @@ export default {
       if (!household) return addonJson({ error: "Household not found." }, 404);
       await requestMovieSignOff(env.DB, household.id, Number(movieSignOffMatch[2]), Number(movieSignOffMatch[3]));
       return movieSignOff(request);
+    }
+
+    const resolveMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/resolve\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
+    if (request.method === "GET" && resolveMatch) {
+      const household = await findHousehold(env.DB, resolveMatch[1]);
+      if (!household) return addonJson({ error: "Household not found." }, 404, { "cache-control": "no-store" });
+      if (!env.CONFIG_SECRET) {
+        return addonJson({ error: "Stream resolution is temporarily unavailable." }, 503, { "cache-control": "no-store" });
+      }
+      const identity = await verifyStreamToken(resolveMatch[2], household.id, env.CONFIG_SECRET);
+      if (!identity) {
+        return addonJson({ error: "Stream authorization is invalid or expired." }, 403, { "cache-control": "no-store" });
+      }
+      try {
+        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!realDebridToken) {
+          return addonJson({ error: "Real-Debrid is not configured for this Household." }, 503, { "cache-control": "no-store" });
+        }
+        const directLink = await resolveCachedStream(
+          env.DB,
+          household.id,
+          identity,
+          realDebridToken,
+          env,
+        );
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: directLink,
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+            "x-content-type-options": "nosniff",
+            "access-control-allow-origin": "*",
+          },
+        });
+      } catch (error) {
+        if (error instanceof StreamSelectionGoneError) {
+          await invalidateStreamSelection(env.DB, household.id, identity);
+          return addonJson(
+            { error: "This stream selection is no longer available. Request the stream again." },
+            410,
+            { "cache-control": "no-store" },
+          );
+        }
+        if (error instanceof RealDebridResolutionError) {
+          const retryAfter = error.retryAfter ? { "retry-after": error.retryAfter } : undefined;
+          return addonJson(
+            { error: "Real-Debrid could not resolve this stream. Try again." },
+            error.status === 429 ? 503 : 502,
+            { "cache-control": "no-store", ...retryAfter },
+          );
+        }
+        return addonJson(
+          { error: "Stream resolution is temporarily unavailable." },
+          502,
+          { "cache-control": "no-store" },
+        );
+      }
     }
 
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);
