@@ -13,6 +13,6 @@ Consequences:
 - Stremio receives exactly one source while canonical movie and episode IDs continue to preserve Viewing Progress and subtitle matching.
 - Real-Debrid media flows directly to Stremio and signed download URLs are neither persisted nor logged.
 - Provider failure is explicit Channel state rather than an empty stream list that strands playback.
-- Initial selection checks up to ten ranked cached candidates. If a chosen torrent or restricted link later disappears (including HTTP 451 removals), resolution discards it and tries up to two different hashes inside the same Stremio request. Rate limits and other transient Real-Debrid failures do not invalidate a known-good selection.
+- Initial selection checks up to ten ranked cached candidates, preserving provider relevance when quality and seed availability tie. If a chosen torrent or restricted link later disappears (including HTTP 451 removals), resolution discards it and tries up to two different hashes inside the same Stremio request. Rate limits and other transient Real-Debrid failures do not invalidate a known-good selection.
 
 This supersedes ADRs 0002 and 0004.

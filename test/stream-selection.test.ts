@@ -80,6 +80,28 @@ describe("stream candidate parsing and ranking", () => {
       { infoHash: "a".repeat(40), seeders: 500 },
     ]);
   });
+
+  it("preserves provider relevance when quality and seed count tie", () => {
+    const firstProviderResult: DiscoveryCandidate = {
+      infoHash: "a".repeat(40),
+      magnet: "magnet:a",
+      title: "Zulu release",
+      quality: "1080p",
+      seeders: 0,
+      providerRank: 0,
+    };
+    const laterAlphabeticalResult: DiscoveryCandidate = {
+      infoHash: "b".repeat(40),
+      magnet: "magnet:b",
+      title: "Alpha release",
+      quality: "1080p",
+      seeders: 0,
+      providerRank: 20,
+    };
+
+    expect(rankCandidates([laterAlphabeticalResult, firstProviderResult]))
+      .toEqual([firstProviderResult, laterAlphabeticalResult]);
+  });
 });
 
 describe("cached stream selection", () => {

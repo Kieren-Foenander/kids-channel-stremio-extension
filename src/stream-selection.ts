@@ -36,6 +36,7 @@ export interface DiscoveryCandidate {
   title: string;
   quality: string;
   seeders: number;
+  providerRank?: number;
 }
 
 interface CanonicalProgramme {
@@ -223,7 +224,7 @@ function structuredEpisodeMatch(result: ZileanResult, season: number, episode: n
 
 function zileanCandidates(value: unknown, programme: CanonicalProgramme): DiscoveryCandidate[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((entry): DiscoveryCandidate[] => {
+  return value.flatMap((entry, providerRank): DiscoveryCandidate[] => {
     if (typeof entry !== "object" || entry === null) return [];
     const result = entry as ZileanResult;
     const hash = infoHash(result.info_hash);
@@ -241,13 +242,14 @@ function zileanCandidates(value: unknown, programme: CanonicalProgramme): Discov
       title,
       quality: qualityFromRelease(title, result.resolution),
       seeders: 0,
+      providerRank,
     }];
   });
 }
 
 function knabenCandidates(value: unknown, programme: CanonicalProgramme): DiscoveryCandidate[] {
   if (typeof value !== "object" || value === null || !("hits" in value) || !Array.isArray(value.hits)) return [];
-  return value.hits.flatMap((entry): DiscoveryCandidate[] => {
+  return value.hits.flatMap((entry, providerRank): DiscoveryCandidate[] => {
     if (typeof entry !== "object" || entry === null) return [];
     const hit = entry as KnabenHit;
     const title = text(hit.title);
@@ -269,6 +271,7 @@ function knabenCandidates(value: unknown, programme: CanonicalProgramme): Discov
       title,
       quality: qualityFromRelease(title),
       seeders: number(hit.seeders),
+      providerRank,
     }];
   });
 }
@@ -297,11 +300,13 @@ export function rankCandidates(candidates: DiscoveryCandidate[]): DiscoveryCandi
         ? existing.quality
         : candidate.quality,
       seeders: Math.max(existing.seeders, candidate.seeders),
+      providerRank: Math.min(existing.providerRank ?? Number.MAX_SAFE_INTEGER, candidate.providerRank ?? Number.MAX_SAFE_INTEGER),
     });
   }
   return [...deduplicated.values()].sort((left, right) =>
     qualityPriority(right.quality) - qualityPriority(left.quality)
     || right.seeders - left.seeders
+    || (left.providerRank ?? Number.MAX_SAFE_INTEGER) - (right.providerRank ?? Number.MAX_SAFE_INTEGER)
     || left.title.localeCompare(right.title)
     || left.infoHash.localeCompare(right.infoHash));
 }
