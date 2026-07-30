@@ -21,9 +21,13 @@ async function keyMaterial(secret: string): Promise<ArrayBuffer> {
   return crypto.subtle.digest("SHA-256", encoder.encode(secret));
 }
 
+async function hmacKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, usage);
+}
+
 export async function issueParentToken(householdId: string, authVersion: number, secret: string, now = Date.now()): Promise<string> {
   const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: now + 60 * 60 * 1000, authVersion })));
-  const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const key = await hmacKey(secret, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`${householdId}.${payload}`));
   return `${payload}.${toBase64Url(signature)}`;
 }
@@ -42,7 +46,7 @@ export async function verifyParentToken(token: string, householdId: string, auth
   try {
     const [payload, signature, extra] = token.split(".");
     if (!payload || !signature || extra) return false;
-    const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const key = await hmacKey(secret, ["verify"]);
     const valid = await crypto.subtle.verify("HMAC", key, fromBase64Url(signature), encoder.encode(`${householdId}.${payload}`));
     if (!valid) return false;
     const parsed = JSON.parse(decoder.decode(fromBase64Url(payload))) as { expiresAt?: unknown; authVersion?: unknown };
@@ -50,4 +54,20 @@ export async function verifyParentToken(token: string, householdId: string, auth
   } catch {
     return false;
   }
+}
+
+export async function issueStreamToken(
+  householdId: string,
+  torrentId: string,
+  fileId: number,
+  expiresAt: number,
+  secret: string,
+): Promise<string> {
+  const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt, torrentId, fileId })));
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await hmacKey(secret, ["sign"]),
+    encoder.encode(`stream.${householdId}.${payload}`),
+  );
+  return `${payload}.${toBase64Url(signature)}`;
 }

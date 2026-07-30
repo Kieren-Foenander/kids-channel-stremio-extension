@@ -1,5 +1,6 @@
 import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { storeRealDebridCredential } from "../src/real-debrid-credentials";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -101,8 +102,15 @@ beforeEach(async () => {
     imdb_id TEXT NOT NULL, title TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
     played_at TEXT NOT NULL
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stream_selections (
+    household_id TEXT NOT NULL, programme_id TEXT NOT NULL, content_type TEXT NOT NULL, video_id TEXT NOT NULL,
+    torrent_id TEXT NOT NULL, info_hash TEXT NOT NULL, file_id INTEGER NOT NULL, filename TEXT NOT NULL,
+    quality TEXT NOT NULL, seeders INTEGER NOT NULL, selected_at TEXT NOT NULL, stale_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, content_type, video_id)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
+  await env.DB.prepare("DELETE FROM stream_selections").run();
   await env.DB.prepare("DELETE FROM movie_playback_history").run();
   await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
   await env.DB.prepare("DELETE FROM movie_advancements").run();
@@ -746,6 +754,73 @@ describe("TV Channel client-side stream resolution", () => {
     expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
     expect(await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first()).toMatchObject({ video_id: canonicalEpisodeId });
   });
+
+  it("returns exactly one cached first-party stream and reuses its D1 selection", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(
+      env.DB,
+      created.householdId,
+      "household-rd-token",
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+
+    const hash = "a".repeat(40);
+    let selected = false;
+    const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) {
+        return Response.json([{
+          raw_title: "Playback.Show.S01E01.1080p.WEB-DL",
+          info_hash: hash,
+          resolution: "1080p",
+          seasons: [1],
+          episodes: [1],
+        }]);
+      }
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
+      if (url.pathname.endsWith("/torrents/addMagnet")) return Response.json({ id: "rd-torrent-one" });
+      if (url.pathname.endsWith("/torrents/info/rd-torrent-one")) {
+        return Response.json({
+          status: selected ? "downloaded" : "waiting_files_selection",
+          files: [{ id: 7, path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", bytes: 1_000 }],
+          links: selected ? ["https://restricted.test/link"] : [],
+        });
+      }
+      if (url.pathname.endsWith("/torrents/selectFiles/rd-torrent-one")) {
+        expect((init?.body as URLSearchParams).get("files")).toBe("7");
+        selected = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const streamUrl = `${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`;
+    const first = await SELF.fetch(streamUrl);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json();
+    expect(firstBody).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "1080p • Real-Debrid cached",
+        url: expect.stringMatching(new RegExp(`^${base}/resolve/[^/]+$`)),
+        behaviorHints: {
+          bingeGroup: "kids-channels-1080p",
+          filename: "Playback.Show.S01E01.1080p.WEB-DL.mkv",
+        },
+      }],
+    });
+    const requestCount = outbound.mock.calls.length;
+    expect(await (await SELF.fetch(streamUrl)).json()).toEqual(firstBody);
+    expect(outbound).toHaveBeenCalledTimes(requestCount);
+    expect(await env.DB.prepare("SELECT torrent_id, file_id, video_id FROM stream_selections").first()).toMatchObject({
+      torrent_id: "rd-torrent-one",
+      file_id: 7,
+      video_id: canonicalEpisodeId,
+    });
+  });
 });
 
 describe("rolling TV Channel Schedule", () => {
@@ -1309,7 +1384,8 @@ describe("Household deletion", () => {
 
     for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
-      "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history"]) {
+      "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history",
+      "stream_selections"]) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toMatchObject({ count: 0 });
     }
 

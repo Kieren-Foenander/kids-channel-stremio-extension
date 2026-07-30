@@ -22,7 +22,7 @@ function mockedProviders() {
   ];
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (requestInfo, init) => {
     const url = new URL(requestInfo instanceof Request ? requestInfo.url : requestInfo.toString());
-    if (url.hostname === "zilean.elfhosted.com") return response([]);
+    if (url.hostname === "zileanfortheweebs.midnightignite.me") return response([]);
     if (url.hostname === "api.knaben.org") return response({ hits: [] });
     if (url.pathname.endsWith("/torrents/addMagnet")) {
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-real-debrid-token");

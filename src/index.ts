@@ -29,9 +29,10 @@ import {
   validateRealDebridToken,
   validRealDebridToken,
 } from "./real-debrid-credentials";
-import { issueParentToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
+import { issueParentToken, issueStreamToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { selectCachedStream, type StreamContentType } from "./stream-selection";
 import {
   parentTvChannelState,
   refreshTvChannelSchedule,
@@ -624,26 +625,56 @@ export default {
       const videoId = decodedPathSegment(streamMatch[3]);
       if (streamMatch[2] === "series") {
         if (videoId) await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
-        // Kids Channels observes schedule movement here. A separately installed provider supplies
-        // the playable stream and must place bingeGroup on that stream object.
-        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+      } else {
+        const signOff = videoId ? parseSignOffId(videoId) : null;
+        if (signOff) {
+          await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
+          return addonJson({ streams: [{
+            name: "Kids Channels",
+            description: "Five-second sign-off",
+            url: `${url.origin}/assets/movie-sign-off.mp4`,
+            behaviorHints: {
+              bingeGroup: "kids-channels-movie-sign-off",
+              filename: "kids-channels-sign-off.mp4",
+            },
+          }] }, 200, { "cache-control": "no-store" });
+        }
       }
 
-      const signOff = videoId ? parseSignOffId(videoId) : null;
-      if (!signOff) {
-        // Canonical IMDb identity lets installed providers own movie playback and subtitles.
+      if (!videoId || !env.CONFIG_SECRET) {
         return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
-      await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
-      return addonJson({ streams: [{
-        name: "Kids Channels",
-        description: "Five-second sign-off",
-        url: `${url.origin}/assets/movie-sign-off.mp4`,
-        behaviorHints: {
-          bingeGroup: "kids-channels-movie-sign-off",
-          filename: "kids-channels-sign-off.mp4",
-        },
-      }] }, 200, { "cache-control": "no-store" });
+      try {
+        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!realDebridToken) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        const selection = await selectCachedStream(
+          env.DB,
+          household.id,
+          streamMatch[2] as StreamContentType,
+          videoId,
+          realDebridToken,
+          env,
+        );
+        if (!selection) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        const resolveToken = await issueStreamToken(
+          household.id,
+          selection.torrentId,
+          selection.fileId,
+          Date.parse(selection.staleAt),
+          env.CONFIG_SECRET,
+        );
+        return addonJson({ streams: [{
+          name: "Kids Channels",
+          description: `${selection.quality} • Real-Debrid cached`,
+          url: `${url.origin}/addons/${household.secret}/resolve/${resolveToken}`,
+          behaviorHints: {
+            bingeGroup: `kids-channels-${selection.quality.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
+            filename: selection.filename,
+          },
+        }] }, 200, { "cache-control": "no-store" });
+      } catch {
+        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+      }
     }
 
     return json({ error: "Not found." }, 404);

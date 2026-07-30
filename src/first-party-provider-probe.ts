@@ -1,5 +1,5 @@
 const REAL_DEBRID_ORIGIN = "https://api.real-debrid.com/rest/1.0";
-const ZILEAN_ORIGIN = "https://zilean.elfhosted.com";
+const ZILEAN_ORIGIN = "https://zileanfortheweebs.midnightignite.me";
 const KNABEN_ORIGIN = "https://api.knaben.org";
 const REQUEST_TIMEOUT_MS = 10_000;
 const CACHE_CHECK_TIMEOUT_MS = 5_000;
