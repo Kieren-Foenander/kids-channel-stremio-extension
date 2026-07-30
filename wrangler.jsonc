@@ -18,5 +18,19 @@
   ],
   "observability": {
     "enabled": false
+  },
+  "env": {
+    "development": {
+      "name": "kids-channels-development",
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "kids-channels-development",
+          "database_id": "531abb60-edab-447c-8dcb-ef79a3d898b2",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
   }
 }
