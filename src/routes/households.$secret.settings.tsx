@@ -1,5 +1,5 @@
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
@@ -36,14 +36,24 @@ const deletionSchema = z.object({
   confirmation: z.string().refine((value: string): boolean => value === "DELETE", "Type DELETE exactly to confirm permanent deletion."),
 });
 
+const realDebridSchema = z.object({
+  token: z.string()
+    .min(1, "Enter your Real-Debrid API token.")
+    .max(512, "The Real-Debrid API token is too long.")
+    .refine((value) => value === value.trim(), "Remove spaces before or after the token."),
+});
+
 type PinValues = z.infer<typeof pinSchema>;
 type DeletionValues = z.infer<typeof deletionSchema>;
+type RealDebridValues = z.infer<typeof realDebridSchema>;
 type PinResponse = { message: string };
+type RealDebridStatus = { configured: boolean; updatedAt: string | null; message?: string };
 
 function SettingsPage() {
   const { secret } = Route.useParams();
   const queryClient = useQueryClient();
   const [result, setResult] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [realDebridResult, setRealDebridResult] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [deletionOpen, setDeletionOpen] = useState(false);
   const [deletionError, setDeletionError] = useState("");
   const form = useForm<PinValues>({
@@ -53,6 +63,14 @@ function SettingsPage() {
   const deletionForm = useForm<DeletionValues>({
     resolver: zodResolver(deletionSchema),
     defaultValues: { currentPin: "", confirmation: "" },
+  });
+  const realDebridForm = useForm<RealDebridValues>({
+    resolver: zodResolver(realDebridSchema),
+    defaultValues: { token: "" },
+  });
+  const realDebrid = useQuery({
+    queryKey: parentKeys.realDebrid(secret),
+    queryFn: () => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`),
   });
   const rotation = useMutation({
     mutationFn: (values: PinValues) => parentApi<PinResponse>(`/api/households/${secret}/pin`, {
@@ -66,6 +84,43 @@ function SettingsPage() {
       body: values,
     }),
   });
+  const saveRealDebrid = useMutation({
+    mutationFn: (values: RealDebridValues) => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`, {
+      method: "PUT",
+      body: values,
+    }),
+  });
+  const clearRealDebrid = useMutation({
+    mutationFn: () => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`, {
+      method: "DELETE",
+    }),
+  });
+
+  async function saveRealDebridToken(values: RealDebridValues) {
+    if (saveRealDebrid.isPending || clearRealDebrid.isPending) return;
+    setRealDebridResult(null);
+    try {
+      const response = await saveRealDebrid.mutateAsync(values);
+      realDebridForm.reset();
+      queryClient.setQueryData(parentKeys.realDebrid(secret), response);
+      setRealDebridResult({ kind: "success", message: response.message || "Real-Debrid connected." });
+    } catch (error) {
+      setRealDebridResult({ kind: "error", message: apiErrorMessage(error, "The Real-Debrid token could not be saved. Try again.") });
+    }
+  }
+
+  async function disconnectRealDebrid() {
+    if (saveRealDebrid.isPending || clearRealDebrid.isPending) return;
+    setRealDebridResult(null);
+    try {
+      const response = await clearRealDebrid.mutateAsync();
+      realDebridForm.reset();
+      queryClient.setQueryData(parentKeys.realDebrid(secret), response);
+      setRealDebridResult({ kind: "success", message: response.message || "Real-Debrid disconnected." });
+    } catch (error) {
+      setRealDebridResult({ kind: "error", message: apiErrorMessage(error, "Real-Debrid could not be disconnected. Try again.") });
+    }
+  }
 
   async function changePin(values: PinValues) {
     if (rotation.isPending) return;
@@ -107,9 +162,17 @@ function SettingsPage() {
     deletionForm.reset();
   }
 
+  const realDebridStatusText = realDebrid.isPending
+    ? "Checking connection…"
+    : realDebrid.isError
+      ? "Real-Debrid connection status is unavailable."
+      : realDebrid.data?.configured
+        ? "Real-Debrid is connected."
+        : "Real-Debrid is not connected.";
+
   return (
     <div className="grid gap-12">
-      <PageHeader ident="Parent Page" title="Settings" description="Revisit installation details and manage secure Parent access." />
+      <PageHeader ident="Parent Page" title="Settings" description="Manage installation, streaming, and secure Parent access." />
 
       <section id="installation" className="scroll-mt-4" aria-labelledby="settings-installation-heading">
         <div className="mb-4">
@@ -119,11 +182,40 @@ function SettingsPage() {
         <InstallationDetails secret={secret} />
       </section>
 
-      <section className="grid gap-4 rounded-[4px] border bg-card p-5 md:grid-cols-[minmax(12rem,0.65fr)_minmax(0,1.35fr)] md:gap-8" aria-labelledby="stream-addon-heading">
-        <h2 id="stream-addon-heading" className="text-xl font-semibold tracking-[-0.01em]">Configure a separate stream addon</h2>
-        <div className="grid content-start gap-3 text-sm leading-relaxed text-muted-foreground">
-          <p>Kids Channels schedules programmes but does not provide or inspect streams. Install and configure a stream addon such as Comet separately in Stremio.</p>
-          <p>For the simplest source choice, prefer cached 1080p results and keep the number of returned results low. Stream availability and source selection remain inside Stremio.</p>
+      <section className="grid gap-4 rounded-[4px] border bg-card p-5 md:grid-cols-[minmax(14rem,0.8fr)_minmax(18rem,1.2fr)] md:gap-8" aria-labelledby="real-debrid-heading">
+        <div>
+          <h2 id="real-debrid-heading" className="text-xl font-semibold tracking-[-0.01em]">Connect Real-Debrid</h2>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">Kids Channels uses your Household’s Real-Debrid account to choose one cached stream for each programme.</p>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">The token is validated before it is stored encrypted. It is never shown again after saving. Clearing it stops Channel playback until another valid token is saved.</p>
+        </div>
+        <div className="grid content-start gap-4">
+          <p className="text-sm font-semibold" role="status">{realDebridStatusText}</p>
+          <form className="grid gap-3" noValidate onSubmit={realDebridForm.handleSubmit(saveRealDebridToken)}>
+            <div>
+              <label htmlFor="real-debrid-token" className="text-sm font-semibold">Real-Debrid API token</label>
+              <Input
+                id="real-debrid-token"
+                type="password"
+                autoComplete="off"
+                spellCheck={false}
+                aria-invalid={Boolean(realDebridForm.formState.errors.token)}
+                aria-describedby="real-debrid-token-help real-debrid-token-error"
+                className="mt-2 font-mono"
+                {...realDebridForm.register("token")}
+              />
+              <p id="real-debrid-token-help" className="mt-1.5 text-sm leading-relaxed text-muted-foreground">Paste the private API token from your Real-Debrid account.</p>
+              <p id="real-debrid-token-error" className="mt-1 min-h-5 text-sm font-medium text-destructive" role="alert">{realDebridForm.formState.errors.token?.message}</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" disabled={saveRealDebrid.isPending || clearRealDebrid.isPending}>
+                {saveRealDebrid.isPending ? "Validating and saving…" : realDebrid.data?.configured ? "Replace token" : "Save token"}
+              </Button>
+              {realDebrid.data?.configured
+                ? <Button type="button" variant="outline" disabled={saveRealDebrid.isPending || clearRealDebrid.isPending} onClick={disconnectRealDebrid}>{clearRealDebrid.isPending ? "Clearing…" : "Clear token"}</Button>
+                : null}
+            </div>
+          </form>
+          <p className={realDebridResult?.kind === "error" ? "min-h-5 text-sm font-medium text-destructive" : "min-h-5 text-sm font-medium text-accent"} role={realDebridResult?.kind === "error" ? "alert" : "status"} aria-live="polite">{realDebridResult?.message}</p>
         </div>
       </section>
 

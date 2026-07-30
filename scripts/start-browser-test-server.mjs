@@ -36,6 +36,16 @@ const movies = [movie, ...Array.from({ length: 13 }, (_, index) => ({
 
 const stub = http.createServer((request, response) => {
   let body;
+  if (request.url === "/rest/1.0/user") {
+    if (request.headers.authorization !== "Bearer browser-real-debrid-token") {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: "bad_token" }));
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ id: 123, username: "browser-parent" }));
+    return;
+  }
   if (request.url?.includes("search=failure")) {
     response.writeHead(503); response.end(); return;
   }

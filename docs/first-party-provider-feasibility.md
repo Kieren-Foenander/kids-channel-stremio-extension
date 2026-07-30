@@ -12,28 +12,27 @@ logs, screenshots, or test output.
 
 ## Probe setup
 
-Configure the two temporary secrets interactively:
+Create or open a Household, unlock the Parent Page, and save its Real-Debrid API
+token in Settings. The Worker validates the token before encrypting it in D1.
+The token is never stored in a deployment environment variable or returned by an
+API response.
 
-```sh
-pnpm exec wrangler secret put REAL_DEBRID_TOKEN
-pnpm exec wrangler secret put PROVIDER_PROBE_SECRET
-```
-
-`PROVIDER_PROBE_SECRET` protects the temporary probe routes and must be different
-from `CONFIG_SECRET`. Use a known popular, cached torrent that the maintainer is
-entitled to access. Send its magnet and a known title query in the JSON request
-body. Do not place either secret or the magnet in the URL.
+Use a known popular, cached torrent that the Parent is entitled to access. Send
+its magnet and a known title query in the JSON request body. Do not place the
+token or the magnet in the URL.
 
 The deployed routes are:
 
-- `POST /_probes/first-party-provider` — Real-Debrid cache round trip plus Zilean
-  and Knaben egress. The response contains only statuses and rough timings.
-- `POST /_probes/first-party-provider/redirect` — repeats the Real-Debrid round
-  trip and returns a 302. Follow it with an external client and request a small
-  byte range; do not save or print the redirect URL.
+- `POST /api/households/{secret}/provider-probe` — Real-Debrid cache round trip
+  plus Zilean and Knaben egress. The response contains only statuses and rough
+  timings.
+- `POST /api/households/{secret}/provider-probe/redirect` — repeats the
+  Real-Debrid round trip and returns a 302. Follow it with an external client and
+  request a small byte range; do not save or print the redirect URL.
 
-Both routes require `Authorization: Bearer <PROVIDER_PROBE_SECRET>`. The
-Real-Debrid torrent is deleted after every successful or failed run.
+Both routes require the unlocked Parent Page session cookie and a same-origin
+`Origin` header. The Real-Debrid torrent is deleted after every successful or
+failed run.
 
 The provider origins can be overridden with non-secret Worker variables
 `REAL_DEBRID_ORIGIN`, `ZILEAN_ORIGIN`, and `KNABEN_ORIGIN`. This matters because

@@ -18,6 +18,7 @@
   ],
   "vars": {
     "CONFIG_SECRET": "browser-test-config-secret-at-least-32-characters",
-    "CINEMETA_ORIGIN": "http://127.0.0.1:8791"
+    "CINEMETA_ORIGIN": "http://127.0.0.1:8791",
+    "REAL_DEBRID_ORIGIN": "http://127.0.0.1:8791/rest/1.0"
   }
 }

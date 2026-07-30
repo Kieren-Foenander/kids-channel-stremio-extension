@@ -6,8 +6,6 @@ const CACHE_CHECK_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 
 interface ProbeEnv {
-  REAL_DEBRID_TOKEN?: string;
-  PROVIDER_PROBE_SECRET?: string;
   REAL_DEBRID_ORIGIN?: string;
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
@@ -184,10 +182,9 @@ async function deleteTorrent(origin: string, token: string, torrentId: string): 
   }
 }
 
-async function probeRealDebrid(magnet: string, env: ProbeEnv): Promise<RealDebridResult> {
-  if (!env.REAL_DEBRID_TOKEN) throw new ProbeError("REAL_DEBRID_TOKEN is not configured.");
+async function probeRealDebrid(magnet: string, realDebridToken: string, env: ProbeEnv): Promise<RealDebridResult> {
   const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
-  const token = env.REAL_DEBRID_TOKEN;
+  const token = realDebridToken;
   const totalStartedAt = performance.now();
   let torrentId: string | null = null;
   let result: RealDebridResult | null = null;
@@ -322,22 +319,6 @@ function validInput(value: unknown): value is ProbeInput {
     && (input.episode === undefined || (Number.isInteger(input.episode) && Number(input.episode) >= 0));
 }
 
-async function authorized(request: Request, expectedSecret?: string): Promise<boolean> {
-  if (!expectedSecret) return false;
-  const supplied = request.headers.get("authorization");
-  if (!supplied?.startsWith("Bearer ")) return false;
-  const encoder = new TextEncoder();
-  const [expectedHash, suppliedHash] = await Promise.all([
-    crypto.subtle.digest("SHA-256", encoder.encode(expectedSecret)),
-    crypto.subtle.digest("SHA-256", encoder.encode(supplied.slice("Bearer ".length))),
-  ]);
-  const expected = new Uint8Array(expectedHash);
-  const actual = new Uint8Array(suppliedHash);
-  let difference = 0;
-  for (let index = 0; index < expected.length; index += 1) difference |= expected[index] ^ actual[index];
-  return difference === 0;
-}
-
 async function inputFrom(request: Request): Promise<ProbeInput | null> {
   const contentLength = Number(request.headers.get("content-length") || "0");
   if (contentLength > 8192) return null;
@@ -356,10 +337,9 @@ function safeError(error: unknown): string {
 export async function firstPartyProviderProbeResponse(
   request: Request,
   env: ProbeEnv,
+  realDebridToken: string,
   redirect: boolean,
 ): Promise<Response> {
-  const notFound = () => Response.json({ error: "Not found." }, { status: 404 });
-  if (request.method !== "POST" || !(await authorized(request, env.PROVIDER_PROBE_SECRET))) return notFound();
   const input = await inputFrom(request);
   if (!input) {
     return Response.json(
@@ -370,7 +350,7 @@ export async function firstPartyProviderProbeResponse(
 
   if (redirect) {
     try {
-      const realDebrid = await probeRealDebrid(input.magnet, env);
+      const realDebrid = await probeRealDebrid(input.magnet, realDebridToken, env);
       return new Response(null, {
         status: 302,
         headers: {
@@ -388,7 +368,7 @@ export async function firstPartyProviderProbeResponse(
   const discoveryPromise = probeDiscoveryProviders(input, env);
   let realDebrid: FirstPartyProviderProbeReport["realDebrid"];
   try {
-    const result = await probeRealDebrid(input.magnet, env);
+    const result = await probeRealDebrid(input.magnet, realDebridToken, env);
     realDebrid = {
       reachable: true,
       cached: true,
@@ -397,7 +377,7 @@ export async function firstPartyProviderProbeResponse(
     };
   } catch (error) {
     realDebrid = {
-      reachable: !(error instanceof ProbeError && error.message === "REAL_DEBRID_TOKEN is not configured."),
+      reachable: true,
       cached: false,
       redirectReady: false,
       timings: null,

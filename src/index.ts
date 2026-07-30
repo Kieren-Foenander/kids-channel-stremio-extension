@@ -21,6 +21,14 @@ import {
   resetMovieRotation,
 } from "./movie-channel";
 import { householdOverview } from "./overview";
+import {
+  clearRealDebridCredential,
+  loadRealDebridCredential,
+  realDebridCredentialStatus,
+  storeRealDebridCredential,
+  validateRealDebridToken,
+  validRealDebridToken,
+} from "./real-debrid-credentials";
 import { issueParentToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
 import { movieSignOff } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
@@ -40,8 +48,6 @@ export interface Env {
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
   MOVIE_ROTATION_SEED?: string;
-  REAL_DEBRID_TOKEN?: string;
-  PROVIDER_PROBE_SECRET?: string;
   REAL_DEBRID_ORIGIN?: string;
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
@@ -203,13 +209,6 @@ export default {
       return new Response(null, { status: 204 });
     }
 
-    if (path === "/_probes/first-party-provider") {
-      return firstPartyProviderProbeResponse(request, env, false);
-    }
-    if (path === "/_probes/first-party-provider/redirect") {
-      return firstPartyProviderProbeResponse(request, env, true);
-    }
-
     if (isStateChangingParentRequest(request, path) && !hasSameOrigin(request)) {
       return json({ error: "This request must come from the Parent Page." }, 403, { "cache-control": "no-store" });
     }
@@ -300,6 +299,61 @@ export default {
         200,
         { "cache-control": "no-store", "set-cookie": parentSessionCookie(token) },
       );
+    }
+
+    const realDebridMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/real-debrid$/);
+    if (realDebridMatch && ["GET", "PUT", "DELETE"].includes(request.method)) {
+      const household = await findHousehold(env.DB, realDebridMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      if (request.method === "GET") {
+        return json(await realDebridCredentialStatus(env.DB, household.id), 200, { "cache-control": "no-store" });
+      }
+      if (request.method === "DELETE") {
+        await clearRealDebridCredential(env.DB, household.id);
+        return json(
+          { configured: false, updatedAt: null, message: "Real-Debrid disconnected. Channel playback is unavailable until another token is saved." },
+          200,
+          { "cache-control": "no-store" },
+        );
+      }
+      let input: { token?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (!validRealDebridToken(input.token)) {
+        return json({ error: "Enter a Real-Debrid API token without leading or trailing spaces." }, 400, { "cache-control": "no-store" });
+      }
+      const validation = await validateRealDebridToken(input.token, env.REAL_DEBRID_ORIGIN);
+      if (validation === "invalid") {
+        return json({ error: "Real-Debrid rejected this token. Check it and try again." }, 400, { "cache-control": "no-store" });
+      }
+      if (validation === "unavailable") {
+        return json({ error: "Real-Debrid could not validate this token right now. Nothing was saved." }, 502, { "cache-control": "no-store" });
+      }
+      const status = await storeRealDebridCredential(env.DB, household.id, input.token, env.CONFIG_SECRET);
+      return json(
+        { ...status, message: "Real-Debrid connected. The token is stored encrypted for this Household." },
+        200,
+        { "cache-control": "no-store" },
+      );
+    }
+
+    const providerProbeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/provider-probe(?:\/(redirect))?$/);
+    if (request.method === "POST" && providerProbeMatch) {
+      const household = await findHousehold(env.DB, providerProbeMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      let token: string | null;
+      try {
+        token = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+      } catch {
+        return json({ error: "The Household Real-Debrid credential could not be decrypted. Save it again in Settings." }, 503, { "cache-control": "no-store" });
+      }
+      if (!token) {
+        return json({ error: "Connect Real-Debrid in Parent Page Settings before running the provider probe." }, 409, { "cache-control": "no-store" });
+      }
+      return firstPartyProviderProbeResponse(request, env, token, Boolean(providerProbeMatch[2]));
     }
 
     const deleteMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)$/);

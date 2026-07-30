@@ -1,8 +1,8 @@
-import { SELF } from "cloudflare:test";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { env, SELF } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const endpoint = "https://kids.test/_probes/first-party-provider";
-const authorization = { authorization: "Bearer test-only-provider-probe-secret" };
+let endpoint: string;
+let parentHeaders: Record<string, string>;
 const input = {
   magnet: "magnet:?xt=urn:btih:0123456789ABCDEF0123456789ABCDEF01234567",
   query: "Example Show",
@@ -24,7 +24,10 @@ function mockedProviders() {
     const url = new URL(requestInfo instanceof Request ? requestInfo.url : requestInfo.toString());
     if (url.hostname === "zilean.elfhosted.com") return response([]);
     if (url.hostname === "api.knaben.org") return response({ hits: [] });
-    if (url.pathname.endsWith("/torrents/addMagnet")) return response({ id: "torrent-id" }, 201);
+    if (url.pathname.endsWith("/torrents/addMagnet")) {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-real-debrid-token");
+      return response({ id: "torrent-id" }, 201);
+    }
     if (url.pathname.endsWith("/torrents/info/torrent-id")) return response(torrentInfoResponses.shift());
     if (url.pathname.endsWith("/torrents/selectFiles/torrent-id")) return new Response(null, { status: 204 });
     if (url.pathname.endsWith("/unrestrict/link")) {
@@ -37,30 +40,68 @@ function mockedProviders() {
   });
 }
 
+beforeEach(async () => {
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS households (
+    id TEXT PRIMARY KEY NOT NULL,
+    secret TEXT UNIQUE NOT NULL,
+    pin_salt TEXT NOT NULL,
+    pin_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    auth_version INTEGER NOT NULL DEFAULT 1,
+    real_debrid_token_ciphertext TEXT,
+    real_debrid_token_iv TEXT,
+    real_debrid_token_updated_at TEXT
+  )`).run();
+  await env.DB.prepare("DELETE FROM households").run();
+  const created = await SELF.fetch("https://kids.test/api/households", {
+    method: "POST",
+    headers: { origin: "https://kids.test", "content-type": "application/json" },
+    body: JSON.stringify({ pin: "123456" }),
+  });
+  const household = await created.json<{ manifestUrl: string }>();
+  const householdSecret = new URL(household.manifestUrl).pathname.split("/")[2];
+  endpoint = `https://kids.test/api/households/${householdSecret}/provider-probe`;
+  const cookie = created.headers.get("set-cookie")?.split(";")[0];
+  if (!cookie) throw new Error("Parent session cookie was not issued");
+  parentHeaders = {
+    cookie,
+    origin: "https://kids.test",
+    "content-type": "application/json",
+  };
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ id: 123 }));
+  const saved = await SELF.fetch(`https://kids.test/api/households/${householdSecret}/real-debrid`, {
+    method: "PUT",
+    headers: parentHeaders,
+    body: JSON.stringify({ token: "household-real-debrid-token" }),
+  });
+  if (!saved.ok) throw new Error(`Could not arrange Household credential: ${saved.status}`);
+  vi.restoreAllMocks();
+});
+
 afterEach(() => vi.restoreAllMocks());
 
 describe("first-party provider feasibility probe", () => {
-  it("is unavailable without the dedicated bearer secret", async () => {
+  it("requires the unlocked Parent session for the target Household", async () => {
     const missing = await SELF.fetch(endpoint, {
       method: "POST",
+      headers: { origin: "https://kids.test" },
       body: JSON.stringify(input),
     });
-    const wrong = await SELF.fetch(endpoint, {
+    const crossOrigin = await SELF.fetch(endpoint, {
       method: "POST",
-      headers: { authorization: "Bearer wrong-secret" },
+      headers: { ...parentHeaders, origin: "https://other.test" },
       body: JSON.stringify(input),
     });
 
-    expect(missing.status).toBe(404);
-    expect(wrong.status).toBe(404);
-    expect(await missing.json()).toEqual({ error: "Not found." });
+    expect(missing.status).toBe(401);
+    expect(crossOrigin.status).toBe(403);
   });
 
   it("reports only statuses and timings, cleans up the torrent, and never exposes provider data", async () => {
     const providers = mockedProviders();
     const result = await SELF.fetch(endpoint, {
       method: "POST",
-      headers: { ...authorization, "content-type": "application/json" },
+      headers: parentHeaders,
       body: JSON.stringify(input),
     });
     const report = await result.json<Record<string, unknown>>();
@@ -87,7 +128,7 @@ describe("first-party provider feasibility probe", () => {
         knaben: { status: 200, durationMs: expect.any(Number), reachable: true },
       },
     });
-    expect(serialized).not.toContain("test-only-real-debrid-token");
+    expect(serialized).not.toContain("household-real-debrid-token");
     expect(serialized).not.toContain("download.real-debrid.test");
     expect(serialized).not.toContain("restricted");
     expect(providers).toHaveBeenCalledWith(
@@ -101,7 +142,7 @@ describe("first-party provider feasibility probe", () => {
     const result = await SELF.fetch(`${endpoint}/redirect`, {
       method: "POST",
       redirect: "manual",
-      headers: { ...authorization, "content-type": "application/json" },
+      headers: parentHeaders,
       body: JSON.stringify(input),
     });
 
@@ -117,7 +158,7 @@ describe("first-party provider feasibility probe", () => {
     providers.mockImplementationOnce(async () => response({ sensitive: "provider-body" }, 403));
     const result = await SELF.fetch(endpoint, {
       method: "POST",
-      headers: { ...authorization, "content-type": "application/json" },
+      headers: parentHeaders,
       body: JSON.stringify(input),
     });
     const report = await result.json<{

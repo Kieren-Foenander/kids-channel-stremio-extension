@@ -28,7 +28,10 @@ beforeEach(async () => {
     pin_salt TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    auth_version INTEGER NOT NULL DEFAULT 1
+    auth_version INTEGER NOT NULL DEFAULT 1,
+    real_debrid_token_ciphertext TEXT,
+    real_debrid_token_iv TEXT,
+    real_debrid_token_updated_at TEXT
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pin_attempts (
     household_id TEXT NOT NULL, origin_hash TEXT NOT NULL, failed_attempts INTEGER NOT NULL,
@@ -362,6 +365,111 @@ describe("Parent Page Household creation", () => {
     }
     expect(limited?.status).toBe(429);
     expect(await limited?.text()).not.toContain("000000");
+  });
+});
+
+describe("Household Real-Debrid credential", () => {
+  async function access(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    return sessionHeaders(response);
+  }
+
+  it("validates and encrypts the Parent-supplied token without ever returning it", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    const token = "household-real-debrid-token";
+    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      expect(url.pathname).toBe("/rest/1.0/user");
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
+      return Response.json({ id: 123, username: "parent" });
+    });
+
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`)).status).toBe(401);
+    const saved = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const savedBody = await saved.json<Record<string, unknown>>();
+
+    expect(saved.status).toBe(200);
+    expect(savedBody).toMatchObject({ configured: true, updatedAt: expect.any(String) });
+    expect(savedBody).not.toHaveProperty("token");
+    expect(JSON.stringify(savedBody)).not.toContain(token);
+    expect(realDebrid).toHaveBeenCalledOnce();
+
+    const stored = await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv
+      FROM households WHERE id = ?`).bind(created.householdId).first<{
+        real_debrid_token_ciphertext: string;
+        real_debrid_token_iv: string;
+      }>();
+    expect(stored?.real_debrid_token_ciphertext).toBeTruthy();
+    expect(stored?.real_debrid_token_iv).toBeTruthy();
+    expect(JSON.stringify(stored)).not.toContain(token);
+
+    const status = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, { headers: session });
+    const statusText = await status.clone().text();
+    expect(await status.json()).toMatchObject({ configured: true, updatedAt: savedBody.updatedAt });
+    expect(statusText).not.toContain(token);
+  });
+
+  it("reports invalid or unavailable tokens honestly and leaves the previous credential unchanged", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    const endpoint = `https://kids.test/api/households/${secret}/real-debrid`;
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ error: "bad_token" }, { status: 401 }));
+    const invalid = await SELF.fetch(endpoint, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "invalid-token" }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "Real-Debrid rejected this token. Check it and try again." });
+
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("provider unavailable"));
+    const unavailable = await SELF.fetch(endpoint, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "unvalidated-token" }),
+    });
+    expect(unavailable.status).toBe(502);
+    expect(await unavailable.json()).toEqual({ error: "Real-Debrid could not validate this token right now. Nothing was saved." });
+    expect(await env.DB.prepare("SELECT real_debrid_token_ciphertext FROM households WHERE id = ?")
+      .bind(created.householdId).first()).toMatchObject({ real_debrid_token_ciphertext: null });
+  });
+
+  it("clears only the Household credential and reports the resulting playback state", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ id: 123 }));
+    await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "token-to-clear" }),
+    });
+
+    const cleared = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "DELETE",
+      headers: session,
+    });
+    const body = await cleared.json<Record<string, unknown>>();
+    expect(body).toMatchObject({ configured: false, updatedAt: null });
+    expect(body.message).toContain("playback is unavailable");
+    expect(await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv, real_debrid_token_updated_at
+      FROM households WHERE id = ?`).bind(created.householdId).first()).toEqual({
+      real_debrid_token_ciphertext: null,
+      real_debrid_token_iv: null,
+      real_debrid_token_updated_at: null,
+    });
   });
 });
 
