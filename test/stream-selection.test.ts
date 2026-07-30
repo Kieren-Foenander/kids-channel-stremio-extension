@@ -120,6 +120,7 @@ describe("cached stream selection", () => {
     const selected = new Set<string>();
     const added: string[] = [];
     const deleted: string[] = [];
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
     const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.hostname === "zilean.test") {
@@ -144,15 +145,19 @@ describe("cached stream selection", () => {
             })),
             {
               title: "Example.Show.2024.S01E02.1080p.WEB-DL",
-              hash: cachedHash,
-              magnetUrl: `magnet:?xt=urn:btih:${cachedHash}`,
-              seeders: 10,
+              hash: "9".repeat(40),
+              magnetUrl: `magnet:?xt=urn:btih:${"9".repeat(40)}`,
+              seeders: 0,
             },
           ],
         });
       }
       if (url.pathname.endsWith("/torrents/addMagnet")) {
-        const hash = new URL((init?.body as URLSearchParams).get("magnet")!).searchParams.get("xt")!.split(":").at(-1)!;
+        const magnet = (init?.body as URLSearchParams).get("magnet")!;
+        const hash = new URL(magnet).searchParams.get("xt")!.split(":").at(-1)!;
+        if (hash === cachedHash) {
+          expect(magnet).toMatch(/^magnet:\?xt=urn:btih:[a-f0-9]{40}&dn=/);
+        }
         added.push(hash);
         return Response.json({ id: `torrent-${hash}` });
       }
@@ -201,13 +206,14 @@ describe("cached stream selection", () => {
 
     expect(added).toEqual([...uncachedHashes, cachedHash]);
     expect(deleted).toEqual(uncachedHashes);
+    expect(warnings).toHaveBeenCalledTimes(uncachedHashes.length);
     expect(selection).toMatchObject({
       torrentId: `torrent-${cachedHash}`,
       infoHash: cachedHash,
       fileId: 2,
       filename: "Example.Show.S01E02.1080p.mkv",
       quality: "1080p",
-      seeders: 10,
+      seeders: 0,
     });
     expect(await env.DB.prepare("SELECT * FROM stream_selections").first()).toMatchObject({
       torrent_id: `torrent-${cachedHash}`,

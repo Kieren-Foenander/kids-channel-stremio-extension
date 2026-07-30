@@ -185,10 +185,7 @@ function hashFromMagnet(value: string): string | null {
 }
 
 function magnetFor(hash: string, title: string): string {
-  const magnet = new URL("magnet:");
-  magnet.searchParams.set("xt", `urn:btih:${hash}`);
-  magnet.searchParams.set("dn", title);
-  return magnet.toString();
+  return `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(title)}`;
 }
 
 export function qualityFromRelease(title: string, supplied?: unknown): string {
