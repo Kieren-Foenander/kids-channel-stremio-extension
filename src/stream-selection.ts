@@ -456,11 +456,13 @@ async function cachedCandidate(
 ): Promise<{ torrentId: string; file: TorrentFile } | null> {
   const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
   let addedId: string | null = null;
+  let stage = "add-magnet";
   try {
     addedId = torrentId(await realDebridJson(origin, token, "/torrents/addMagnet", {
       method: "POST",
       body: formBody({ magnet: candidate.magnet }),
     }));
+    stage = "load-files";
     const beforeSelection = await waitForTorrent(
       origin,
       token,
@@ -468,11 +470,14 @@ async function cachedCandidate(
       (info) => info.files.length > 0,
       REQUEST_TIMEOUT_MS,
     );
+    stage = "match-file";
     const file = selectedFile(beforeSelection.files, programme);
+    stage = "select-file";
     await realDebridJson(origin, token, `/torrents/selectFiles/${encodeURIComponent(addedId)}`, {
       method: "POST",
       body: formBody({ files: String(file.id) }),
     });
+    stage = "confirm-cache";
     await waitForTorrent(
       origin,
       token,
@@ -481,7 +486,12 @@ async function cachedCandidate(
       CACHE_CHECK_TIMEOUT_MS,
     );
     return { torrentId: addedId, file };
-  } catch {
+  } catch (error) {
+    console.warn(JSON.stringify({
+      message: "stream candidate rejected",
+      stage,
+      reason: error instanceof Error ? error.message : "unknown error",
+    }));
     if (addedId) {
       try { await deleteTorrent(origin, token, addedId); } catch { /* best-effort cleanup */ }
     }
