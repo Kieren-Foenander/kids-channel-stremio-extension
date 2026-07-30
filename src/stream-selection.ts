@@ -4,7 +4,7 @@ const KNABEN_ORIGIN = "https://api.knaben.org";
 const REQUEST_TIMEOUT_MS = 10_000;
 const CACHE_CHECK_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
-const MAX_CACHE_CHECKS = 5;
+const MAX_CACHE_CHECKS = 10;
 const SELECTION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export type StreamContentType = "series" | "movie";
@@ -550,6 +550,7 @@ export async function selectCachedStream(
   realDebridToken: string,
   env: StreamSelectionEnv,
   now = new Date(),
+  excludedInfoHashes: ReadonlySet<string> = new Set(),
 ): Promise<StreamSelection | null> {
   const existing = await cachedSelection(
     db,
@@ -560,12 +561,26 @@ export async function selectCachedStream(
     env,
     now,
   );
-  if (existing) return existing;
+  if (existing && !excludedInfoHashes.has(existing.infoHash)) return existing;
+  if (existing) {
+    await db.prepare(`DELETE FROM stream_selections
+      WHERE household_id = ? AND content_type = ? AND video_id = ?`)
+      .bind(householdId, contentType, videoId)
+      .run();
+    try {
+      await deleteTorrent(
+        (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+        realDebridToken,
+        existing.torrentId,
+      );
+    } catch { /* an excluded remote torrent must not block reselection */ }
+  }
   const programme = await canonicalProgramme(db, householdId, contentType, videoId);
   if (!programme) return null;
 
   const candidates = await discover(programme, env);
-  for (const candidate of candidates.slice(0, MAX_CACHE_CHECKS)) {
+  const eligibleCandidates = candidates.filter((candidate) => !excludedInfoHashes.has(candidate.infoHash));
+  for (const candidate of eligibleCandidates.slice(0, MAX_CACHE_CHECKS)) {
     const cached = await cachedCandidate(candidate, programme, realDebridToken, env);
     if (!cached) continue;
     const selection: StreamSelection = {

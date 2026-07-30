@@ -93,7 +93,7 @@ describe("cached stream selection", () => {
       (programme_id, video_id, season, episode, title, released_at)
       VALUES ('programme', 'tt1234567:1:2', 1, 2, 'Second', '2024-01-01')`).run();
 
-    const highSeedHash = "c".repeat(40);
+    const uncachedHashes = ["c", "d", "e", "f", "1", "2"].map((value) => value.repeat(40));
     const cachedHash = "b".repeat(40);
     const selected = new Set<string>();
     const added: string[] = [];
@@ -114,12 +114,12 @@ describe("cached stream selection", () => {
       if (url.hostname === "knaben.test") {
         return Response.json({
           hits: [
-            {
+            ...uncachedHashes.map((hash, index) => ({
               title: "Example.Show.2024.S01E02.1080p.BluRay",
-              hash: highSeedHash,
-              magnetUrl: `magnet:?xt=urn:btih:${highSeedHash}`,
-              seeders: 100,
-            },
+              hash,
+              magnetUrl: `magnet:?xt=urn:btih:${hash}`,
+              seeders: 100 - index,
+            })),
             {
               title: "Example.Show.2024.S01E02.1080p.WEB-DL",
               hash: cachedHash,
@@ -137,7 +137,7 @@ describe("cached stream selection", () => {
       const infoMatch = url.pathname.match(/\/torrents\/info\/torrent-(.+)$/);
       if (infoMatch) {
         const hash = infoMatch[1];
-        if (selected.has(hash) && hash === highSeedHash) {
+        if (selected.has(hash) && hash !== cachedHash) {
           return Response.json({ status: "dead", files: [], links: [] });
         }
         return Response.json({
@@ -177,8 +177,8 @@ describe("cached stream selection", () => {
       new Date("2026-07-30T00:00:00.000Z"),
     );
 
-    expect(added).toEqual([highSeedHash, cachedHash]);
-    expect(deleted).toEqual([highSeedHash]);
+    expect(added).toEqual([...uncachedHashes, cachedHash]);
+    expect(deleted).toEqual(uncachedHashes);
     expect(selection).toMatchObject({
       torrentId: `torrent-${cachedHash}`,
       infoHash: cachedHash,

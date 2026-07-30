@@ -863,11 +863,18 @@ describe("TV Channel client-side stream resolution", () => {
       env.CONFIG_SECRET,
     );
     vi.restoreAllMocks();
+    let deadInfoRequests = 0;
     const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
-      expect(url.pathname).toContain("/torrents/info/dead-torrent");
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
-      return Response.json({ status: "dead", files: [], links: [] });
+      if (url.pathname.endsWith("/torrents/info/dead-torrent")) {
+        deadInfoRequests += 1;
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
+        return Response.json({ status: "dead", files: [], links: [] });
+      }
+      if (url.pathname.endsWith("/torrents/delete/dead-torrent")) return new Response(null, { status: 204 });
+      if (url.pathname.endsWith("/dmm/filtered")) return Response.json([]);
+      if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
     });
 
     const forged = await SELF.fetch(`${base}/resolve/${token.slice(0, -1)}x`, { redirect: "manual" });
@@ -882,11 +889,11 @@ describe("TV Channel client-side stream resolution", () => {
     expect(deadBody).not.toContain("dead-torrent");
     expect(deadBody).not.toContain("household-rd-token");
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 0 });
-    expect(realDebrid).toHaveBeenCalledOnce();
+    expect(deadInfoRequests).toBe(1);
 
     const gone = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
     expect(gone.status).toBe(410);
-    expect(realDebrid).toHaveBeenCalledOnce();
+    expect(deadInfoRequests).toBe(1);
   });
 
   it("preserves a valid selection when Real-Debrid is transiently rate limited", async () => {
@@ -921,6 +928,97 @@ describe("TV Channel client-side stream resolution", () => {
     expect(response.headers.get("retry-after")).toBe("17");
     expect(await response.json()).toEqual({ error: "Real-Debrid could not resolve this stream. Try again." });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
+  });
+
+  it("automatically retries a different cached torrent when the selected link was removed", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'removed-torrent', ?, 7, 'Playback.Show.S01E01.removed.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "removed-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    let alternateInfoRequests = 0;
+    const alternateHash = "b".repeat(40);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      expect(new Headers(init?.headers).get("authorization") ?? "Bearer household-rd-token")
+        .toBe("Bearer household-rd-token");
+      if (url.pathname.endsWith("/torrents/info/removed-torrent")) {
+        return Response.json({
+          status: "downloaded",
+          files: [{ id: 7, path: "/Playback.Show.S01E01.removed.mkv", bytes: 1_000, selected: 1 }],
+          links: ["https://restricted.test/removed"],
+        });
+      }
+      if (url.pathname.endsWith("/torrents/delete/removed-torrent")) {
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/unrestrict/link")) {
+        const link = (init?.body as URLSearchParams).get("link");
+        if (link === "https://restricted.test/removed") {
+          return Response.json({ error: "content infringement" }, { status: 451 });
+        }
+        expect(link).toBe("https://restricted.test/alternate");
+        return Response.json({ download: "https://download.real-debrid.test/alternate-media" });
+      }
+      if (url.pathname.endsWith("/dmm/filtered")) {
+        expect(url.searchParams.get("ImdbId")).toBe("tt2468101");
+        return Response.json([{
+          raw_title: "Playback.Show.S01E01.1080p.WEB-DL.mkv",
+          info_hash: alternateHash,
+          resolution: "1080p",
+          seasons: [1],
+          episodes: [1],
+        }]);
+      }
+      if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/addMagnet")) {
+        expect((init?.body as URLSearchParams).get("magnet")).toContain(alternateHash);
+        return Response.json({ id: "alternate-torrent" });
+      }
+      if (url.pathname.endsWith("/torrents/selectFiles/alternate-torrent")) {
+        expect((init?.body as URLSearchParams).get("files")).toBe("8");
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/torrents/info/alternate-torrent")) {
+        alternateInfoRequests += 1;
+        return Response.json({
+          status: alternateInfoRequests === 1 ? "waiting_files_selection" : "downloaded",
+          files: [{
+            id: 8,
+            path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv",
+            bytes: 2_000,
+            selected: alternateInfoRequests > 1 ? 1 : 0,
+          }],
+          links: alternateInfoRequests > 1 ? ["https://restricted.test/alternate"] : [],
+        });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://download.real-debrid.test/alternate-media");
+    expect(await env.DB.prepare("SELECT torrent_id, info_hash FROM stream_selections").first()).toMatchObject({
+      torrent_id: "alternate-torrent",
+      info_hash: alternateHash,
+    });
   });
 });
 

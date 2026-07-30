@@ -39,9 +39,12 @@ import {
 import { movieSignOff, programmeUnavailable } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import {
+  discardStreamSelection,
   invalidateStreamSelection,
   RealDebridResolutionError,
   resolveCachedStream,
+  type StreamIdentity,
+  streamSelectionContext,
   StreamSelectionGoneError,
 } from "./stream-resolution";
 import { selectCachedStream, type StreamContentType } from "./stream-selection";
@@ -71,6 +74,8 @@ export interface Env {
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
 };
+
+const MAX_RESOLUTION_ATTEMPTS = 3;
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(value), {
@@ -651,23 +656,59 @@ export default {
         if (!realDebridToken) {
           return addonJson({ error: "Real-Debrid is not configured for this Household." }, 503, { "cache-control": "no-store" });
         }
-        const directLink = await resolveCachedStream(
-          env.DB,
-          household.id,
-          identity,
-          realDebridToken,
-          env,
-        );
-        return new Response(null, {
-          status: 302,
-          headers: {
-            location: directLink,
-            "cache-control": "no-store",
-            "referrer-policy": "no-referrer",
-            "x-content-type-options": "nosniff",
-            "access-control-allow-origin": "*",
-          },
-        });
+        let currentIdentity: StreamIdentity = identity;
+        let context = await streamSelectionContext(env.DB, household.id, currentIdentity);
+        const excludedInfoHashes = new Set<string>();
+        for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS; attempt += 1) {
+          try {
+            const directLink = await resolveCachedStream(
+              env.DB,
+              household.id,
+              currentIdentity,
+              realDebridToken,
+              env,
+            );
+            return new Response(null, {
+              status: 302,
+              headers: {
+                location: directLink,
+                "cache-control": "no-store",
+                "referrer-policy": "no-referrer",
+                "x-content-type-options": "nosniff",
+                "access-control-allow-origin": "*",
+              },
+            });
+          } catch (error) {
+            if (!(error instanceof StreamSelectionGoneError) || !context) throw error;
+            await discardStreamSelection(
+              env.DB,
+              household.id,
+              currentIdentity,
+              realDebridToken,
+              env,
+            );
+            excludedInfoHashes.add(context.infoHash);
+            if (attempt === MAX_RESOLUTION_ATTEMPTS - 1) throw error;
+            const alternative = await selectCachedStream(
+              env.DB,
+              household.id,
+              context.contentType,
+              context.videoId,
+              realDebridToken,
+              env,
+              new Date(),
+              excludedInfoHashes,
+            );
+            if (!alternative) throw error;
+            currentIdentity = { torrentId: alternative.torrentId, fileId: alternative.fileId };
+            context = {
+              contentType: alternative.contentType,
+              videoId: alternative.videoId,
+              infoHash: alternative.infoHash,
+            };
+          }
+        }
+        throw new StreamSelectionGoneError("no alternate stream remains");
       } catch (error) {
         if (error instanceof StreamSelectionGoneError) {
           await invalidateStreamSelection(env.DB, household.id, identity);

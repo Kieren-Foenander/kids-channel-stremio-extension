@@ -11,6 +11,9 @@ export interface StreamIdentity {
 }
 
 interface StoredSelection {
+  content_type: "series" | "movie";
+  video_id: string;
+  info_hash: string;
   stale_at: string;
 }
 
@@ -28,6 +31,30 @@ export class RealDebridResolutionError extends Error {
   ) {
     super("Real-Debrid could not resolve the selected stream");
   }
+}
+
+export interface StreamSelectionContext {
+  contentType: "series" | "movie";
+  videoId: string;
+  infoHash: string;
+}
+
+export async function streamSelectionContext(
+  db: D1Database,
+  householdId: string,
+  identity: StreamIdentity,
+  now = Date.now(),
+): Promise<StreamSelectionContext | null> {
+  const row = await db.prepare(`SELECT content_type, video_id, info_hash, stale_at FROM stream_selections
+    WHERE household_id = ? AND torrent_id = ? AND file_id = ?`)
+    .bind(householdId, identity.torrentId, identity.fileId)
+    .first<StoredSelection>();
+  if (!row || Date.parse(row.stale_at) <= now) return null;
+  return {
+    contentType: row.content_type,
+    videoId: row.video_id,
+    infoHash: row.info_hash,
+  };
 }
 
 async function selectionIsCurrent(
@@ -52,6 +79,25 @@ export async function invalidateStreamSelection(
     WHERE household_id = ? AND torrent_id = ? AND file_id = ?`)
     .bind(householdId, identity.torrentId, identity.fileId)
     .run();
+}
+
+export async function discardStreamSelection(
+  db: D1Database,
+  householdId: string,
+  identity: StreamIdentity,
+  realDebridToken: string,
+  env: StreamResolutionEnv,
+): Promise<void> {
+  await invalidateStreamSelection(db, householdId, identity);
+  try {
+    const response = await realDebridResponse(
+      (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+      realDebridToken,
+      `/torrents/delete/${encodeURIComponent(identity.torrentId)}`,
+      { method: "DELETE" },
+    );
+    if (response.body) await response.body.cancel();
+  } catch { /* a dead remote torrent must not block local failover */ }
 }
 
 async function realDebridResponse(
@@ -133,7 +179,7 @@ export async function resolveCachedStream(
   );
   if (!infoResponse.ok) {
     try { await infoResponse.body?.cancel(); } catch { /* response may already be owned by the runtime */ }
-    if (infoResponse.status === 400 || infoResponse.status === 404) {
+    if (infoResponse.status === 400 || infoResponse.status === 404 || infoResponse.status === 451) {
       throw new StreamSelectionGoneError("torrent no longer exists");
     }
     throw new RealDebridResolutionError(infoResponse.status, infoResponse.headers.get("retry-after"));
@@ -146,7 +192,7 @@ export async function resolveCachedStream(
   });
   if (!unrestrictResponse.ok) {
     try { await unrestrictResponse.body?.cancel(); } catch { /* response may already be owned by the runtime */ }
-    if (unrestrictResponse.status === 400 || unrestrictResponse.status === 404) {
+    if (unrestrictResponse.status === 400 || unrestrictResponse.status === 404 || unrestrictResponse.status === 451) {
       throw new StreamSelectionGoneError("restricted link is no longer valid");
     }
     throw new RealDebridResolutionError(unrestrictResponse.status, unrestrictResponse.headers.get("retry-after"));
