@@ -11,14 +11,15 @@ function bytes(): ArrayBuffer {
   return cached;
 }
 
-export function movieSignOff(request: Request): Response {
+function shortChannelVideo(request: Request, filename: string, etag: string): Response {
   const body = bytes();
   const headers = new Headers({
     "accept-ranges": "bytes",
+    "access-control-allow-origin": "*",
     "cache-control": "public, max-age=86400, immutable",
-    "content-disposition": "inline; filename=\"kids-channels-sign-off.mp4\"",
+    "content-disposition": `inline; filename="${filename}"`,
     "content-type": "video/mp4",
-    "etag": "\"kids-channels-sign-off-v2\"",
+    etag,
   });
   const rangeHeader = request.headers.get("range");
   if (!rangeHeader) {
@@ -44,4 +45,30 @@ export function movieSignOff(request: Request): Response {
   headers.set("content-length", String(part.byteLength));
   headers.set("content-range", `bytes ${start}-${end}/${body.byteLength}`);
   return new Response(request.method === "HEAD" ? null : part, { status: 206, headers });
+}
+
+export function movieSignOff(request: Request): Response {
+  return shortChannelVideo(request, "kids-channels-sign-off.mp4", "\"kids-channels-sign-off-v2\"");
+}
+
+export async function programmeUnavailable(request: Request, assets?: Fetcher): Promise<Response> {
+  if (assets) {
+    const assetUrl = new URL(request.url);
+    assetUrl.pathname = "/programme-unavailable.mp4";
+    const response = await assets.fetch(new Request(assetUrl, request));
+    if (response.ok) {
+      const headers = new Headers(response.headers);
+      headers.set("accept-ranges", "bytes");
+      headers.set("access-control-allow-origin", "*");
+      headers.set("cache-control", "public, max-age=86400, immutable");
+      headers.set("content-disposition", "inline; filename=\"kids-channels-programme-unavailable.mp4\"");
+      headers.set("content-type", "video/mp4");
+      return new Response(response.body, { status: response.status, headers });
+    }
+  }
+  return shortChannelVideo(
+    request,
+    "kids-channels-programme-unavailable.mp4",
+    "\"kids-channels-programme-unavailable-v2\"",
+  );
 }

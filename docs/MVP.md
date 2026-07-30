@@ -2,7 +2,7 @@
 
 ## Goal
 
-Give children a parent-curated Stremio experience resembling traditional television: choose the TV Channel or Movie Channel, then receive the scheduled title without browsing the wider catalog. Stremio may require selecting the configured provider source when a programme changes.
+Give children a parent-curated Stremio experience resembling traditional television: choose the TV Channel or Movie Channel, then receive the scheduled title without browsing the wider catalog or choosing a source.
 
 The household rule—not technical restrictions—keeps children out of Stremio's other content.
 
@@ -11,7 +11,7 @@ The household rule—not technical restrictions—keeps children out of Stremio'
 - One Household shares Channel state across Stremio devices.
 - The addon is configured and installed on desktop, then syncs through the same Stremio account to Fire TV.
 - Stremio may show a detail page requiring one Play action if Fire TV cannot start directly from a Channel tile.
-- Stremio may show its source screen at programme transitions; selecting the configured provider source is an accepted protocol-imposed action.
+- Kids Channels returns exactly one cached source at programme transitions.
 - Upcoming TV programmes may be visible and selectable. Selecting a distant programme skips bypassed programmes; the Parent can correct Show Progress.
 
 ## Parent Page
@@ -20,7 +20,7 @@ A Parent can:
 
 - Create a Household and install its secret addon URL.
 - Protect changes with a six-digit PIN.
-- See guidance to install and configure a separate stream addon such as Comet in Stremio.
+- Add and replace the Household's encrypted Real-Debrid credential.
 - Search Cinemeta for shows and movies.
 - Manage the Approved Library.
 - Choose a show's starting episode, defaulting to S01E01.
@@ -43,7 +43,7 @@ There is no account, discovery, recovery, or forgotten-PIN workflow.
 - Mark an exhausted show Finished and pause it until the Parent restarts, repositions, or removes it.
 - Removing approved content immediately removes upcoming entries. A removed Current Programme may finish playing but cannot be launched again.
 
-If installed stream addons return no results for the current episode, preserve Channel and Show Progress state. Provider availability and retries remain Stremio client concerns.
+If no acceptable cached stream exists, preserve the episode as Show Progress, defer it for six hours, and use a 40-second holding bumper that exposes Stremio's in-player Next control and offers a stable autoplay group for another eligible show. Web Stremio may still return to the Channel detail when the bumper ends; Fire TV behavior remains a human gate. If every show is unavailable, stop after the terminal bumper.
 
 ## Movie Channel
 
@@ -60,17 +60,17 @@ If installed stream addons return no results for the current episode, preserve C
 - Canonical video IDs are preserved so Stremio can associate Viewing Progress and subtitle results.
 - Expose Channels through standard Stremio `series` and `movie` types.
 - Set the canonical Current Programme video ID as `behaviorHints.defaultVideoId`.
-- Let Stremio request streams from separately installed addons on the playback device.
-- Recommend configuring Comet for cached-only 1080p results, preferred release/language ordering, and as few results as practical.
-- Kids Channels does not inspect, filter, rank, resolve, or proxy provider streams, and cannot select another addon's result or control Stremio's source screen.
-- Subtitle preferences and stream-provider failures remain Stremio client concerns.
+- Discover candidates, verify Real-Debrid cache availability, and return exactly one deterministically selected stream.
+- Redirect Stremio to a fresh Real-Debrid download URL without proxying media through Cloudflare.
+- Use one stable TV `bingeGroup` across programmes and unavailable-programme bumpers.
+- Preserve canonical identities so subtitle selection and Viewing Progress remain Stremio concerns.
 
 ## Deployment and security
 
 - Target Cloudflare Workers and D1 from the outset.
 - Identify each Household with a long opaque random secret.
 - Store only opaque Household identity in installation URLs.
-- Never collect, return, or log stream-provider credentials.
+- Encrypt each Household's Real-Debrid credential at rest and never return or log it.
 - Rate-limit failed Parent PIN attempts.
 - Real-Debrid media flows directly to Stremio, not through Cloudflare.
 
@@ -79,11 +79,11 @@ If installed stream addons return no results for the current episode, preserve C
 Before polishing the Parent Page, prove on Fire TV that:
 
 1. A Channel tile can start with no interaction beyond a protocol-imposed Play action.
-2. A separately installed Comet addon limited to one cached 1080p result minimizes the source choice; a source prompt at programme transitions is accepted.
+2. Kids Channels returns exactly one cached source without a source choice.
 3. Canonical IDs preserve resume positions.
-4. Next moves to a programme from another show, after source selection when required.
-5. Natural completion selects the next programme from another show, though Stremio may wait for source selection.
-6. Provider-owned `bingeGroup` behavior is an optional optimization, not an MVP gate.
+4. Next moves to a programme from another show.
+5. Natural completion autoplays the next programme from another show.
+6. An Unavailable Episode remains Show Progress while a bumper autoplays another show.
 7. Stremio caching does not prevent rolling schedule updates.
 8. The movie sign-off marks completion and stops cleanly.
 9. Reopening an interrupted programme resumes it.

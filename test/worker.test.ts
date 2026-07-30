@@ -2,6 +2,7 @@ import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeRealDebridCredential } from "../src/real-debrid-credentials";
 import { issueStreamToken } from "../src/secrets";
+import { requestTvProgramme } from "../src/tv-channel";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -109,8 +110,14 @@ beforeEach(async () => {
     quality TEXT NOT NULL, seeders INTEGER NOT NULL, selected_at TEXT NOT NULL, stale_at TEXT NOT NULL,
     PRIMARY KEY (household_id, content_type, video_id)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS unavailable_episodes (
+    household_id TEXT NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    unavailable_at TEXT NOT NULL, retry_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, video_id)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
+  await env.DB.prepare("DELETE FROM unavailable_episodes").run();
   await env.DB.prepare("DELETE FROM stream_selections").run();
   await env.DB.prepare("DELETE FROM movie_playback_history").run();
   await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
@@ -812,7 +819,7 @@ describe("TV Channel client-side stream resolution", () => {
         description: "1080p • Real-Debrid cached",
         url: expect.stringMatching(new RegExp(`^${base}/resolve/[^/]+$`)),
         behaviorHints: {
-          bingeGroup: "kids-channels-1080p",
+          bingeGroup: "kids-channels-tv",
           filename: "Playback.Show.S01E01.1080p.WEB-DL.mkv",
         },
       }],
@@ -996,6 +1003,109 @@ describe("rolling TV Channel Schedule", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
     expect(await env.DB.prepare("SELECT COUNT(DISTINCT video_id) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
+  });
+
+  it("defers an unavailable episode without consuming it and returns a stable-group holding bumper", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
+    const unavailableProgramme = unavailableId.startsWith("tt9000001:") ? "programme-1" : "programme-2";
+    const nextId = before.meta.videos[1].id as string;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`)));
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(await responses[0].json()).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "Programme unavailable • Trying next show",
+        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
+        behaviorHints: {
+          bingeGroup: "kids-channels-tv",
+          filename: "kids-channels-programme-unavailable.mp4",
+        },
+      }],
+    });
+    const bumper = await SELF.fetch("https://kids.test/assets/programme-unavailable-v2.mp4");
+    expect(bumper.status).toBe(200);
+    expect(bumper.headers.get("content-type")).toBe("video/mp4");
+    expect(bumper.headers.get("access-control-allow-origin")).toBe("*");
+    expect((await bumper.arrayBuffer()).byteLength).toBeGreaterThan(99_000);
+
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
+    expect(await env.DB.prepare("SELECT video_id, retry_at FROM unavailable_episodes WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ video_id: unavailableId, retry_at: expect.any(String) });
+    expect(after.meta.videos.every((video: any) => video.id !== unavailableId)).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
+
+    await env.DB.prepare("UPDATE unavailable_episodes SET retry_at = '2000-01-01T00:00:00.000Z'").run();
+    await requestTvProgramme(env.DB, created.householdId, nextId);
+    expect((await metadata(base)).meta.videos.some((video: any) => video.id === unavailableId)).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM unavailable_episodes").first()).toMatchObject({ count: 0 });
+  });
+
+  it("uses a terminal bumper without autoplay when every show is unavailable", async () => {
+    const { created, base } = await arrangeShows(1);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
+    expect(await response.json()).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "Programme unavailable • Try again later",
+        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
+        behaviorHints: { filename: "kids-channels-programme-unavailable.mp4" },
+      }],
+    });
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(unavailableId);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first())
+      .toMatchObject({ next_video_id: unavailableId });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 0 });
+  });
+
+  it("finishes the prior programme before deferring an unavailable upcoming episode", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const currentId = before.meta.videos[0].id as string;
+    const unavailableId = before.meta.videos[1].id as string;
+    const currentProgramme = currentId.startsWith("tt9000001:") ? "programme-1" : "programme-2";
+    const unavailableProgramme = currentProgramme === "programme-1" ? "programme-2" : "programme-1";
+    const currentImdb = currentId.split(":")[0];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
+
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(`${currentImdb}:1:2`);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(currentProgramme).first()).toMatchObject({ next_video_id: `${currentImdb}:1:2` });
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
   });
 
   it("displays Current Programme, Channel Schedule, and recent playback only to the Parent", async () => {
@@ -1408,6 +1518,7 @@ describe("Movie Channel rotation and sign-off", () => {
     expect(full.status).toBe(200);
     expect(full.headers.get("content-type")).toBe("video/mp4");
     expect(full.headers.get("accept-ranges")).toBe("bytes");
+    expect(full.headers.get("access-control-allow-origin")).toBe("*");
     expect(full.headers.get("etag")).toBeTruthy();
     const length = Number(full.headers.get("content-length"));
     expect(length).toBeGreaterThan(10_000);
@@ -1452,6 +1563,8 @@ describe("Household deletion", () => {
       VALUES ('programme-delete', ?, 'tt1234567', 'show', 'Delete me', '[]', 'now')`).bind(householdId).run();
     await env.DB.prepare("INSERT INTO show_episodes VALUES ('programme-delete', 'tt1234567:1:1', 1, 1, 'Pilot', 'now', NULL)").run();
     await env.DB.prepare("INSERT INTO show_progress VALUES ('programme-delete', 'tt1234567:1:1')").run();
+    await env.DB.prepare(`INSERT INTO unavailable_episodes
+      VALUES (?, 'programme-delete', 'tt1234567:1:1', 'now', 'later')`).bind(householdId).run();
     await env.DB.prepare("INSERT INTO current_programmes VALUES (?, 'tv', 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
     await env.DB.prepare("INSERT INTO channel_state VALUES (?, 'tv', 0, 'seed', 'now')").bind(householdId).run();
     await env.DB.prepare("INSERT INTO channel_schedule VALUES (?, 'tv', 0, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
@@ -1479,7 +1592,7 @@ describe("Household deletion", () => {
     for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
       "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history",
-      "stream_selections"]) {
+      "stream_selections", "unavailable_episodes"]) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toMatchObject({ count: 0 });
     }
 

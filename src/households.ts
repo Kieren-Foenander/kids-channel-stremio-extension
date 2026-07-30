@@ -157,6 +157,7 @@ export async function rotatePin(db: D1Database, householdId: string, newPin: str
 export async function deleteHousehold(db: D1Database, householdId: string): Promise<void> {
   const approved = "SELECT id FROM approved_programmes WHERE household_id = ?";
   await db.batch([
+    db.prepare("DELETE FROM unavailable_episodes WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM movie_playback_history WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM movie_channel_mutations WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM movie_advancements WHERE household_id = ?").bind(householdId),

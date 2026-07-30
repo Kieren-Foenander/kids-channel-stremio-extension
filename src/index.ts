@@ -36,7 +36,7 @@ import {
   verifyParentToken,
   verifyStreamToken,
 } from "./secrets";
-import { movieSignOff } from "./sign-off-media";
+import { movieSignOff, programmeUnavailable } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import {
   invalidateStreamSelection,
@@ -46,6 +46,8 @@ import {
 } from "./stream-resolution";
 import { selectCachedStream, type StreamContentType } from "./stream-selection";
 import {
+  clearUnavailableTvProgramme,
+  deferUnavailableTvProgramme,
   parentTvChannelState,
   refreshTvChannelSchedule,
   requestTvProgramme,
@@ -241,6 +243,9 @@ export default {
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
     if (request.method === "GET" && path === "/assets/movie-channel.svg") return channelPoster("movie");
     if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
+    if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/programme-unavailable-v2.mp4") {
+      return programmeUnavailable(request, env.ASSETS);
+    }
 
     if (request.method === "POST" && path === "/api/households") {
       const pin = await parsePin(request);
@@ -693,9 +698,7 @@ export default {
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
-      if (streamMatch[2] === "series") {
-        if (videoId) await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
-      } else {
+      if (streamMatch[2] === "movie") {
         const signOff = videoId ? parseSignOffId(videoId) : null;
         if (signOff) {
           await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
@@ -716,7 +719,12 @@ export default {
       }
       try {
         const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
-        if (!realDebridToken) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        if (!realDebridToken) {
+          if (streamMatch[2] === "series") {
+            await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          }
+          return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        }
         const selection = await selectCachedStream(
           env.DB,
           household.id,
@@ -725,7 +733,33 @@ export default {
           realDebridToken,
           env,
         );
-        if (!selection) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        if (!selection) {
+          if (streamMatch[2] !== "series") {
+            return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+          }
+          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          const deferred = await deferUnavailableTvProgramme(
+            env.DB,
+            household.id,
+            videoId,
+            env.TV_SCHEDULE_SEED,
+          );
+          return addonJson({ streams: [{
+            name: "Kids Channels",
+            description: deferred.terminal
+              ? "Programme unavailable • Try again later"
+              : "Programme unavailable • Trying next show",
+            url: `${url.origin}/assets/programme-unavailable-v2.mp4`,
+            behaviorHints: {
+              ...(deferred.terminal ? {} : { bingeGroup: "kids-channels-tv" }),
+              filename: "kids-channels-programme-unavailable.mp4",
+            },
+          }] }, 200, { "cache-control": "no-store" });
+        }
+        if (streamMatch[2] === "series") {
+          await clearUnavailableTvProgramme(env.DB, household.id, videoId);
+          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+        }
         const resolveToken = await issueStreamToken(
           household.id,
           selection.torrentId,
@@ -738,7 +772,9 @@ export default {
           description: `${selection.quality} • Real-Debrid cached`,
           url: `${url.origin}/addons/${household.secret}/resolve/${resolveToken}`,
           behaviorHints: {
-            bingeGroup: `kids-channels-${selection.quality.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
+            bingeGroup: streamMatch[2] === "series"
+              ? "kids-channels-tv"
+              : `kids-channels-${selection.quality.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
             filename: selection.filename,
           },
         }] }, 200, { "cache-control": "no-store" });
