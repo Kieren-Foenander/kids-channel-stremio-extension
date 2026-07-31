@@ -88,6 +88,12 @@ interface StoredSelection {
   seeders: number;
   selected_at: string;
   stale_at: string;
+  download_pending: number;
+}
+
+interface StoredSelectionState {
+  selection: StreamSelection;
+  downloadPending: boolean;
 }
 
 function storedSelection(row: StoredSelection): StreamSelection {
@@ -423,7 +429,13 @@ async function waitForTorrent(
     }
     await pause(POLL_INTERVAL_MS);
   } while (performance.now() - startedAt < timeoutMs);
-  throw new Error("torrent was not instantly available");
+  throw new TorrentDownloadPendingError();
+}
+
+class TorrentDownloadPendingError extends Error {
+  constructor() {
+    super("torrent is downloading");
+  }
 }
 
 function selectedFile(files: TorrentFile[], programme: CanonicalProgramme): TorrentFile {
@@ -450,9 +462,10 @@ async function cachedCandidate(
   programme: CanonicalProgramme,
   token: string,
   env: StreamSelectionEnv,
-): Promise<{ torrentId: string; file: TorrentFile } | null> {
+): Promise<{ torrentId: string; file: TorrentFile; downloadPending: boolean } | null> {
   const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
   let addedId: string | null = null;
+  let matchedFile: TorrentFile | null = null;
   let stage = "add-magnet";
   try {
     addedId = torrentId(await realDebridJson(origin, token, "/torrents/addMagnet", {
@@ -469,6 +482,7 @@ async function cachedCandidate(
     );
     stage = "match-file";
     const file = selectedFile(beforeSelection.files, programme);
+    matchedFile = file;
     stage = "select-file";
     await realDebridJson(origin, token, `/torrents/selectFiles/${encodeURIComponent(addedId)}`, {
       method: "POST",
@@ -482,8 +496,11 @@ async function cachedCandidate(
       (info) => info.status === "downloaded" && info.links.length > 0,
       CACHE_CHECK_TIMEOUT_MS,
     );
-    return { torrentId: addedId, file };
+    return { torrentId: addedId, file, downloadPending: false };
   } catch (error) {
+    if (error instanceof TorrentDownloadPendingError && addedId && matchedFile && stage === "confirm-cache") {
+      return { torrentId: addedId, file: matchedFile, downloadPending: true };
+    }
     console.warn(JSON.stringify({
       message: "stream candidate rejected",
       stage,
@@ -504,13 +521,44 @@ async function cachedSelection(
   realDebridToken: string,
   env: StreamSelectionEnv,
   now: Date,
-): Promise<StreamSelection | null> {
+): Promise<StoredSelectionState | null> {
   const row = await db.prepare(`SELECT * FROM stream_selections
     WHERE household_id = ? AND content_type = ? AND video_id = ?`)
     .bind(householdId, contentType, videoId)
     .first<StoredSelection>();
   if (!row) return null;
-  if (Date.parse(row.stale_at) > now.getTime()) return storedSelection(row);
+  if (Date.parse(row.stale_at) > now.getTime()) {
+    const selection = storedSelection(row);
+    if (row.download_pending !== 1) return { selection, downloadPending: false };
+    const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
+    try {
+      const info = torrentInfo(await realDebridJson(
+        origin,
+        realDebridToken,
+        `/torrents/info/${encodeURIComponent(row.torrent_id)}`,
+      ));
+      if (info.status === "downloaded" && info.links.length > 0) {
+        await db.prepare(`UPDATE stream_selections SET download_pending = 0
+          WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
+          .bind(householdId, contentType, videoId, row.torrent_id).run();
+        return { selection, downloadPending: false };
+      }
+      if (!["magnet_error", "error", "virus", "dead"].includes(info.status)) {
+        return { selection, downloadPending: true };
+      }
+    } catch (error) {
+      console.warn(JSON.stringify({
+        message: "pending stream status unavailable",
+        reason: error instanceof Error ? error.message : "unknown error",
+      }));
+      return { selection, downloadPending: true };
+    }
+    await db.prepare(`DELETE FROM stream_selections
+      WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
+      .bind(householdId, contentType, videoId, row.torrent_id).run();
+    try { await deleteTorrent(origin, realDebridToken, row.torrent_id); } catch { /* allow a new candidate */ }
+    return null;
+  }
   await db.prepare(`DELETE FROM stream_selections
     WHERE household_id = ? AND content_type = ? AND video_id = ?`)
     .bind(householdId, contentType, videoId)
@@ -525,11 +573,15 @@ async function cachedSelection(
   return null;
 }
 
-async function storeSelection(db: D1Database, selection: StreamSelection): Promise<StreamSelection> {
+async function storeSelection(
+  db: D1Database,
+  selection: StreamSelection,
+  downloadPending = false,
+): Promise<StoredSelectionState> {
   await db.prepare(`INSERT INTO stream_selections
     (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
-      quality, seeders, selected_at, stale_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      quality, seeders, selected_at, stale_at, download_pending)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (household_id, content_type, video_id) DO NOTHING`)
     .bind(
       selection.householdId,
@@ -544,6 +596,7 @@ async function storeSelection(db: D1Database, selection: StreamSelection): Promi
       selection.seeders,
       selection.selectedAt,
       selection.staleAt,
+      downloadPending ? 1 : 0,
     )
     .run();
   const stored = await db.prepare(`SELECT * FROM stream_selections
@@ -551,7 +604,32 @@ async function storeSelection(db: D1Database, selection: StreamSelection): Promi
     .bind(selection.householdId, selection.contentType, selection.videoId)
     .first<StoredSelection>();
   if (!stored) throw new Error("stream selection was not stored");
-  return storedSelection(stored);
+  return { selection: storedSelection(stored), downloadPending: stored.download_pending === 1 };
+}
+
+function selectionFromCandidate(
+  householdId: string,
+  contentType: StreamContentType,
+  videoId: string,
+  programme: CanonicalProgramme,
+  candidate: DiscoveryCandidate,
+  torrent: { torrentId: string; file: TorrentFile },
+  now: Date,
+): StreamSelection {
+  return {
+    householdId,
+    programmeId: programme.programmeId,
+    contentType,
+    videoId,
+    torrentId: torrent.torrentId,
+    infoHash: candidate.infoHash,
+    fileId: torrent.file.id,
+    filename: torrent.file.path.replace(/^.*\//, ""),
+    quality: candidate.quality,
+    seeders: candidate.seeders,
+    selectedAt: now.toISOString(),
+    staleAt: new Date(now.getTime() + SELECTION_TTL_MS).toISOString(),
+  };
 }
 
 export async function selectCachedStream(
@@ -573,7 +651,9 @@ export async function selectCachedStream(
     env,
     now,
   );
-  if (existing && !excludedInfoHashes.has(existing.infoHash)) return existing;
+  if (existing && !excludedInfoHashes.has(existing.selection.infoHash)) {
+    return existing.downloadPending ? null : existing.selection;
+  }
   if (existing) {
     await db.prepare(`DELETE FROM stream_selections
       WHERE household_id = ? AND content_type = ? AND video_id = ?`)
@@ -583,7 +663,7 @@ export async function selectCachedStream(
       await deleteTorrent(
         (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
         realDebridToken,
-        existing.torrentId,
+        existing.selection.torrentId,
       );
     } catch { /* an excluded remote torrent must not block reselection */ }
   }
@@ -592,26 +672,47 @@ export async function selectCachedStream(
 
   const candidates = await discover(programme, env);
   const eligibleCandidates = candidates.filter((candidate) => !excludedInfoHashes.has(candidate.infoHash));
+  let pending: { candidate: DiscoveryCandidate; torrentId: string; file: TorrentFile } | null = null;
   for (const candidate of eligibleCandidates.slice(0, MAX_CACHE_CHECKS)) {
     const cached = await cachedCandidate(candidate, programme, realDebridToken, env);
     if (!cached) continue;
-    const selection: StreamSelection = {
-      householdId,
-      programmeId: programme.programmeId,
-      contentType,
-      videoId,
-      torrentId: cached.torrentId,
-      infoHash: candidate.infoHash,
-      fileId: cached.file.id,
-      filename: cached.file.path.replace(/^.*\//, ""),
-      quality: candidate.quality,
-      seeders: candidate.seeders,
-      selectedAt: now.toISOString(),
-      staleAt: new Date(now.getTime() + SELECTION_TTL_MS).toISOString(),
-    };
+    if (cached.downloadPending) {
+      if (contentType !== "series") {
+        try {
+          await deleteTorrent(
+            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+            realDebridToken,
+            cached.torrentId,
+          );
+        } catch { /* movies retain the existing cached-only behavior */ }
+        continue;
+      }
+      if (!pending) pending = { candidate, torrentId: cached.torrentId, file: cached.file };
+      else {
+        try {
+          await deleteTorrent(
+            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+            realDebridToken,
+            cached.torrentId,
+          );
+        } catch { /* keep checking candidates while retaining only the best download */ }
+      }
+      continue;
+    }
+    if (pending) {
+      try {
+        await deleteTorrent(
+          (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+          realDebridToken,
+          pending.torrentId,
+        );
+      } catch { /* a cached candidate is still preferable */ }
+      pending = null;
+    }
+    const selection = selectionFromCandidate(householdId, contentType, videoId, programme, candidate, cached, now);
     try {
       const stored = await storeSelection(db, selection);
-      if (stored.torrentId !== selection.torrentId) {
+      if (stored.selection.torrentId !== selection.torrentId) {
         try {
           await deleteTorrent(
             (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
@@ -620,10 +721,43 @@ export async function selectCachedStream(
           );
         } catch { /* the concurrent winner remains valid */ }
       }
-      return stored;
+      return stored.downloadPending ? null : stored.selection;
     } catch (error) {
       try {
         await deleteTorrent((env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""), realDebridToken, cached.torrentId);
+      } catch { /* preserve the storage error */ }
+      throw error;
+    }
+  }
+  if (pending) {
+    const selection = selectionFromCandidate(
+      householdId,
+      contentType,
+      videoId,
+      programme,
+      pending.candidate,
+      pending,
+      now,
+    );
+    try {
+      const stored = await storeSelection(db, selection, true);
+      if (stored.selection.torrentId !== selection.torrentId) {
+        try {
+          await deleteTorrent(
+            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+            realDebridToken,
+            selection.torrentId,
+          );
+        } catch { /* the concurrent winner remains valid */ }
+      }
+      return stored.downloadPending ? null : stored.selection;
+    } catch (error) {
+      try {
+        await deleteTorrent(
+          (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
+          realDebridToken,
+          selection.torrentId,
+        );
       } catch { /* preserve the storage error */ }
       throw error;
     }

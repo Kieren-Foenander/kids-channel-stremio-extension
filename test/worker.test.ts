@@ -108,6 +108,7 @@ beforeEach(async () => {
     household_id TEXT NOT NULL, programme_id TEXT NOT NULL, content_type TEXT NOT NULL, video_id TEXT NOT NULL,
     torrent_id TEXT NOT NULL, info_hash TEXT NOT NULL, file_id INTEGER NOT NULL, filename TEXT NOT NULL,
     quality TEXT NOT NULL, seeders INTEGER NOT NULL, selected_at TEXT NOT NULL, stale_at TEXT NOT NULL,
+    download_pending INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (household_id, content_type, video_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS unavailable_episodes (
@@ -1142,15 +1143,13 @@ describe("rolling TV Channel Schedule", () => {
     expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
     expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
       .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
-    expect(await env.DB.prepare("SELECT video_id, retry_at FROM unavailable_episodes WHERE household_id = ?")
-      .bind(created.householdId).first()).toMatchObject({ video_id: unavailableId, retry_at: expect.any(String) });
-    expect(after.meta.videos.every((video: any) => video.id !== unavailableId)).toBe(true);
+    const unavailable = await env.DB.prepare(`SELECT video_id, unavailable_at, retry_at
+      FROM unavailable_episodes WHERE household_id = ?`)
+      .bind(created.householdId).first<{ video_id: string; unavailable_at: string; retry_at: string }>();
+    expect(unavailable).toMatchObject({ video_id: unavailableId });
+    expect(Date.parse(unavailable!.retry_at) - Date.parse(unavailable!.unavailable_at)).toBe(5 * 60 * 1000);
+    expect(after.meta.videos[1].id).toBe(unavailableId);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
-
-    await env.DB.prepare("UPDATE unavailable_episodes SET retry_at = '2000-01-01T00:00:00.000Z'").run();
-    await requestTvProgramme(env.DB, created.householdId, nextId);
-    expect((await metadata(base)).meta.videos.some((video: any) => video.id === unavailableId)).toBe(true);
-    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM unavailable_episodes").first()).toMatchObject({ count: 0 });
   });
 
   it("uses a terminal bumper without autoplay when every show is unavailable", async () => {

@@ -43,7 +43,7 @@ There is no account, discovery, recovery, or forgotten-PIN workflow.
 - Mark an exhausted show Finished and pause it until the Parent restarts, repositions, or removes it.
 - Removing approved content immediately removes upcoming entries. A removed Current Programme may finish playing but cannot be launched again.
 
-If no acceptable cached stream exists, preserve the episode as Show Progress, defer it for six hours, and use a 40-second holding bumper that exposes Stremio's in-player Next control and offers a stable autoplay group for another eligible show. Web Stremio may still return to the Channel detail when the bumper ends; Fire TV behavior remains a human gate. If every show is unavailable, stop after the terminal bumper.
+If no acceptable cached stream exists, keep the best matching torrent downloading in Real-Debrid, preserve the episode as Show Progress, and mark it unavailable for five minutes. Use a 40-second holding bumper that exposes Stremio's in-player Next control and offers a stable autoplay group for another eligible show. Reserve the unavailable episode directly after that intervening programme; play it if the download completed or defer it behind one more programme without starting a duplicate download. The five-minute marker protects unrelated schedule rebuilds during the initial download. Web Stremio may still return to the Channel detail when the bumper ends; Fire TV behavior remains a human gate. If every show is unavailable, stop after the terminal bumper.
 
 ## Movie Channel
 
