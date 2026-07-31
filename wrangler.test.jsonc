@@ -6,7 +6,7 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "run_worker_first": ["/_shell*"]
+    "run_worker_first": ["/_shell*", "/assets/programme-unavailable-v2.mp4"]
   },
   "vars": {
     "CONFIG_SECRET": "test-only-configuration-secret-at-least-32-characters",

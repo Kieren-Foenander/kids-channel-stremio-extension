@@ -6,7 +6,7 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "run_worker_first": ["/_shell*"]
+    "run_worker_first": ["/_shell*", "/assets/programme-unavailable-v2.mp4"]
   },
   "d1_databases": [
     {
@@ -18,5 +18,22 @@
   ],
   "observability": {
     "enabled": false
+  },
+  "env": {
+    "development": {
+      "name": "kids-channels-development",
+      "workers_dev": true,
+      "vars": {
+        "ZILEAN_ORIGIN": "https://zileanfortheweebs.midnightignite.me"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "kids-channels-development",
+          "database_id": "531abb60-edab-447c-8dcb-ef79a3d898b2",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
   }
 }

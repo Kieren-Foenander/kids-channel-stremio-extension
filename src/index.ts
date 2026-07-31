@@ -1,5 +1,6 @@
 import { approveProgramme, approvedLibrary, approvedProgrammeDetail, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
+import { firstPartyProviderProbeResponse } from "./first-party-provider-probe";
 import {
   authenticatePin,
   createHousehold,
@@ -20,10 +21,36 @@ import {
   resetMovieRotation,
 } from "./movie-channel";
 import { householdOverview } from "./overview";
-import { issueParentToken, parentTokenSecondsRemaining, verifyParentToken } from "./secrets";
-import { movieSignOff } from "./sign-off-media";
+import {
+  clearRealDebridCredential,
+  loadRealDebridCredential,
+  realDebridCredentialStatus,
+  storeRealDebridCredential,
+  validateRealDebridToken,
+  validRealDebridToken,
+} from "./real-debrid-credentials";
+import {
+  issueParentToken,
+  issueStreamToken,
+  parentTokenSecondsRemaining,
+  verifyParentToken,
+  verifyStreamToken,
+} from "./secrets";
+import { movieSignOff, programmeUnavailable } from "./sign-off-media";
 import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
 import {
+  discardStreamSelection,
+  invalidateStreamSelection,
+  RealDebridResolutionError,
+  resolveCachedStream,
+  type StreamIdentity,
+  streamSelectionContext,
+  StreamSelectionGoneError,
+} from "./stream-resolution";
+import { selectCachedStream, type StreamContentType } from "./stream-selection";
+import {
+  clearUnavailableTvProgramme,
+  deferUnavailableTvProgramme,
   parentTvChannelState,
   refreshTvChannelSchedule,
   requestTvProgramme,
@@ -39,11 +66,16 @@ export interface Env {
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
   MOVIE_ROTATION_SEED?: string;
+  REAL_DEBRID_ORIGIN?: string;
+  ZILEAN_ORIGIN?: string;
+  KNABEN_ORIGIN?: string;
 }
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
 };
+
+const MAX_RESOLUTION_ATTEMPTS = 3;
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(value), {
@@ -216,6 +248,9 @@ export default {
     if (request.method === "GET" && path === "/assets/tv-channel.svg") return channelPoster("tv");
     if (request.method === "GET" && path === "/assets/movie-channel.svg") return channelPoster("movie");
     if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/movie-sign-off.mp4") return movieSignOff(request);
+    if ((request.method === "GET" || request.method === "HEAD") && path === "/assets/programme-unavailable-v2.mp4") {
+      return programmeUnavailable(request, env.ASSETS);
+    }
 
     if (request.method === "POST" && path === "/api/households") {
       const pin = await parsePin(request);
@@ -287,6 +322,61 @@ export default {
         200,
         { "cache-control": "no-store", "set-cookie": parentSessionCookie(token) },
       );
+    }
+
+    const realDebridMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/real-debrid$/);
+    if (realDebridMatch && ["GET", "PUT", "DELETE"].includes(request.method)) {
+      const household = await findHousehold(env.DB, realDebridMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      if (request.method === "GET") {
+        return json(await realDebridCredentialStatus(env.DB, household.id), 200, { "cache-control": "no-store" });
+      }
+      if (request.method === "DELETE") {
+        await clearRealDebridCredential(env.DB, household.id);
+        return json(
+          { configured: false, updatedAt: null, message: "Real-Debrid disconnected. Channel playback is unavailable until another token is saved." },
+          200,
+          { "cache-control": "no-store" },
+        );
+      }
+      let input: { token?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (!validRealDebridToken(input.token)) {
+        return json({ error: "Enter a Real-Debrid API token without leading or trailing spaces." }, 400, { "cache-control": "no-store" });
+      }
+      const validation = await validateRealDebridToken(input.token, env.REAL_DEBRID_ORIGIN);
+      if (validation === "invalid") {
+        return json({ error: "Real-Debrid rejected this token. Check it and try again." }, 400, { "cache-control": "no-store" });
+      }
+      if (validation === "unavailable") {
+        return json({ error: "Real-Debrid could not validate this token right now. Nothing was saved." }, 502, { "cache-control": "no-store" });
+      }
+      const status = await storeRealDebridCredential(env.DB, household.id, input.token, env.CONFIG_SECRET);
+      return json(
+        { ...status, message: "Real-Debrid connected. The token is stored encrypted for this Household." },
+        200,
+        { "cache-control": "no-store" },
+      );
+    }
+
+    const providerProbeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/provider-probe(?:\/(redirect))?$/);
+    if (request.method === "POST" && providerProbeMatch) {
+      const household = await findHousehold(env.DB, providerProbeMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      let token: string | null;
+      try {
+        token = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+      } catch {
+        return json({ error: "The Household Real-Debrid credential could not be decrypted. Save it again in Settings." }, 503, { "cache-control": "no-store" });
+      }
+      if (!token) {
+        return json({ error: "Connect Real-Debrid in Parent Page Settings before running the provider probe." }, 409, { "cache-control": "no-store" });
+      }
+      return firstPartyProviderProbeResponse(request, env, token, Boolean(providerProbeMatch[2]));
     }
 
     const deleteMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)$/);
@@ -550,33 +640,188 @@ export default {
       return movieSignOff(request);
     }
 
+    const resolveMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/resolve\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
+    if (request.method === "GET" && resolveMatch) {
+      const household = await findHousehold(env.DB, resolveMatch[1]);
+      if (!household) return addonJson({ error: "Household not found." }, 404, { "cache-control": "no-store" });
+      if (!env.CONFIG_SECRET) {
+        return addonJson({ error: "Stream resolution is temporarily unavailable." }, 503, { "cache-control": "no-store" });
+      }
+      const identity = await verifyStreamToken(resolveMatch[2], household.id, env.CONFIG_SECRET);
+      if (!identity) {
+        return addonJson({ error: "Stream authorization is invalid or expired." }, 403, { "cache-control": "no-store" });
+      }
+      try {
+        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!realDebridToken) {
+          return addonJson({ error: "Real-Debrid is not configured for this Household." }, 503, { "cache-control": "no-store" });
+        }
+        let currentIdentity: StreamIdentity = identity;
+        let context = await streamSelectionContext(env.DB, household.id, currentIdentity);
+        const excludedInfoHashes = new Set<string>();
+        for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS; attempt += 1) {
+          try {
+            const directLink = await resolveCachedStream(
+              env.DB,
+              household.id,
+              currentIdentity,
+              realDebridToken,
+              env,
+            );
+            return new Response(null, {
+              status: 302,
+              headers: {
+                location: directLink,
+                "cache-control": "no-store",
+                "referrer-policy": "no-referrer",
+                "x-content-type-options": "nosniff",
+                "access-control-allow-origin": "*",
+              },
+            });
+          } catch (error) {
+            if (!(error instanceof StreamSelectionGoneError) || !context) throw error;
+            await discardStreamSelection(
+              env.DB,
+              household.id,
+              currentIdentity,
+              realDebridToken,
+              env,
+            );
+            excludedInfoHashes.add(context.infoHash);
+            if (attempt === MAX_RESOLUTION_ATTEMPTS - 1) throw error;
+            const alternative = await selectCachedStream(
+              env.DB,
+              household.id,
+              context.contentType,
+              context.videoId,
+              realDebridToken,
+              env,
+              new Date(),
+              excludedInfoHashes,
+            );
+            if (!alternative) throw error;
+            currentIdentity = { torrentId: alternative.torrentId, fileId: alternative.fileId };
+            context = {
+              contentType: alternative.contentType,
+              videoId: alternative.videoId,
+              infoHash: alternative.infoHash,
+            };
+          }
+        }
+        throw new StreamSelectionGoneError("no alternate stream remains");
+      } catch (error) {
+        if (error instanceof StreamSelectionGoneError) {
+          await invalidateStreamSelection(env.DB, household.id, identity);
+          return addonJson(
+            { error: "This stream selection is no longer available. Request the stream again." },
+            410,
+            { "cache-control": "no-store" },
+          );
+        }
+        if (error instanceof RealDebridResolutionError) {
+          const retryAfter = error.retryAfter ? { "retry-after": error.retryAfter } : undefined;
+          return addonJson(
+            { error: "Real-Debrid could not resolve this stream. Try again." },
+            error.status === 429 ? 503 : 502,
+            { "cache-control": "no-store", ...retryAfter },
+          );
+        }
+        return addonJson(
+          { error: "Stream resolution is temporarily unavailable." },
+          502,
+          { "cache-control": "no-store" },
+        );
+      }
+    }
+
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);
     if (request.method === "GET" && streamMatch) {
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
-      if (streamMatch[2] === "series") {
-        if (videoId) await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
-        // Kids Channels observes schedule movement here. A separately installed provider supplies
-        // the playable stream and must place bingeGroup on that stream object.
-        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+      if (streamMatch[2] === "movie") {
+        const signOff = videoId ? parseSignOffId(videoId) : null;
+        if (signOff) {
+          await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
+          return addonJson({ streams: [{
+            name: "Kids Channels",
+            description: "Five-second sign-off",
+            url: `${url.origin}/assets/movie-sign-off.mp4`,
+            behaviorHints: {
+              bingeGroup: "kids-channels-movie-sign-off",
+              filename: "kids-channels-sign-off.mp4",
+            },
+          }] }, 200, { "cache-control": "no-store" });
+        }
       }
 
-      const signOff = videoId ? parseSignOffId(videoId) : null;
-      if (!signOff) {
-        // Canonical IMDb identity lets installed providers own movie playback and subtitles.
+      if (!videoId || !env.CONFIG_SECRET) {
         return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
-      await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
-      return addonJson({ streams: [{
-        name: "Kids Channels",
-        description: "Five-second sign-off",
-        url: `${url.origin}/assets/movie-sign-off.mp4`,
-        behaviorHints: {
-          bingeGroup: "kids-channels-movie-sign-off",
-          filename: "kids-channels-sign-off.mp4",
-        },
-      }] }, 200, { "cache-control": "no-store" });
+      try {
+        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!realDebridToken) {
+          if (streamMatch[2] === "series") {
+            await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          }
+          return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        }
+        const selection = await selectCachedStream(
+          env.DB,
+          household.id,
+          streamMatch[2] as StreamContentType,
+          videoId,
+          realDebridToken,
+          env,
+        );
+        if (!selection) {
+          if (streamMatch[2] !== "series") {
+            return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+          }
+          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          const deferred = await deferUnavailableTvProgramme(
+            env.DB,
+            household.id,
+            videoId,
+            env.TV_SCHEDULE_SEED,
+          );
+          return addonJson({ streams: [{
+            name: "Kids Channels",
+            description: deferred.terminal
+              ? "Programme unavailable • Try again later"
+              : "Programme unavailable • Trying next show",
+            url: `${url.origin}/assets/programme-unavailable-v2.mp4`,
+            behaviorHints: {
+              ...(deferred.terminal ? {} : { bingeGroup: "kids-channels-tv" }),
+              filename: "kids-channels-programme-unavailable.mp4",
+            },
+          }] }, 200, { "cache-control": "no-store" });
+        }
+        if (streamMatch[2] === "series") {
+          await clearUnavailableTvProgramme(env.DB, household.id, videoId);
+          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+        }
+        const resolveToken = await issueStreamToken(
+          household.id,
+          selection.torrentId,
+          selection.fileId,
+          Date.parse(selection.staleAt),
+          env.CONFIG_SECRET,
+        );
+        return addonJson({ streams: [{
+          name: "Kids Channels",
+          description: `${selection.quality} • Real-Debrid cached`,
+          url: `${url.origin}/addons/${household.secret}/resolve/${resolveToken}`,
+          behaviorHints: {
+            bingeGroup: streamMatch[2] === "series"
+              ? "kids-channels-tv"
+              : `kids-channels-${selection.quality.toLowerCase().replaceAll(/[^a-z0-9]+/g, "-")}`,
+            filename: selection.filename,
+          },
+        }] }, 200, { "cache-control": "no-store" });
+      } catch {
+        return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+      }
     }
 
     return json({ error: "Not found." }, 404);

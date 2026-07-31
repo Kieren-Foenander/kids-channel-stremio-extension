@@ -1,13 +1,13 @@
 # Kids Channels
 
-A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households and approve programmes from Cinemeta. Separately installed Stremio addons such as Comet resolve streams on the playback device.
+A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households, approve programmes from Cinemeta, and configure Real-Debrid. Kids Channels returns one cached stream without a source picker.
 
 ## Requirements
 
 - Node.js 20+
 - pnpm 10+
 - A Cloudflare account for deployment
-- A separately installed and configured Stremio stream addon for playback
+- A Real-Debrid account
 
 ## Run locally
 
@@ -58,7 +58,7 @@ pnpm db:migrate:remote
 pnpm run deploy
 ```
 
-The Worker never receives stream-provider or Real-Debrid credentials. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Parent API authentication uses a one-hour `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Browser documents apply a strict Content Security Policy to same-origin hashed scripts, styles, and fonts plus HTTPS programme imagery; framing and MIME sniffing are denied. No analytics, tracking, service worker, or offline mutation queue is included. Installed stream addons resolve canonical programme IDs directly in Stremio's client context.
+The Worker encrypts each Household's Real-Debrid credential with `CONFIG_SECRET`, selects only cached files, and redirects playback to fresh Real-Debrid download URLs; media bytes never pass through Cloudflare. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Parent API authentication uses a one-hour `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Browser documents apply a strict Content Security Policy to same-origin hashed scripts, styles, and fonts plus HTTPS programme imagery; framing and MIME sniffing are denied. No analytics, tracking, service worker, or offline mutation queue is included.
 
 ## Routes
 
@@ -79,8 +79,9 @@ The Worker never receives stream-provider or Real-Debrid credentials. Household 
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
 - `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
-- `GET /addons/:secret/stream/series/:episodeId.json` — observe Current/later programme requests, atomically advance when needed, and delegate playable streams to installed client addons
+- `GET /addons/:secret/stream/series/:episodeId.json` — return one cached stream, atomically advance only after selection, or defer an Unavailable Episode behind an autoplay bumper
 - `GET /addons/:secret/meta/movie/kids-channels:movie.json` — the canonical Current Programme followed only by its final sign-off
-- `GET /addons/:secret/stream/movie/:videoId.json` — delegate canonical movies to installed addons, with a compatibility fallback for sign-off requests
+- `GET /addons/:secret/stream/movie/:videoId.json` — return one cached canonical movie stream, with a compatibility fallback for sign-off requests
 - `GET|HEAD /addons/:secret/media/movie-sign-off/:cycle/:position.mp4` — atomically consume the movie and directly serve its inline five-second sign-off without another source picker
 - `GET|HEAD /assets/movie-sign-off.mp4` — branded H.264 Constrained Baseline still with a five-second silent AAC-LC track and Android-compatible byte-range support
+- `GET|HEAD /assets/programme-unavailable-v2.mp4` — 40-second inline TV holding bumper used to bridge autoplay to another eligible show

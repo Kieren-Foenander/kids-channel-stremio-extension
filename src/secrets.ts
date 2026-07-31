@@ -21,9 +21,13 @@ async function keyMaterial(secret: string): Promise<ArrayBuffer> {
   return crypto.subtle.digest("SHA-256", encoder.encode(secret));
 }
 
+async function hmacKey(secret: string, usage: KeyUsage[]): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, usage);
+}
+
 export async function issueParentToken(householdId: string, authVersion: number, secret: string, now = Date.now()): Promise<string> {
   const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt: now + 60 * 60 * 1000, authVersion })));
-  const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const key = await hmacKey(secret, ["sign"]);
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(`${householdId}.${payload}`));
   return `${payload}.${toBase64Url(signature)}`;
 }
@@ -42,12 +46,74 @@ export async function verifyParentToken(token: string, householdId: string, auth
   try {
     const [payload, signature, extra] = token.split(".");
     if (!payload || !signature || extra) return false;
-    const key = await crypto.subtle.importKey("raw", await keyMaterial(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const key = await hmacKey(secret, ["verify"]);
     const valid = await crypto.subtle.verify("HMAC", key, fromBase64Url(signature), encoder.encode(`${householdId}.${payload}`));
     if (!valid) return false;
     const parsed = JSON.parse(decoder.decode(fromBase64Url(payload))) as { expiresAt?: unknown; authVersion?: unknown };
     return typeof parsed.expiresAt === "number" && parsed.expiresAt > now && parsed.authVersion === authVersion;
   } catch {
     return false;
+  }
+}
+
+export async function issueStreamToken(
+  householdId: string,
+  torrentId: string,
+  fileId: number,
+  expiresAt: number,
+  secret: string,
+): Promise<string> {
+  const payload = toBase64Url(encoder.encode(JSON.stringify({ expiresAt, torrentId, fileId })));
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await hmacKey(secret, ["sign"]),
+    encoder.encode(`stream.${householdId}.${payload}`),
+  );
+  return `${payload}.${toBase64Url(signature)}`;
+}
+
+export interface StreamTokenPayload {
+  expiresAt: number;
+  torrentId: string;
+  fileId: number;
+}
+
+function validStreamTokenPayload(value: unknown, now: number): value is StreamTokenPayload {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  return Number.isSafeInteger(payload.expiresAt)
+    && Number(payload.expiresAt) > now
+    && typeof payload.torrentId === "string"
+    && payload.torrentId.length >= 1
+    && payload.torrentId.length <= 128
+    && payload.torrentId === payload.torrentId.trim()
+    && !/[\u0000-\u001f\u007f]/.test(payload.torrentId)
+    && Number.isSafeInteger(payload.fileId)
+    && Number(payload.fileId) >= 0;
+}
+
+export async function verifyStreamToken(
+  token: string,
+  householdId: string,
+  secret: string,
+  now = Date.now(),
+): Promise<StreamTokenPayload | null> {
+  try {
+    if (token.length > 2048) return null;
+    const [payload, signature, extra] = token.split(".");
+    if (!payload || !signature || extra || !/^[A-Za-z0-9_-]+$/.test(payload) || !/^[A-Za-z0-9_-]+$/.test(signature)) {
+      return null;
+    }
+    const valid = await crypto.subtle.verify(
+      "HMAC",
+      await hmacKey(secret, ["verify"]),
+      fromBase64Url(signature),
+      encoder.encode(`stream.${householdId}.${payload}`),
+    );
+    if (!valid) return null;
+    const parsed: unknown = JSON.parse(decoder.decode(fromBase64Url(payload)));
+    return validStreamTokenPayload(parsed, now) ? parsed : null;
+  } catch {
+    return null;
   }
 }

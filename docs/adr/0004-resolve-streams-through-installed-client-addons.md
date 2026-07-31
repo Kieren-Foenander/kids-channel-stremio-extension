@@ -1,5 +1,7 @@
 # Resolve streams through installed client addons
 
+Status: Superseded by ADR 0007.
+
 Kids Channels will select the current canonical Cinemeta title or episode, but it will not query or resolve streams itself. It exposes the TV Channel as a standard Stremio `series` catalog and metadata resource, with the canonical episode ID as `behaviorHints.defaultVideoId`. Stremio can therefore request streams for that ID from independently installed stream addons such as Comet or Torrentio on the playback device.
 
 The deployed Comet feasibility run disproved the server-side provider design. When the Cloudflare Worker requested Comet's stream resource, Comet associated Real-Debrid activity with Cloudflare's cross-zone Worker address. Playback from the user's device then failed with Comet's `Wrong IP` response. Directly installed Comet works because discovery and resolution occur in the client context.

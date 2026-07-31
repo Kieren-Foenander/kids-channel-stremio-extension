@@ -1,5 +1,8 @@
 import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { storeRealDebridCredential } from "../src/real-debrid-credentials";
+import { issueStreamToken } from "../src/secrets";
+import { requestTvProgramme } from "../src/tv-channel";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -28,7 +31,10 @@ beforeEach(async () => {
     pin_salt TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    auth_version INTEGER NOT NULL DEFAULT 1
+    auth_version INTEGER NOT NULL DEFAULT 1,
+    real_debrid_token_ciphertext TEXT,
+    real_debrid_token_iv TEXT,
+    real_debrid_token_updated_at TEXT
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pin_attempts (
     household_id TEXT NOT NULL, origin_hash TEXT NOT NULL, failed_attempts INTEGER NOT NULL,
@@ -98,8 +104,21 @@ beforeEach(async () => {
     imdb_id TEXT NOT NULL, title TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
     played_at TEXT NOT NULL
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stream_selections (
+    household_id TEXT NOT NULL, programme_id TEXT NOT NULL, content_type TEXT NOT NULL, video_id TEXT NOT NULL,
+    torrent_id TEXT NOT NULL, info_hash TEXT NOT NULL, file_id INTEGER NOT NULL, filename TEXT NOT NULL,
+    quality TEXT NOT NULL, seeders INTEGER NOT NULL, selected_at TEXT NOT NULL, stale_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, content_type, video_id)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS unavailable_episodes (
+    household_id TEXT NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    unavailable_at TEXT NOT NULL, retry_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, video_id)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
+  await env.DB.prepare("DELETE FROM unavailable_episodes").run();
+  await env.DB.prepare("DELETE FROM stream_selections").run();
   await env.DB.prepare("DELETE FROM movie_playback_history").run();
   await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
   await env.DB.prepare("DELETE FROM movie_advancements").run();
@@ -362,6 +381,111 @@ describe("Parent Page Household creation", () => {
     }
     expect(limited?.status).toBe(429);
     expect(await limited?.text()).not.toContain("000000");
+  });
+});
+
+describe("Household Real-Debrid credential", () => {
+  async function access(created: CreatedHousehold) {
+    const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pin: "123456" }),
+    });
+    return sessionHeaders(response);
+  }
+
+  it("validates and encrypts the Parent-supplied token without ever returning it", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    const token = "household-real-debrid-token";
+    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      expect(url.pathname).toBe("/rest/1.0/user");
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
+      return Response.json({ id: 123, username: "parent" });
+    });
+
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`)).status).toBe(401);
+    const saved = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    });
+    const savedBody = await saved.json<Record<string, unknown>>();
+
+    expect(saved.status).toBe(200);
+    expect(savedBody).toMatchObject({ configured: true, updatedAt: expect.any(String) });
+    expect(savedBody).not.toHaveProperty("token");
+    expect(JSON.stringify(savedBody)).not.toContain(token);
+    expect(realDebrid).toHaveBeenCalledOnce();
+
+    const stored = await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv
+      FROM households WHERE id = ?`).bind(created.householdId).first<{
+        real_debrid_token_ciphertext: string;
+        real_debrid_token_iv: string;
+      }>();
+    expect(stored?.real_debrid_token_ciphertext).toBeTruthy();
+    expect(stored?.real_debrid_token_iv).toBeTruthy();
+    expect(JSON.stringify(stored)).not.toContain(token);
+
+    const status = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, { headers: session });
+    const statusText = await status.clone().text();
+    expect(await status.json()).toMatchObject({ configured: true, updatedAt: savedBody.updatedAt });
+    expect(statusText).not.toContain(token);
+  });
+
+  it("reports invalid or unavailable tokens honestly and leaves the previous credential unchanged", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    const endpoint = `https://kids.test/api/households/${secret}/real-debrid`;
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ error: "bad_token" }, { status: 401 }));
+    const invalid = await SELF.fetch(endpoint, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "invalid-token" }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "Real-Debrid rejected this token. Check it and try again." });
+
+    vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("provider unavailable"));
+    const unavailable = await SELF.fetch(endpoint, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "unvalidated-token" }),
+    });
+    expect(unavailable.status).toBe(502);
+    expect(await unavailable.json()).toEqual({ error: "Real-Debrid could not validate this token right now. Nothing was saved." });
+    expect(await env.DB.prepare("SELECT real_debrid_token_ciphertext FROM households WHERE id = ?")
+      .bind(created.householdId).first()).toMatchObject({ real_debrid_token_ciphertext: null });
+  });
+
+  it("clears only the Household credential and reports the resulting playback state", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const session = await access(created);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ id: 123 }));
+    await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "PUT",
+      headers: { ...session, "content-type": "application/json" },
+      body: JSON.stringify({ token: "token-to-clear" }),
+    });
+
+    const cleared = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+      method: "DELETE",
+      headers: session,
+    });
+    const body = await cleared.json<Record<string, unknown>>();
+    expect(body).toMatchObject({ configured: false, updatedAt: null });
+    expect(body.message).toContain("playback is unavailable");
+    expect(await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv, real_debrid_token_updated_at
+      FROM households WHERE id = ?`).bind(created.householdId).first()).toEqual({
+      real_debrid_token_ciphertext: null,
+      real_debrid_token_iv: null,
+      real_debrid_token_updated_at: null,
+    });
   });
 });
 
@@ -638,6 +762,264 @@ describe("TV Channel client-side stream resolution", () => {
     expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
     expect(await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first()).toMatchObject({ video_id: canonicalEpisodeId });
   });
+
+  it("returns exactly one cached first-party stream and reuses its D1 selection", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(
+      env.DB,
+      created.householdId,
+      "household-rd-token",
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+
+    const hash = "a".repeat(40);
+    let selected = false;
+    const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) {
+        return Response.json([{
+          raw_title: "Playback.Show.S01E01.1080p.WEB-DL",
+          info_hash: hash,
+          resolution: "1080p",
+          seasons: [1],
+          episodes: [1],
+        }]);
+      }
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
+      if (url.pathname.endsWith("/torrents/addMagnet")) return Response.json({ id: "rd-torrent-one" });
+      if (url.pathname.endsWith("/torrents/info/rd-torrent-one")) {
+        return Response.json({
+          status: selected ? "downloaded" : "waiting_files_selection",
+          files: [{ id: 7, path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", bytes: 1_000, selected: selected ? 1 : 0 }],
+          links: selected ? ["https://restricted.test/link"] : [],
+        });
+      }
+      if (url.pathname.endsWith("/torrents/selectFiles/rd-torrent-one")) {
+        expect((init?.body as URLSearchParams).get("files")).toBe("7");
+        selected = true;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/unrestrict/link")) {
+        expect((init?.body as URLSearchParams).get("link")).toBe("https://restricted.test/link");
+        return Response.json({ download: "https://download.real-debrid.test/fresh-signed-media" });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const streamUrl = `${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`;
+    const first = await SELF.fetch(streamUrl);
+    expect(first.status).toBe(200);
+    const firstBody = await first.json<{ streams: Array<{ url: string }> }>();
+    expect(firstBody).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "1080p • Real-Debrid cached",
+        url: expect.stringMatching(new RegExp(`^${base}/resolve/[^/]+$`)),
+        behaviorHints: {
+          bingeGroup: "kids-channels-tv",
+          filename: "Playback.Show.S01E01.1080p.WEB-DL.mkv",
+        },
+      }],
+    });
+    const requestCount = outbound.mock.calls.length;
+    expect(await (await SELF.fetch(streamUrl)).json()).toEqual(firstBody);
+    expect(outbound).toHaveBeenCalledTimes(requestCount);
+    expect(await env.DB.prepare("SELECT torrent_id, file_id, video_id FROM stream_selections").first()).toMatchObject({
+      torrent_id: "rd-torrent-one",
+      file_id: 7,
+      video_id: canonicalEpisodeId,
+    });
+
+    const resolve = await SELF.fetch(firstBody.streams[0].url, { redirect: "manual" });
+    expect(resolve.status).toBe(302);
+    expect(resolve.headers.get("location")).toBe("https://download.real-debrid.test/fresh-signed-media");
+    expect(resolve.headers.get("cache-control")).toBe("no-store");
+    expect(resolve.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(await resolve.text()).toBe("");
+  });
+
+  it("rejects forged resolution and invalidates a dead Real-Debrid selection", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'dead-torrent', ?, 7, 'Playback.Show.S01E01.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "dead-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    let deadInfoRequests = 0;
+    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname.endsWith("/torrents/info/dead-torrent")) {
+        deadInfoRequests += 1;
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
+        return Response.json({ status: "dead", files: [], links: [] });
+      }
+      if (url.pathname.endsWith("/torrents/delete/dead-torrent")) return new Response(null, { status: 204 });
+      if (url.pathname.endsWith("/dmm/filtered")) return Response.json([]);
+      if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const forged = await SELF.fetch(`${base}/resolve/${token.slice(0, -1)}x`, { redirect: "manual" });
+    expect(forged.status).toBe(403);
+    expect(realDebrid).not.toHaveBeenCalled();
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
+
+    const dead = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    const deadBody = await dead.text();
+    expect(dead.status).toBe(410);
+    expect(deadBody).toContain("Request the stream again");
+    expect(deadBody).not.toContain("dead-torrent");
+    expect(deadBody).not.toContain("household-rd-token");
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 0 });
+    expect(deadInfoRequests).toBe(1);
+
+    const gone = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    expect(gone.status).toBe(410);
+    expect(deadInfoRequests).toBe(1);
+  });
+
+  it("preserves a valid selection when Real-Debrid is transiently rate limited", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'limited-torrent', ?, 7, 'Playback.Show.S01E01.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "limited-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(
+      JSON.stringify({ error: "rate limited", error_code: 34 }),
+      { status: 429, headers: { "content-type": "application/json", "retry-after": "17" } },
+    ));
+
+    const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toBe("17");
+    expect(await response.json()).toEqual({ error: "Real-Debrid could not resolve this stream. Try again." });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
+  });
+
+  it("automatically retries a different cached torrent when the selected link was removed", async () => {
+    const created = await arrangePlayback();
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
+      .bind(created.householdId)
+      .first<{ id: string }>();
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at)
+      VALUES (?, ?, 'series', ?, 'removed-torrent', ?, 7, 'Playback.Show.S01E01.removed.mkv',
+        '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
+      .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
+      .run();
+    const token = await issueStreamToken(
+      created.householdId,
+      "removed-torrent",
+      7,
+      Date.parse("2099-07-31T00:00:00.000Z"),
+      env.CONFIG_SECRET,
+    );
+    vi.restoreAllMocks();
+    let alternateInfoRequests = 0;
+    const alternateHash = "b".repeat(40);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      expect(new Headers(init?.headers).get("authorization") ?? "Bearer household-rd-token")
+        .toBe("Bearer household-rd-token");
+      if (url.pathname.endsWith("/torrents/info/removed-torrent")) {
+        return Response.json({
+          status: "downloaded",
+          files: [{ id: 7, path: "/Playback.Show.S01E01.removed.mkv", bytes: 1_000, selected: 1 }],
+          links: ["https://restricted.test/removed"],
+        });
+      }
+      if (url.pathname.endsWith("/torrents/delete/removed-torrent")) {
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/unrestrict/link")) {
+        const link = (init?.body as URLSearchParams).get("link");
+        if (link === "https://restricted.test/removed") {
+          return Response.json({ error: "content infringement" }, { status: 451 });
+        }
+        expect(link).toBe("https://restricted.test/alternate");
+        return Response.json({ download: "https://download.real-debrid.test/alternate-media" });
+      }
+      if (url.pathname.endsWith("/dmm/filtered")) {
+        expect(url.searchParams.get("ImdbId")).toBe("tt2468101");
+        return Response.json([{
+          raw_title: "Playback.Show.S01E01.1080p.WEB-DL.mkv",
+          info_hash: alternateHash,
+          resolution: "1080p",
+          seasons: [1],
+          episodes: [1],
+        }]);
+      }
+      if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/addMagnet")) {
+        expect((init?.body as URLSearchParams).get("magnet")).toContain(alternateHash);
+        return Response.json({ id: "alternate-torrent" });
+      }
+      if (url.pathname.endsWith("/torrents/selectFiles/alternate-torrent")) {
+        expect((init?.body as URLSearchParams).get("files")).toBe("8");
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/torrents/info/alternate-torrent")) {
+        alternateInfoRequests += 1;
+        return Response.json({
+          status: alternateInfoRequests === 1 ? "waiting_files_selection" : "downloaded",
+          files: [{
+            id: 8,
+            path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv",
+            bytes: 2_000,
+            selected: alternateInfoRequests > 1 ? 1 : 0,
+          }],
+          links: alternateInfoRequests > 1 ? ["https://restricted.test/alternate"] : [],
+        });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://download.real-debrid.test/alternate-media");
+    expect(await env.DB.prepare("SELECT torrent_id, info_hash FROM stream_selections").first()).toMatchObject({
+      torrent_id: "alternate-torrent",
+      info_hash: alternateHash,
+    });
+  });
 });
 
 describe("rolling TV Channel Schedule", () => {
@@ -719,6 +1101,109 @@ describe("rolling TV Channel Schedule", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
     expect(await env.DB.prepare("SELECT COUNT(DISTINCT video_id) AS count FROM channel_schedule").first()).toMatchObject({ count: 20 });
+  });
+
+  it("defers an unavailable episode without consuming it and returns a stable-group holding bumper", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
+    const unavailableProgramme = unavailableId.startsWith("tt9000001:") ? "programme-1" : "programme-2";
+    const nextId = before.meta.videos[1].id as string;
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () =>
+      SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`)));
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(await responses[0].json()).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "Programme unavailable • Trying next show",
+        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
+        behaviorHints: {
+          bingeGroup: "kids-channels-tv",
+          filename: "kids-channels-programme-unavailable.mp4",
+        },
+      }],
+    });
+    const bumper = await SELF.fetch("https://kids.test/assets/programme-unavailable-v2.mp4");
+    expect(bumper.status).toBe(200);
+    expect(bumper.headers.get("content-type")).toBe("video/mp4");
+    expect(bumper.headers.get("access-control-allow-origin")).toBe("*");
+    expect((await bumper.arrayBuffer()).byteLength).toBeGreaterThan(99_000);
+
+    const after = await metadata(base);
+    expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
+    expect(await env.DB.prepare("SELECT video_id, retry_at FROM unavailable_episodes WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ video_id: unavailableId, retry_at: expect.any(String) });
+    expect(after.meta.videos.every((video: any) => video.id !== unavailableId)).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
+
+    await env.DB.prepare("UPDATE unavailable_episodes SET retry_at = '2000-01-01T00:00:00.000Z'").run();
+    await requestTvProgramme(env.DB, created.householdId, nextId);
+    expect((await metadata(base)).meta.videos.some((video: any) => video.id === unavailableId)).toBe(true);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM unavailable_episodes").first()).toMatchObject({ count: 0 });
+  });
+
+  it("uses a terminal bumper without autoplay when every show is unavailable", async () => {
+    const { created, base } = await arrangeShows(1);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
+    expect(await response.json()).toEqual({
+      streams: [{
+        name: "Kids Channels",
+        description: "Programme unavailable • Try again later",
+        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
+        behaviorHints: { filename: "kids-channels-programme-unavailable.mp4" },
+      }],
+    });
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(unavailableId);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first())
+      .toMatchObject({ next_video_id: unavailableId });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 0 });
+  });
+
+  it("finishes the prior programme before deferring an unavailable upcoming episode", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const currentId = before.meta.videos[0].id as string;
+    const unavailableId = before.meta.videos[1].id as string;
+    const currentProgramme = currentId.startsWith("tt9000001:") ? "programme-1" : "programme-2";
+    const unavailableProgramme = currentProgramme === "programme-1" ? "programme-2" : "programme-1";
+    const currentImdb = currentId.split(":")[0];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
+
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(`${currentImdb}:1:2`);
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(currentProgramme).first()).toMatchObject({ next_video_id: `${currentImdb}:1:2` });
+    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
   });
 
   it("displays Current Programme, Channel Schedule, and recent playback only to the Parent", async () => {
@@ -1131,6 +1616,7 @@ describe("Movie Channel rotation and sign-off", () => {
     expect(full.status).toBe(200);
     expect(full.headers.get("content-type")).toBe("video/mp4");
     expect(full.headers.get("accept-ranges")).toBe("bytes");
+    expect(full.headers.get("access-control-allow-origin")).toBe("*");
     expect(full.headers.get("etag")).toBeTruthy();
     const length = Number(full.headers.get("content-length"));
     expect(length).toBeGreaterThan(10_000);
@@ -1175,6 +1661,8 @@ describe("Household deletion", () => {
       VALUES ('programme-delete', ?, 'tt1234567', 'show', 'Delete me', '[]', 'now')`).bind(householdId).run();
     await env.DB.prepare("INSERT INTO show_episodes VALUES ('programme-delete', 'tt1234567:1:1', 1, 1, 'Pilot', 'now', NULL)").run();
     await env.DB.prepare("INSERT INTO show_progress VALUES ('programme-delete', 'tt1234567:1:1')").run();
+    await env.DB.prepare(`INSERT INTO unavailable_episodes
+      VALUES (?, 'programme-delete', 'tt1234567:1:1', 'now', 'later')`).bind(householdId).run();
     await env.DB.prepare("INSERT INTO current_programmes VALUES (?, 'tv', 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
     await env.DB.prepare("INSERT INTO channel_state VALUES (?, 'tv', 0, 'seed', 'now')").bind(householdId).run();
     await env.DB.prepare("INSERT INTO channel_schedule VALUES (?, 'tv', 0, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
@@ -1201,7 +1689,8 @@ describe("Household deletion", () => {
 
     for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
-      "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history"]) {
+      "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history",
+      "stream_selections", "unavailable_episodes"]) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toMatchObject({ count: 0 });
     }
 

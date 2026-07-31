@@ -25,7 +25,20 @@ test("Settings provides installation details and securely rotates the Parent PIN
 
   await page.goto(`${parentUrl}/settings`);
   await expect(page.getByRole("heading", { name: "Settings" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Configure a separate stream addon" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Connect Real-Debrid" })).toBeVisible();
+  await expect(page.getByText("Real-Debrid is not connected.")).toBeVisible();
+
+  await page.getByLabel("Real-Debrid API token").fill("browser-real-debrid-token");
+  await page.getByRole("button", { name: "Save token" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "stored encrypted" })).toBeVisible();
+  await expect(page.getByText("Real-Debrid is connected.")).toBeVisible();
+  await expect(page.getByLabel("Real-Debrid API token")).toHaveValue("");
+  await expect(page.locator("body")).not.toContainText("browser-real-debrid-token");
+
+  await page.reload();
+  await expect(page.getByText("Real-Debrid is connected.")).toBeVisible();
+  await page.getByRole("button", { name: "Clear token" }).click();
+  await expect(page.getByText("Real-Debrid is not connected.")).toBeVisible();
 
   const install = page.getByRole("link", { name: "Install in Stremio" });
   await expect(install).toHaveAttribute("href", /^stremio:\/\//);

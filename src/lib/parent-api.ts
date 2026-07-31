@@ -67,4 +67,5 @@ export const parentKeys = {
   library: (secret: string) => ["household", secret, "approved-library"] as const,
   tv: (secret: string) => ["household", secret, "tv-channel"] as const,
   movie: (secret: string) => ["household", secret, "movie-channel"] as const,
+  realDebrid: (secret: string) => ["household", secret, "real-debrid"] as const,
 };

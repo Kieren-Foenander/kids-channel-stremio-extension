@@ -1,5 +1,7 @@
 # Use Comet as the first stream provider
 
+Status: Superseded by ADR 0007.
+
 Superseded by ADR 0004 after client playback exposed IP-bound provider resolution.
 
 The addon will query each Household's configured Comet endpoint and return exactly its first acceptable cached 1080p Real-Debrid stream, rather than implementing torrent discovery or Real-Debrid resolution itself.

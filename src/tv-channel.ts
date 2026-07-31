@@ -1,6 +1,7 @@
 import type { CinemetaEpisode } from "./cinemeta";
 
 export const TV_SCHEDULE_LENGTH = 20;
+export const UNAVAILABLE_EPISODE_RETRY_HOURS = 6;
 
 export interface TvCurrentProgramme {
   programmeId: string;
@@ -175,12 +176,10 @@ function project(
 
   const scheduled: TvScheduledProgramme[] = [];
   for (let offset = 0; offset < count; offset += 1) {
-    for (const show of shows) {
-      let cursor = cursors.get(show.programmeId) ?? show.episodes.length;
-      while (cursor < show.episodes.length && blockedVideoIds.has(show.episodes[cursor].id)) cursor += 1;
-      cursors.set(show.programmeId, cursor);
-    }
-    const eligible = shows.filter((show) => (cursors.get(show.programmeId) ?? show.episodes.length) < show.episodes.length);
+    const eligible = shows.filter((show) => {
+      const cursor = cursors.get(show.programmeId) ?? show.episodes.length;
+      return cursor < show.episodes.length && !blockedVideoIds.has(show.episodes[cursor].id);
+    });
     if (eligible.length === 0) break;
     const alternatives = eligible.length > 1
       ? eligible.filter((show) => show.programmeId !== previousProgrammeId)
@@ -206,6 +205,29 @@ function project(
   return scheduled;
 }
 
+async function activeUnavailableVideoIds(
+  db: D1Database,
+  householdId: string,
+  now = new Date(),
+): Promise<Set<string>> {
+  const rows = await db.prepare(`SELECT video_id FROM unavailable_episodes
+    WHERE household_id = ? AND retry_at > ?`).bind(householdId, now.toISOString()).all<{ video_id: string }>();
+  return new Set(rows.results.map((row) => row.video_id));
+}
+
+async function releaseExpiredUnavailableEpisodes(
+  db: D1Database,
+  householdId: string,
+  now = new Date(),
+): Promise<boolean> {
+  const expired = await db.prepare(`SELECT 1 FROM unavailable_episodes
+    WHERE household_id = ? AND retry_at <= ? LIMIT 1`).bind(householdId, now.toISOString()).first();
+  if (!expired) return false;
+  await db.prepare("DELETE FROM unavailable_episodes WHERE household_id = ? AND retry_at <= ?")
+    .bind(householdId, now.toISOString()).run();
+  return true;
+}
+
 async function scheduleRows(db: D1Database, householdId: string): Promise<TvScheduledProgramme[]> {
   const rows = await db.prepare(`SELECT schedule.position, schedule.programme_id, programme.imdb_id,
       programme.title AS show_title, programme.description, programme.poster, programme.background,
@@ -225,6 +247,7 @@ async function initializeSchedule(db: D1Database, householdId: string, configure
   if (await db.prepare("SELECT 1 FROM channel_state WHERE household_id = ? AND channel = 'tv'").bind(householdId).first()) return;
   const shows = await loadShows(db, householdId);
   if (shows.length === 0) return;
+  const unavailable = await activeUnavailableVideoIds(db, householdId);
 
   const seed = configuredSeed || crypto.randomUUID();
   const existingCurrent = await db.prepare(`SELECT programme_id, video_id FROM current_programmes
@@ -247,8 +270,8 @@ async function initializeSchedule(db: D1Database, householdId: string, configure
     }, ...project(shows, seed, 1, TV_SCHEDULE_LENGTH - 1, [{
       programmeId: currentShow.programmeId,
       videoId: currentEpisode.id,
-    }])]
-    : project(shows, seed, 0, TV_SCHEDULE_LENGTH);
+    }], currentShow.programmeId, unavailable)]
+    : project(shows, seed, 0, TV_SCHEDULE_LENGTH, [], undefined, unavailable);
   if (programmes.length === 0) return;
   const now = new Date().toISOString();
   const first = programmes[0];
@@ -293,6 +316,7 @@ async function advanceOnce(
     programme.position >= currentState.current_position && programme.position < target.position);
   const retained = currentSchedule.filter((programme) => programme.position >= target.position);
   const shows = await loadShows(db, householdId);
+  const unavailable = await activeUnavailableVideoIds(db, householdId);
   const progressBefore: Record<string, string | null> = {};
   const progressAfter: Record<string, string | null> = {};
   for (const show of shows) {
@@ -309,6 +333,8 @@ async function advanceOnce(
     retained.length === 0 ? target.position : retained[retained.length - 1].position + 1,
     appendCount,
     retained.map((programme) => ({ programmeId: programme.programmeId, videoId: programme.episode.id })),
+    undefined,
+    unavailable,
   );
   const owner = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -373,6 +399,7 @@ export async function refreshTvChannelSchedule(
   }
 
   const shows = await loadShows(db, householdId);
+  const unavailable = await activeUnavailableVideoIds(db, householdId);
   if (shows.length === 0) {
     await db.batch([
       db.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND channel = 'tv'").bind(householdId),
@@ -412,9 +439,9 @@ export async function refreshTvChannelSchedule(
         ? [{ programmeId: currentShow.programmeId, videoId: currentEpisode.id }]
         : [],
       currentShow.programmeId,
-      new Set([currentEpisode.id]),
+      new Set([currentEpisode.id, ...unavailable]),
     )]
-    : project(shows, seed, position, TV_SCHEDULE_LENGTH);
+    : project(shows, seed, position, TV_SCHEDULE_LENGTH, [], undefined, unavailable);
 
   if (programmes.length === 0) return [];
   const now = new Date().toISOString();
@@ -491,9 +518,13 @@ export async function setShowProgress(
     WHERE programme.household_id = ? AND programme.id = ? AND programme.content_type = 'show'
       AND episode.video_id = ?`).bind(householdId, programmeId, videoId).first();
   if (!episode) throw new Error("episode is invalid");
-  await db.prepare(`INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)
-    ON CONFLICT(programme_id) DO UPDATE SET next_video_id = excluded.next_video_id`)
-    .bind(programmeId, videoId).run();
+  await db.batch([
+    db.prepare("DELETE FROM unavailable_episodes WHERE household_id = ? AND programme_id = ?")
+      .bind(householdId, programmeId),
+    db.prepare(`INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)
+      ON CONFLICT(programme_id) DO UPDATE SET next_video_id = excluded.next_video_id`)
+      .bind(programmeId, videoId),
+  ]);
   await refreshTvChannelSchedule(db, householdId, false, configuredSeed);
 }
 
@@ -558,10 +589,106 @@ export async function requestTvProgramme(
     const currentState = await state(db, householdId);
     if (!currentState || schedule.length === 0) return schedule;
     const target = schedule.find((programme) => programme.episode.id === videoId);
-    if (!target || target.position <= currentState.current_position) return schedule;
+    if (!target || target.position <= currentState.current_position) {
+      return await releaseExpiredUnavailableEpisodes(db, householdId)
+        ? refreshTvChannelSchedule(db, householdId, false, configuredSeed)
+        : schedule;
+    }
     await advanceOnce(db, householdId, target, currentState, schedule);
     const latest = await state(db, householdId);
-    if (!latest || latest.current_position >= target.position) return scheduleRows(db, householdId);
+    if (!latest || latest.current_position >= target.position) {
+      return await releaseExpiredUnavailableEpisodes(db, householdId)
+        ? refreshTvChannelSchedule(db, householdId, false, configuredSeed)
+        : scheduleRows(db, householdId);
+    }
   }
   return scheduleRows(db, householdId);
+}
+
+export interface UnavailableTvProgrammeResult {
+  advanced: boolean;
+  terminal: boolean;
+}
+
+export async function clearUnavailableTvProgramme(
+  db: D1Database,
+  householdId: string,
+  videoId: string,
+): Promise<void> {
+  await db.prepare("DELETE FROM unavailable_episodes WHERE household_id = ? AND video_id = ?")
+    .bind(householdId, videoId).run();
+}
+
+export async function deferUnavailableTvProgramme(
+  db: D1Database,
+  householdId: string,
+  videoId: string,
+  configuredSeed?: string,
+  now = new Date(),
+): Promise<UnavailableTvProgrammeResult> {
+  const currentSchedule = await tvChannelSchedule(db, householdId, configuredSeed);
+  const currentState = await state(db, householdId);
+  const current = currentSchedule[0];
+  if (!currentState || !current || current.episode.id !== videoId) {
+    return { advanced: false, terminal: false };
+  }
+
+  const unavailableAt = now.toISOString();
+  const retryAt = new Date(now.getTime() + UNAVAILABLE_EPISODE_RETRY_HOURS * 60 * 60 * 1000).toISOString();
+  await db.prepare(`INSERT INTO unavailable_episodes
+    (household_id, programme_id, video_id, unavailable_at, retry_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(household_id, video_id) DO UPDATE SET
+      unavailable_at = excluded.unavailable_at, retry_at = excluded.retry_at`)
+    .bind(householdId, current.programmeId, videoId, unavailableAt, retryAt).run();
+
+  const shows = await loadShows(db, householdId);
+  const unavailable = await activeUnavailableVideoIds(db, householdId, now);
+  const eligibleShows = shows.filter((show) => {
+    const next = show.episodes[show.progressIndex];
+    return next && !unavailable.has(next.id);
+  });
+  const targetPosition = currentState.current_position + 1;
+  const programmes = project(
+    eligibleShows,
+    currentState.selection_seed,
+    targetPosition,
+    TV_SCHEDULE_LENGTH,
+    [],
+    current.programmeId,
+    unavailable,
+  );
+  const target = programmes[0];
+  if (!target) return { advanced: false, terminal: true };
+
+  const owner = crypto.randomUUID();
+  const owns = `EXISTS (SELECT 1 FROM channel_advancements claim
+    WHERE claim.household_id = ? AND claim.channel = 'tv' AND claim.from_position = ? AND claim.owner_token = ?)`;
+  const ownership = [householdId, currentState.current_position, owner] as const;
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`INSERT OR IGNORE INTO channel_advancements
+      (household_id, channel, from_position, target_position, owner_token, advanced_at)
+      VALUES (?, 'tv', ?, ?, ?, ?)`)
+      .bind(householdId, currentState.current_position, targetPosition, owner, unavailableAt),
+    db.prepare(`UPDATE channel_state SET current_position = ?
+      WHERE household_id = ? AND channel = 'tv' AND current_position = ? AND ${owns}`)
+      .bind(targetPosition, householdId, currentState.current_position, ...ownership),
+    db.prepare(`UPDATE current_programmes SET programme_id = ?, video_id = ?, selected_at = ?
+      WHERE household_id = ? AND channel = 'tv' AND ${owns}`)
+      .bind(target.programmeId, target.episode.id, unavailableAt, householdId, ...ownership),
+    db.prepare(`DELETE FROM channel_schedule WHERE household_id = ? AND channel = 'tv' AND ${owns}`)
+      .bind(householdId, ...ownership),
+  ];
+  for (const programme of programmes) {
+    statements.push(db.prepare(`INSERT INTO channel_schedule
+      (household_id, channel, position, programme_id, video_id, scheduled_at)
+      SELECT ?, 'tv', ?, ?, ?, ? WHERE ${owns}`)
+      .bind(householdId, programme.position, programme.programmeId, programme.episode.id,
+        unavailableAt, ...ownership));
+  }
+  await db.batch(statements);
+  const latest = await state(db, householdId);
+  return {
+    advanced: Boolean(latest && latest.current_position >= targetPosition),
+    terminal: false,
+  };
 }
