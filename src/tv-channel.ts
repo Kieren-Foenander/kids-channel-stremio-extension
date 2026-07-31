@@ -1,7 +1,8 @@
 import type { CinemetaEpisode } from "./cinemeta";
 
 export const TV_SCHEDULE_LENGTH = 20;
-export const UNAVAILABLE_EPISODE_RETRY_HOURS = 6;
+export const UNAVAILABLE_EPISODE_RETRY_MINUTES = 5;
+const UNAVAILABLE_EPISODE_REQUEST_GUARD_SECONDS = 10;
 
 export interface TvCurrentProgramme {
   programmeId: string;
@@ -586,6 +587,11 @@ export async function requestTvProgramme(
 ): Promise<TvScheduledProgramme[]> {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const schedule = await tvChannelSchedule(db, householdId, configuredSeed);
+    const recentlyUnavailable = await db.prepare(`SELECT unavailable_at FROM unavailable_episodes
+      WHERE household_id = ? AND video_id = ?`).bind(householdId, videoId)
+      .first<{ unavailable_at: string }>();
+    if (recentlyUnavailable && Date.parse(recentlyUnavailable.unavailable_at)
+      + UNAVAILABLE_EPISODE_REQUEST_GUARD_SECONDS * 1000 > Date.now()) return schedule;
     const currentState = await state(db, householdId);
     if (!currentState || schedule.length === 0) return schedule;
     const target = schedule.find((programme) => programme.episode.id === videoId);
@@ -634,7 +640,7 @@ export async function deferUnavailableTvProgramme(
   }
 
   const unavailableAt = now.toISOString();
-  const retryAt = new Date(now.getTime() + UNAVAILABLE_EPISODE_RETRY_HOURS * 60 * 60 * 1000).toISOString();
+  const retryAt = new Date(now.getTime() + UNAVAILABLE_EPISODE_RETRY_MINUTES * 60 * 1000).toISOString();
   await db.prepare(`INSERT INTO unavailable_episodes
     (household_id, programme_id, video_id, unavailable_at, retry_at) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(household_id, video_id) DO UPDATE SET
@@ -648,17 +654,33 @@ export async function deferUnavailableTvProgramme(
     return next && !unavailable.has(next.id);
   });
   const targetPosition = currentState.current_position + 1;
-  const programmes = project(
+  const target = project(
     eligibleShows,
     currentState.selection_seed,
     targetPosition,
-    TV_SCHEDULE_LENGTH,
+    1,
     [],
     current.programmeId,
     unavailable,
-  );
-  const target = programmes[0];
+  )[0];
   if (!target) return { advanced: false, terminal: true };
+  const requeued = { ...current, position: targetPosition + 1 };
+  const programmes = [
+    target,
+    requeued,
+    ...project(
+      shows,
+      currentState.selection_seed,
+      targetPosition + 2,
+      TV_SCHEDULE_LENGTH - 2,
+      [
+        { programmeId: target.programmeId, videoId: target.episode.id },
+        { programmeId: current.programmeId, videoId: current.episode.id },
+      ],
+      current.programmeId,
+      unavailable,
+    ),
+  ];
 
   const owner = crypto.randomUUID();
   const owns = `EXISTS (SELECT 1 FROM channel_advancements claim

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   qualityFromRelease,
   rankCandidates,
@@ -48,6 +48,7 @@ beforeEach(async () => {
     seeders INTEGER NOT NULL,
     selected_at TEXT NOT NULL,
     stale_at TEXT NOT NULL,
+    download_pending INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (household_id, content_type, video_id)
   )`).run();
   await env.DB.prepare("DELETE FROM stream_selections").run();
@@ -55,6 +56,10 @@ beforeEach(async () => {
   await env.DB.prepare("DELETE FROM approved_programmes").run();
   await env.DB.prepare("DELETE FROM households").run();
   vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("stream candidate parsing and ranking", () => {
@@ -236,5 +241,91 @@ describe("cached stream selection", () => {
       new Date("2026-07-30T01:00:00.000Z"),
     )).toEqual(selection);
     expect(outbound).toHaveBeenCalledTimes(requestCount);
+  });
+
+  it("keeps the best uncached torrent downloading and promotes it once Real-Debrid finishes", async () => {
+    await env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+      VALUES ('household', 'secret', 'salt', 'hash', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, release_info, genres_json, approved_at)
+      VALUES ('programme', 'household', 'tt1234567', 'show', 'Example Show', '2024', '[]', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO show_episodes
+      (programme_id, video_id, season, episode, title, released_at)
+      VALUES ('programme', 'tt1234567:1:2', 1, 2, 'Second', '2024-01-01')`).run();
+
+    const hash = "a".repeat(40);
+    let selected = false;
+    let downloaded = false;
+    let addCount = 0;
+    const deleted: string[] = [];
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") {
+        return Response.json([{
+          raw_title: "Example.Show.S01E02.1080p.WEB-DL",
+          info_hash: hash,
+          resolution: "1080p",
+          seasons: [1],
+          episodes: [2],
+        }]);
+      }
+      if (url.hostname === "knaben.test") return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/addMagnet")) {
+        addCount += 1;
+        return Response.json({ id: "queued-torrent" });
+      }
+      if (url.pathname.endsWith("/torrents/selectFiles/queued-torrent")) {
+        selected = true;
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/torrents/info/queued-torrent")) {
+        return Response.json({
+          status: downloaded ? "downloaded" : selected ? "downloading" : "waiting_files_selection",
+          files: [{ id: 2, path: "/Example.Show.S01E02.1080p.mkv", bytes: 1_000 }],
+          links: downloaded ? ["https://restricted.test/file"] : [],
+        });
+      }
+      if (url.pathname.endsWith("/torrents/delete/queued-torrent")) {
+        deleted.push("queued-torrent");
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+    const options = {
+      ZILEAN_ORIGIN: "https://zilean.test",
+      KNABEN_ORIGIN: "https://knaben.test",
+      REAL_DEBRID_ORIGIN: "https://real-debrid.test/rest/1.0",
+    };
+
+    const firstRequest = selectCachedStream(
+      env.DB,
+      "household",
+      "series",
+      "tt1234567:1:2",
+      "rd-token",
+      options,
+      new Date("2026-07-30T00:00:00.000Z"),
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await firstRequest).toBeNull();
+    expect(deleted).toEqual([]);
+    expect(await env.DB.prepare("SELECT torrent_id, file_id, download_pending FROM stream_selections").first())
+      .toMatchObject({ torrent_id: "queued-torrent", file_id: 2, download_pending: 1 });
+
+    downloaded = true;
+    expect(await selectCachedStream(
+      env.DB,
+      "household",
+      "series",
+      "tt1234567:1:2",
+      "rd-token",
+      options,
+      new Date("2026-07-30T00:10:00.000Z"),
+    )).toMatchObject({ torrentId: "queued-torrent", fileId: 2, infoHash: hash });
+    expect(await env.DB.prepare("SELECT download_pending FROM stream_selections").first())
+      .toMatchObject({ download_pending: 0 });
+    expect(addCount).toBe(1);
   });
 });
