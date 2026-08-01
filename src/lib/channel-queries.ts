@@ -15,6 +15,17 @@ export function useTvChannel<T>(secret: string) {
   return query;
 }
 
+export function useTvPreparation<T extends { run: { status: string } | null }>(secret: string) {
+  const query = useQuery({
+    queryKey: parentKeys.tvPreparation(secret),
+    queryFn: () => parentApi<T>(`/api/households/${secret}/tv-preparation`),
+    refetchInterval: (current) => ["queued", "running"].includes(current.state.data?.run?.status ?? "") ? 10_000 : false,
+    refetchIntervalInBackground: false,
+  });
+  useVisibleFocusRefetch(query.refetch);
+  return query;
+}
+
 export function useMovieChannel<T>(secret: string) {
   const query = useQuery({
     queryKey: parentKeys.movie(secret),

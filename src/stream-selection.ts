@@ -18,6 +18,11 @@ export interface StreamSelectionEnv {
   KNABEN_ORIGIN?: string;
 }
 
+export interface StreamSelectionOptions {
+  maxCacheChecks?: number;
+  cacheCheckTimeoutMs?: number;
+}
+
 export interface StreamSelection {
   householdId: string;
   programmeId: string;
@@ -481,6 +486,7 @@ async function cachedCandidate(
   programme: CanonicalProgramme,
   token: string,
   env: StreamSelectionEnv,
+  cacheCheckTimeoutMs = CACHE_CHECK_TIMEOUT_MS,
 ): Promise<{
   torrentId: string;
   file: TorrentFile;
@@ -518,7 +524,7 @@ async function cachedCandidate(
       token,
       addedId,
       (info) => info.status === "downloaded" && info.links.length > 0,
-      CACHE_CHECK_TIMEOUT_MS,
+      cacheCheckTimeoutMs,
     );
     return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
@@ -765,6 +771,7 @@ export async function selectCachedStream(
   env: StreamSelectionEnv,
   now = new Date(),
   excludedInfoHashes: ReadonlySet<string> = new Set(),
+  options: StreamSelectionOptions = {},
 ): Promise<StreamSelection | null> {
   const existing = await cachedSelection(
     db,
@@ -804,8 +811,10 @@ export async function selectCachedStream(
     file: TorrentFile;
     progress: number;
   } | null = null;
-  for (const candidate of eligibleCandidates.slice(0, MAX_CACHE_CHECKS)) {
-    const cached = await cachedCandidate(candidate, programme, realDebridToken, env);
+  const maxCacheChecks = Math.max(1, Math.min(MAX_CACHE_CHECKS, options.maxCacheChecks ?? MAX_CACHE_CHECKS));
+  const cacheCheckTimeoutMs = Math.max(POLL_INTERVAL_MS, options.cacheCheckTimeoutMs ?? CACHE_CHECK_TIMEOUT_MS);
+  for (const candidate of eligibleCandidates.slice(0, maxCacheChecks)) {
+    const cached = await cachedCandidate(candidate, programme, realDebridToken, env, cacheCheckTimeoutMs);
     if (!cached) continue;
     if ("rejectedReason" in cached) {
       await quarantineInfoHash(

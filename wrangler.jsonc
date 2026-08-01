@@ -16,6 +16,13 @@
       "migrations_dir": "migrations"
     }
   ],
+  "workflows": [
+    {
+      "binding": "TV_PREPARATION",
+      "name": "kids-channels-tv-preparation",
+      "class_name": "TvSchedulePreparationWorkflow"
+    }
+  ],
   "observability": {
     "enabled": false
   },
@@ -32,6 +39,13 @@
           "database_name": "kids-channels-development",
           "database_id": "531abb60-edab-447c-8dcb-ef79a3d898b2",
           "migrations_dir": "migrations"
+        }
+      ],
+      "workflows": [
+        {
+          "binding": "TV_PREPARATION",
+          "name": "kids-channels-development-tv-preparation",
+          "class_name": "TvSchedulePreparationWorkflow"
         }
       ]
     }

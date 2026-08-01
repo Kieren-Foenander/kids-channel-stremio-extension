@@ -19,5 +19,12 @@
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
+  ],
+  "workflows": [
+    {
+      "binding": "TV_PREPARATION",
+      "name": "kids-channels-test-tv-preparation",
+      "class_name": "TvSchedulePreparationWorkflow"
+    }
   ]
 }
