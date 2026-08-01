@@ -7,6 +7,7 @@ import {
   selectCachedStream,
   type DiscoveryCandidate,
 } from "../src/stream-selection";
+import { tvPreparationOutcomeMessage } from "../src/tv-preparation";
 
 beforeEach(async () => {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS households (
@@ -123,7 +124,143 @@ describe("stream candidate parsing and ranking", () => {
   });
 });
 
+describe("Preparation Run source reporting", () => {
+  it("distinguishes missing, rejected, and temporarily unavailable sources", () => {
+    expect(tvPreparationOutcomeMessage({ status: "no_candidates", candidateCount: 0 }))
+      .toContain("No matching torrent sources");
+    expect(tvPreparationOutcomeMessage({ status: "candidate_rejected", candidateCount: 2, reason: "file_selection_failed" }))
+      .toContain("next round will try another");
+    expect(tvPreparationOutcomeMessage({ status: "temporarily_unavailable", candidateCount: 1 }))
+      .toContain("could not inspect");
+  });
+});
+
 describe("cached stream selection", () => {
+  it("accepts a Zilean season pack and lets exact file matching verify the requested episode", async () => {
+    await env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+      VALUES ('household', 'secret', 'salt', 'hash', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, release_info, genres_json, approved_at)
+      VALUES ('programme', 'household', 'tt1234567', 'show', 'Example Show', '2024', '[]', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO show_episodes
+      (programme_id, video_id, season, episode, title, released_at)
+      VALUES ('programme', 'tt1234567:1:2', 1, 2, 'Second', '2024-01-01')`).run();
+
+    const hash = "a".repeat(40);
+    let selected = false;
+    const additions: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") return Response.json([{
+        raw_title: "Example Show S01 1080p WEB-DL",
+        info_hash: hash,
+        resolution: "1080p",
+        seasons: [1],
+        episodes: [],
+      }]);
+      if (url.hostname === "knaben.test") return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/addMagnet")) {
+        additions.push(hash);
+        return Response.json({ id: "season-pack" });
+      }
+      if (url.pathname.endsWith("/torrents/info/season-pack")) return Response.json({
+        status: selected ? "downloaded" : "waiting_files_selection",
+        files: [
+          { id: 1, path: "/Example.Show.S01E01.mkv", bytes: 1_000 },
+          { id: 2, path: "/Example.Show.S01E02.mkv", bytes: 1_000 },
+        ],
+        links: selected ? ["https://restricted.test/file"] : [],
+      });
+      if (url.pathname.endsWith("/torrents/selectFiles/season-pack")) {
+        expect((init?.body as URLSearchParams).get("files")).toBe("2");
+        selected = true;
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    });
+
+    const outcomes: string[] = [];
+    const selection = await selectCachedStream(
+      env.DB, "household", "series", "tt1234567:1:2", "rd-token",
+      {
+        ZILEAN_ORIGIN: "https://zilean.test",
+        KNABEN_ORIGIN: "https://knaben.test",
+        REAL_DEBRID_ORIGIN: "https://real-debrid.test/rest/1.0",
+      },
+      new Date("2026-08-01T00:00:00.000Z"), new Set(),
+      { onOutcome: (outcome) => outcomes.push(outcome.status) },
+    );
+
+    expect(additions).toEqual([hash]);
+    expect(outcomes).toEqual(["ready"]);
+    expect(selection).toMatchObject({ infoHash: hash, fileId: 2, filename: "Example.Show.S01E02.mkv" });
+  });
+
+  it("quarantines a candidate rejected during file selection so the next round advances", async () => {
+    await env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+      VALUES ('household', 'secret', 'salt', 'hash', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, release_info, genres_json, approved_at)
+      VALUES ('programme', 'household', 'tt1234567', 'show', 'Example Show', '2024', '[]', 'now')`).run();
+    await env.DB.prepare(`INSERT INTO show_episodes
+      (programme_id, video_id, season, episode, title, released_at)
+      VALUES ('programme', 'tt1234567:1:2', 1, 2, 'Second', '2024-01-01')`).run();
+
+    const firstHash = "a".repeat(40);
+    const secondHash = "b".repeat(40);
+    const additions: string[] = [];
+    const selected = new Set<string>();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") return Response.json([
+        { raw_title: "Example.Show.S01E02.1080p", info_hash: firstHash, resolution: "1080p", seasons: [1], episodes: [2] },
+        { raw_title: "Example.Show.S01E02.720p", info_hash: secondHash, resolution: "720p", seasons: [1], episodes: [2] },
+      ]);
+      if (url.hostname === "knaben.test") return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/addMagnet")) {
+        const hash = new URL((init?.body as URLSearchParams).get("magnet")!).searchParams.get("xt")!.split(":").at(-1)!;
+        additions.push(hash);
+        return Response.json({ id: `torrent-${hash}` });
+      }
+      const info = url.pathname.match(/\/torrents\/info\/torrent-(.+)$/);
+      if (info) return Response.json({
+        status: selected.has(info[1]) ? "downloaded" : "waiting_files_selection",
+        files: [{ id: 2, path: "/Example.Show.S01E02.mkv", bytes: 1_000 }],
+        links: selected.has(info[1]) ? ["https://restricted.test/file"] : [],
+      });
+      const select = url.pathname.match(/\/torrents\/selectFiles\/torrent-(.+)$/);
+      if (select) {
+        if (select[1] === firstHash) return Response.json({ error: "bad_file" }, { status: 400 });
+        selected.add(select[1]);
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.includes("/torrents/delete/")) return new Response(null, { status: 204 });
+      throw new Error(`unexpected request ${url}`);
+    });
+    const selectionEnv = {
+      ZILEAN_ORIGIN: "https://zilean.test",
+      KNABEN_ORIGIN: "https://knaben.test",
+      REAL_DEBRID_ORIGIN: "https://real-debrid.test/rest/1.0",
+    };
+    const outcomes: string[] = [];
+
+    expect(await selectCachedStream(
+      env.DB, "household", "series", "tt1234567:1:2", "rd-token", selectionEnv,
+      new Date("2026-08-01T00:00:00.000Z"), new Set(),
+      { maxCacheChecks: 1, onOutcome: (outcome) => outcomes.push(outcome.status) },
+    )).toBeNull();
+    expect(await selectCachedStream(
+      env.DB, "household", "series", "tt1234567:1:2", "rd-token", selectionEnv,
+      new Date("2026-08-01T00:05:00.000Z"), new Set(),
+      { maxCacheChecks: 1, onOutcome: (outcome) => outcomes.push(outcome.status) },
+    )).toMatchObject({ infoHash: secondHash });
+    expect(additions).toEqual([firstHash, secondHash]);
+    expect(outcomes).toEqual(["candidate_rejected", "ready"]);
+    expect(await env.DB.prepare("SELECT info_hash, reason FROM stream_candidate_failures").first())
+      .toMatchObject({ info_hash: firstHash, reason: "file_selection_failed" });
+  });
+
   it("tries ranked candidates until RD confirms one cached, chooses the exact episode file, and reuses D1", async () => {
     await env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
       VALUES ('household', 'secret', 'salt', 'hash', 'now')`).run();

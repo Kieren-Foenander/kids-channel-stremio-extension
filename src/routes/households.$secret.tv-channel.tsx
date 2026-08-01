@@ -217,6 +217,7 @@ function TvChannelPage() {
                       <div className="min-w-0 flex-1">
                         <strong className="block truncate font-medium">{item.showTitle}</strong>
                         <span className="block truncate font-mono text-xs text-muted-foreground">S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")} — {item.episodeTitle}</span>
+                        {item.message && <span className="mt-0.5 block text-xs text-muted-foreground">{item.message}</span>}
                       </div>
                       <StateBadge current={item.status === "ready"}>{preparationItemLabel(item.status)}</StateBadge>
                     </li>
