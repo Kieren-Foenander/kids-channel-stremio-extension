@@ -109,7 +109,14 @@ beforeEach(async () => {
     torrent_id TEXT NOT NULL, info_hash TEXT NOT NULL, file_id INTEGER NOT NULL, filename TEXT NOT NULL,
     quality TEXT NOT NULL, seeders INTEGER NOT NULL, selected_at TEXT NOT NULL, stale_at TEXT NOT NULL,
     download_pending INTEGER NOT NULL DEFAULT 0,
+    last_progress REAL NOT NULL DEFAULT 0, last_progress_at TEXT,
     PRIMARY KEY (household_id, content_type, video_id)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stream_candidate_failures (
+    household_id TEXT NOT NULL, programme_id TEXT NOT NULL, content_type TEXT NOT NULL,
+    video_id TEXT NOT NULL, info_hash TEXT NOT NULL,
+    reason TEXT NOT NULL, failed_at TEXT NOT NULL, retry_at TEXT NOT NULL,
+    PRIMARY KEY (household_id, content_type, video_id, info_hash)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS unavailable_episodes (
     household_id TEXT NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
@@ -119,6 +126,7 @@ beforeEach(async () => {
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
   await env.DB.prepare("DELETE FROM unavailable_episodes").run();
+  await env.DB.prepare("DELETE FROM stream_candidate_failures").run();
   await env.DB.prepare("DELETE FROM stream_selections").run();
   await env.DB.prepare("DELETE FROM movie_playback_history").run();
   await env.DB.prepare("DELETE FROM movie_channel_mutations").run();
@@ -878,7 +886,9 @@ describe("TV Channel client-side stream resolution", () => {
       throw new Error(`unexpected outbound request: ${url}`);
     });
 
-    const forged = await SELF.fetch(`${base}/resolve/${token.slice(0, -1)}x`, { redirect: "manual" });
+    const [payload, signature] = token.split(".");
+    const forgedToken = `${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+    const forged = await SELF.fetch(`${base}/resolve/${forgedToken}`, { redirect: "manual" });
     expect(forged.status).toBe(403);
     expect(realDebrid).not.toHaveBeenCalled();
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
@@ -1689,7 +1699,7 @@ describe("Household deletion", () => {
     for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
       "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history",
-      "stream_selections", "unavailable_episodes"]) {
+      "stream_selections", "stream_candidate_failures", "unavailable_episodes"]) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first()).toMatchObject({ count: 0 });
     }
 

@@ -15,7 +15,9 @@ describe("stream resolution tokens", () => {
       fileId: 7,
     });
     expect(await verifyStreamToken(token, "household-two", configurationSecret, now)).toBeNull();
-    expect(await verifyStreamToken(`${token.slice(0, -1)}x`, "household-one", configurationSecret, now)).toBeNull();
+    const [payload, signature] = token.split(".");
+    const forged = `${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
+    expect(await verifyStreamToken(forged, "household-one", configurationSecret, now)).toBeNull();
     expect(await verifyStreamToken(token, "household-one", configurationSecret, expiresAt)).toBeNull();
   });
 
