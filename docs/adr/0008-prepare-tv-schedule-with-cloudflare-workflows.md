@@ -4,7 +4,7 @@ Kids Channels will let a Parent manually start a time-bounded Preparation Run fo
 
 Each five-minute round processes unfinished episodes sequentially in batches of at most five and permits the existing stream selector to inspect at most one new candidate per episode. The small Workflow steps stay below Worker subrequest limits while the complete eight-hour run remains within Workflow step limits. Existing pending selections are checked first. A progressing torrent remains in Real-Debrid; a stalled or terminal torrent follows the existing quarantine and cleanup rules so a later round can try the next ranked source. The run ends early when all items are ready, or marks unfinished items unavailable when its one-, four-, or eight-hour window expires.
 
-The Parent Page is the only place that can start or stop a run. It warns the Parent not to use the same Real-Debrid account from another connection while preparation is active, reports per-programme state, and permits one active run per Household. Stopping prevents further work but deliberately leaves already-added Real-Debrid jobs intact.
+The Parent Page is the only place that can start or stop a run. A prominent pre-start warning and confirmation tell the Parent not to use the Channel in Stremio or use the same Real-Debrid account anywhere while preparation is active. Cloud-service use without Real-Debrid Remote Traffic and apparent account sharing may lead to account suspension or token invalidation. The page reports per-programme state and permits one active run per Household. Stopping prevents further work but deliberately leaves already-added Real-Debrid jobs intact.
 
 Consequences:
 
