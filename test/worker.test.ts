@@ -2,7 +2,8 @@ import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeRealDebridCredential } from "../src/real-debrid-credentials";
 import { issueStreamToken } from "../src/secrets";
-import { requestTvProgramme } from "../src/tv-channel";
+import { cancelTvPreparationRun, createTvPreparationRun, tvPreparationRun } from "../src/tv-preparation";
+import { requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -123,8 +124,23 @@ beforeEach(async () => {
     unavailable_at TEXT NOT NULL, retry_at TEXT NOT NULL,
     PRIMARY KEY (household_id, video_id)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_preparation_runs (
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, status TEXT NOT NULL,
+    requested_count INTEGER NOT NULL, started_at TEXT, deadline_at TEXT NOT NULL,
+    completed_at TEXT, failure_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  )`).run();
+  await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS tv_preparation_runs_active_household_idx
+    ON tv_preparation_runs (household_id) WHERE status IN ('queued', 'running')`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_preparation_items (
+    run_id TEXT NOT NULL, position INTEGER NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    show_title TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, episode_title TEXT NOT NULL,
+    status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, quality TEXT, filename TEXT, info_hash TEXT,
+    message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, position)
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
+  await env.DB.prepare("DELETE FROM tv_preparation_items").run();
+  await env.DB.prepare("DELETE FROM tv_preparation_runs").run();
   await env.DB.prepare("DELETE FROM unavailable_episodes").run();
   await env.DB.prepare("DELETE FROM stream_candidate_failures").run();
   await env.DB.prepare("DELETE FROM stream_selections").run();
@@ -1067,6 +1083,42 @@ describe("rolling TV Channel Schedule", () => {
     });
     return sessionHeaders(response);
   }
+
+  it("snapshots a configurable Preparation Run, prevents overlap, and stops unfinished work", async () => {
+    const { created } = await arrangeShows(2);
+    const schedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const now = new Date("2026-08-01T10:00:00.000Z");
+    const run = await createTvPreparationRun(env.DB, created.householdId, schedule, 3, 8, now);
+
+    expect(run).toMatchObject({
+      status: "queued",
+      requestedCount: 3,
+      deadlineAt: "2026-08-01T18:00:00.000Z",
+      counts: { queued: 3, ready: 0 },
+    });
+    expect(run.items.map((item) => item.videoId)).toEqual(schedule.slice(0, 3).map((item) => item.episode.id));
+    await expect(createTvPreparationRun(env.DB, created.householdId, schedule, 1, 1, now))
+      .rejects.toThrow("preparation already active");
+
+    const cancelled = await cancelTvPreparationRun(env.DB, created.householdId, new Date("2026-08-01T10:05:00.000Z"));
+    expect(cancelled).toMatchObject({ status: "cancelled", counts: { cancelled: 3 } });
+    expect((await tvPreparationRun(env.DB, created.householdId))?.items.every((item) => item.message === "Stopped by Parent")).toBe(true);
+  });
+
+  it("protects Preparation Run status and validates manual start settings", async () => {
+    const { created } = await arrangeShows(1);
+    const endpoint = `https://kids.test/api/households/${secretFrom(created)}/tv-preparation`;
+    expect((await SELF.fetch(endpoint)).status).toBe(401);
+    const headers = await parentHeaders(created);
+    const invalid = await SELF.fetch(endpoint, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ count: 21, windowHours: 8 }),
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "Choose between 1 and 20 programmes." });
+    expect(await (await SELF.fetch(endpoint, { headers })).json()).toEqual({ run: null });
+  });
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
     const { base } = await arrangeShows(3);

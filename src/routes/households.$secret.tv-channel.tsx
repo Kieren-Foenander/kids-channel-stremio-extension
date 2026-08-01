@@ -7,7 +7,8 @@ import { StateBadge } from "../components/StateBadge";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Skeleton } from "../components/ui/skeleton";
-import { useTvChannel } from "../lib/channel-queries";
+import { NativeSelect } from "../components/ui/native-select";
+import { useTvChannel, useTvPreparation } from "../lib/channel-queries";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
 export const Route = createFileRoute("/households/$secret/tv-channel")({ component: TvChannelPage });
@@ -41,6 +42,27 @@ type TvState = {
   canUndo: boolean;
 };
 
+type PreparationStatus = "queued" | "running" | "completed" | "cancelled" | "failed";
+type PreparationItemStatus = "queued" | "trying" | "downloading" | "ready" | "unavailable" | "cancelled";
+type PreparationRun = {
+  id: string;
+  status: PreparationStatus;
+  requestedCount: number;
+  deadlineAt: string;
+  failureReason?: string;
+  counts: Record<PreparationItemStatus, number>;
+  items: Array<{
+    position: number;
+    videoId: string;
+    showTitle: string;
+    season: number;
+    episode: number;
+    episodeTitle: string;
+    status: PreparationItemStatus;
+    message?: string;
+  }>;
+};
+
 const HISTORY_PREVIEW_SIZE = 5;
 
 function episodeLabel(episode: Episode) {
@@ -52,17 +74,48 @@ function TvChannelPage() {
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
   const channelQuery = useTvChannel<TvState>(secret);
+  const preparationQuery = useTvPreparation<{ run: PreparationRun | null }>(secret);
   const state = channelQuery.data;
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [mutationStatus, setMutationStatus] = useState("");
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingRegeneration, setConfirmingRegeneration] = useState(false);
+  const [confirmingPreparation, setConfirmingPreparation] = useState(false);
+  const [preparationCount, setPreparationCount] = useState(20);
+  const [preparationHours, setPreparationHours] = useState(8);
+  const [preparationMessage, setPreparationMessage] = useState("");
+  const [preparationFailed, setPreparationFailed] = useState(false);
   const actionMutation = useMutation({
     mutationFn: async (kind: "undo" | "regenerate") => {
       const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
       return parentApi<{ message?: string }>(`${base}${path}`, { method: "POST" });
     },
   });
+  const preparationMutation = useMutation({
+    mutationFn: (action: "start" | "cancel") => parentApi<{ run: PreparationRun }>(
+      action === "start" ? `${base}/tv-preparation` : `${base}/tv-preparation/cancel`,
+      action === "start"
+        ? { method: "POST", body: { count: Math.min(preparationCount, state?.schedule.length ?? 20), windowHours: preparationHours } }
+        : { method: "POST" },
+    ),
+  });
+
+  async function changePreparation(action: "start" | "cancel") {
+    if (preparationMutation.isPending) return;
+    setPreparationMessage("");
+    setPreparationFailed(false);
+    try {
+      await preparationMutation.mutateAsync(action);
+      await queryClient.invalidateQueries({ queryKey: parentKeys.tvPreparation(secret) });
+      setPreparationMessage(action === "start"
+        ? "Preparation started. You can close this page while Cloudflare continues."
+        : "Preparation stopped. Real-Debrid keeps anything already added or cached.");
+    } catch (error) {
+      setPreparationFailed(true);
+      setPreparationMessage(apiErrorMessage(error, `Preparation could not be ${action === "start" ? "started" : "stopped"}. Check your connection and try again.`));
+      throw error;
+    }
+  }
 
   async function performAction(kind: "undo" | "regenerate") {
     if (actionMutation.isPending) return;
@@ -83,6 +136,9 @@ function TvChannelPage() {
   const mutation = actionMutation.isPending ? actionMutation.variables : null;
   const history = state?.recentPlayback ?? [];
   const visibleHistory = historyExpanded ? history : history.slice(0, HISTORY_PREVIEW_SIZE);
+  const preparation = preparationQuery.data?.run;
+  const preparationActive = preparation?.status === "queued" || preparation?.status === "running";
+  const countLimit = Math.max(1, Math.min(20, state?.schedule.length ?? 20));
 
   return (
     <section className="grid gap-10" aria-labelledby="page-heading">
@@ -111,6 +167,61 @@ function TvChannelPage() {
                 : <p className="mt-2 text-sm text-muted-foreground">Add or resume an approved show to start the TV Channel.</p>}
             </div>
             {state.current?.poster && <img src={state.current.poster} alt={`Poster for ${state.current.showTitle}`} className="h-36 w-24 shrink-0 rounded-[3px] object-cover max-sm:h-27 max-sm:w-18" />}
+          </section>
+
+          <section className="rounded-[4px] border bg-card p-5" aria-labelledby="preparation-heading">
+            <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+              <div className="max-w-2xl">
+                <Ident className="mb-2">Real-Debrid</Ident>
+                <h2 id="preparation-heading" className="text-xl font-semibold tracking-[-0.01em]">Prepare for later</h2>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Ask Real-Debrid to cache programmes from this Channel Schedule. Cloudflare keeps trying usable alternatives during the selected window, even after you close this page.</p>
+              </div>
+              {!preparationActive && (
+                <div className="grid shrink-0 grid-cols-2 gap-2 max-sm:w-full">
+                  <label className="grid gap-1 text-xs font-medium text-muted-foreground">Programmes
+                    <NativeSelect value={Math.min(preparationCount, countLimit)} onChange={(event) => setPreparationCount(Number(event.target.value))}>
+                      {Array.from({ length: countLimit }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}
+                    </NativeSelect>
+                  </label>
+                  <label className="grid gap-1 text-xs font-medium text-muted-foreground">Time window
+                    <NativeSelect value={preparationHours} onChange={(event) => setPreparationHours(Number(event.target.value))}>
+                      <option value={1}>1 hour</option>
+                      <option value={4}>4 hours</option>
+                      <option value={8}>8 hours</option>
+                    </NativeSelect>
+                  </label>
+                  <Button type="button" className="col-span-2" disabled={!state.schedule.length || preparationMutation.isPending} onClick={() => setConfirmingPreparation(true)}>Prepare schedule</Button>
+                </div>
+              )}
+            </div>
+
+            {preparation && (
+              <div className="mt-5 border-t pt-4">
+                {preparationActive && <p className="mb-4 rounded-[4px] border border-signal/40 bg-signal/10 px-3 py-2 text-sm font-medium">While this is active, avoid using this Real-Debrid account from another connection. Stop the run before resuming normal use.</p>}
+                <div className="flex flex-wrap items-center gap-2">
+                  <StateBadge current={preparationActive}>{preparationStatusLabel(preparation.status)}</StateBadge>
+                  <span className="font-mono text-xs text-muted-foreground">{preparation.counts.ready}/{preparation.requestedCount} ready</span>
+                  {preparation.counts.downloading > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.downloading} downloading</span>}
+                  {preparation.counts.trying + preparation.counts.queued > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.trying + preparation.counts.queued} trying</span>}
+                  {preparation.counts.unavailable > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.unavailable} unavailable</span>}
+                  {preparationActive && <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={preparationMutation.isPending} onClick={() => void changePreparation("cancel").catch(() => undefined)}>{preparationMutation.variables === "cancel" ? "Stopping…" : "Stop preparation"}</Button>}
+                </div>
+                {preparation.failureReason && <p className="mt-3 text-sm text-destructive">{preparation.failureReason}</p>}
+                <ol className="mt-4 grid gap-2" aria-label="Preparation progress">
+                  {preparation.items.map((item) => (
+                    <li key={`${item.position}-${item.videoId}`} className="flex min-w-0 items-center gap-3 border-t px-1 pt-2 text-sm">
+                      <div className="min-w-0 flex-1">
+                        <strong className="block truncate font-medium">{item.showTitle}</strong>
+                        <span className="block truncate font-mono text-xs text-muted-foreground">S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")} — {item.episodeTitle}</span>
+                      </div>
+                      <StateBadge current={item.status === "ready"}>{preparationItemLabel(item.status)}</StateBadge>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+            {preparationQuery.isError && <p className="mt-4 text-sm text-destructive">Preparation status could not be loaded.</p>}
+            <p className={preparationFailed ? "mt-4 text-sm font-medium text-destructive" : "mt-4 text-sm font-medium text-accent"} role={preparationFailed ? "alert" : "status"} aria-live="polite">{preparationMessage}</p>
           </section>
 
           <section aria-labelledby="schedule-heading">
@@ -168,8 +279,24 @@ function TvChannelPage() {
       )}
 
       <ConfirmationDialog open={confirmingRegeneration} pending={mutation === "regenerate"} onOpenChange={setConfirmingRegeneration} onConfirm={() => performAction("regenerate")} />
+      <PreparationDialog
+        open={confirmingPreparation}
+        pending={preparationMutation.isPending}
+        count={Math.min(preparationCount, countLimit)}
+        hours={preparationHours}
+        onOpenChange={setConfirmingPreparation}
+        onConfirm={() => changePreparation("start")}
+      />
     </section>
   );
+}
+
+function preparationStatusLabel(status: PreparationStatus) {
+  return ({ queued: "Starting", running: "Preparing", completed: "Finished", cancelled: "Stopped", failed: "Failed" } as const)[status];
+}
+
+function preparationItemLabel(status: PreparationItemStatus) {
+  return ({ queued: "Queued", trying: "Trying", downloading: "Downloading", ready: "Ready", unavailable: "Unavailable", cancelled: "Stopped" } as const)[status];
 }
 
 function ChannelSkeleton() {
@@ -193,6 +320,23 @@ function ConfirmationDialog({ open, pending, onOpenChange, onConfirm }: { open: 
         <DialogFooter>
           <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Regenerating…" : "Regenerate selections"}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function PreparationDialog({ open, pending, count, hours, onOpenChange, onConfirm }: { open: boolean; pending: boolean; count: number; hours: number; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
+  return (
+    <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
+      <DialogContent className="data-closed:hidden" showCloseButton={false}>
+        <DialogHeader>
+          <DialogTitle>Prepare {count} programme{count === 1 ? "" : "s"}?</DialogTitle>
+          <DialogDescription>For up to {hours} hour{hours === 1 ? "" : "s"}, Cloudflare will send torrent operations to Real-Debrid and try alternate sources. Do not use this Real-Debrid account from another connection until the run finishes or you stop it.</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Starting…" : "Start preparation"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

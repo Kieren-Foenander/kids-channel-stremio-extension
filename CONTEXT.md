@@ -36,6 +36,10 @@ _Avoid_: Now playing, queue position
 The Current Programme followed by the upcoming programmes selected for continuous playback.
 _Avoid_: Queue, playlist
 
+**Preparation Run**:
+A Parent-triggered, time-bounded background attempt to make programmes in the current Channel Schedule ready in Real-Debrid. It does not advance the Channel Schedule or Show Progress.
+_Avoid_: Seeder, download queue, preload
+
 **Unavailable Episode**:
 An expected episode for which the configured stream provider cannot supply an acceptable cached stream. It remains the show's next episode while the TV Channel temporarily chooses another show.
 _Avoid_: Skipped episode, missing episode

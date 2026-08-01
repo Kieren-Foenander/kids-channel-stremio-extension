@@ -49,6 +49,13 @@ import {
 } from "./stream-resolution";
 import { selectCachedStream, type StreamContentType } from "./stream-selection";
 import {
+  cancelTvPreparationRun,
+  createTvPreparationRun,
+  tvPreparationRun,
+  TvSchedulePreparationWorkflow,
+  type TvPreparationWorkflowParams,
+} from "./tv-preparation";
+import {
   clearUnavailableTvProgramme,
   deferUnavailableTvProgramme,
   parentTvChannelState,
@@ -69,7 +76,10 @@ export interface Env {
   REAL_DEBRID_ORIGIN?: string;
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
+  TV_PREPARATION: Workflow<TvPreparationWorkflowParams>;
 }
+
+export { TvSchedulePreparationWorkflow };
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -532,6 +542,67 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       return json(await parentTvChannelState(env.DB, household.id, env.TV_SCHEDULE_SEED));
+    }
+
+    const preparationMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-preparation$/);
+    if (preparationMatch && (request.method === "GET" || request.method === "POST")) {
+      const household = await findHousehold(env.DB, preparationMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      if (request.method === "GET") {
+        return json({ run: await tvPreparationRun(env.DB, household.id) }, 200, { "cache-control": "no-store" });
+      }
+      let input: { count?: unknown; windowHours?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      const count = Number(input.count);
+      const windowHours = Number(input.windowHours);
+      if (!Number.isInteger(count) || count < 1 || count > 20) {
+        return json({ error: "Choose between 1 and 20 programmes." }, 400);
+      }
+      if (![1, 4, 8].includes(windowHours)) {
+        return json({ error: "Choose a preparation window of 1, 4, or 8 hours." }, 400);
+      }
+      if (!(await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Configure Real-Debrid before starting a Preparation Run." }, 409);
+      }
+      const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
+      if (!schedule.length) return json({ error: "The TV Channel has no programmes to prepare." }, 409);
+      try {
+        const run = await createTvPreparationRun(env.DB, household.id, schedule, count, windowHours);
+        try {
+          await env.TV_PREPARATION.create({
+            id: run.id,
+            params: { runId: run.id, householdId: household.id },
+            retention: { successRetention: "7 days", errorRetention: "7 days" },
+          });
+        } catch (error) {
+          const timestamp = new Date().toISOString();
+          await env.DB.prepare(`UPDATE tv_preparation_runs
+            SET status = 'failed', failure_reason = ?, completed_at = ?, updated_at = ? WHERE id = ?`)
+            .bind("Cloudflare could not start the Preparation Run.", timestamp, timestamp, run.id).run();
+          throw error;
+        }
+        return json({ run }, 202, { "cache-control": "no-store" });
+      } catch (error) {
+        if (error instanceof Error && error.message === "preparation already active") {
+          return json({ error: "A Preparation Run is already active for this Household." }, 409);
+        }
+        console.error(JSON.stringify({ message: "TV preparation could not start", reason: error instanceof Error ? error.message : "unknown error" }));
+        return json({ error: "The Preparation Run could not be started." }, 503);
+      }
+    }
+
+    const preparationCancelMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-preparation\/cancel$/);
+    if (request.method === "POST" && preparationCancelMatch) {
+      const household = await findHousehold(env.DB, preparationCancelMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      const run = await cancelTvPreparationRun(env.DB, household.id);
+      if (!run) return json({ error: "There is no active Preparation Run to stop." }, 409);
+      try { await (await env.TV_PREPARATION.get(run.id)).terminate(); } catch { /* database status prevents further useful work */ }
+      return json({ run }, 200, { "cache-control": "no-store" });
     }
 
     const movieStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-state$/);
