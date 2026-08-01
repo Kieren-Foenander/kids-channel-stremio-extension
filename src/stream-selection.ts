@@ -6,6 +6,9 @@ const CACHE_CHECK_TIMEOUT_MS = 5_000;
 const POLL_INTERVAL_MS = 250;
 const MAX_CACHE_CHECKS = 10;
 const SELECTION_TTL_MS = 24 * 60 * 60 * 1000;
+const DOWNLOAD_STALL_TIMEOUT_MS = 5 * 60 * 1000;
+const CANDIDATE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+const TERMINAL_TORRENT_STATUSES = new Set(["magnet_error", "error", "virus", "dead"]);
 
 export type StreamContentType = "series" | "movie";
 
@@ -58,6 +61,9 @@ interface TorrentInfo {
   status: string;
   files: TorrentFile[];
   links: string[];
+  progress: number;
+  speed: number;
+  seeders: number;
 }
 
 interface ZileanResult {
@@ -89,6 +95,8 @@ interface StoredSelection {
   selected_at: string;
   stale_at: string;
   download_pending: number;
+  last_progress: number;
+  last_progress_at: string | null;
 }
 
 interface StoredSelectionState {
@@ -402,6 +410,9 @@ function torrentInfo(value: unknown): TorrentInfo {
     status: record.status,
     files,
     links: record.links.filter((link): link is string => typeof link === "string"),
+    progress: number(record.progress),
+    speed: number(record.speed),
+    seeders: number(record.seeders),
   };
 }
 
@@ -417,24 +428,32 @@ async function waitForTorrent(
   timeoutMs: number,
 ): Promise<TorrentInfo> {
   const startedAt = performance.now();
+  let lastInfo: TorrentInfo | null = null;
   do {
     const info = torrentInfo(await realDebridJson(
       origin,
       token,
       `/torrents/info/${encodeURIComponent(id)}`,
     ));
+    lastInfo = info;
     if (ready(info)) return info;
-    if (["magnet_error", "error", "virus", "dead"].includes(info.status)) {
-      throw new Error(`Real-Debrid torrent entered ${info.status} state`);
+    if (TERMINAL_TORRENT_STATUSES.has(info.status)) {
+      throw new TorrentTerminalError(info.status);
     }
     await pause(POLL_INTERVAL_MS);
   } while (performance.now() - startedAt < timeoutMs);
-  throw new TorrentDownloadPendingError();
+  throw new TorrentDownloadPendingError(lastInfo);
 }
 
 class TorrentDownloadPendingError extends Error {
-  constructor() {
+  constructor(readonly info: TorrentInfo | null) {
     super("torrent is downloading");
+  }
+}
+
+class TorrentTerminalError extends Error {
+  constructor(readonly status: string) {
+    super(`Real-Debrid torrent entered ${status} state`);
   }
 }
 
@@ -462,7 +481,12 @@ async function cachedCandidate(
   programme: CanonicalProgramme,
   token: string,
   env: StreamSelectionEnv,
-): Promise<{ torrentId: string; file: TorrentFile; downloadPending: boolean } | null> {
+): Promise<{
+  torrentId: string;
+  file: TorrentFile;
+  downloadPending: boolean;
+  progress: number;
+} | { rejectedReason: string } | null> {
   const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
   let addedId: string | null = null;
   let matchedFile: TorrentFile | null = null;
@@ -489,18 +513,30 @@ async function cachedCandidate(
       body: formBody({ files: String(file.id) }),
     });
     stage = "confirm-cache";
-    await waitForTorrent(
+    const downloaded = await waitForTorrent(
       origin,
       token,
       addedId,
       (info) => info.status === "downloaded" && info.links.length > 0,
       CACHE_CHECK_TIMEOUT_MS,
     );
-    return { torrentId: addedId, file, downloadPending: false };
+    return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
     if (error instanceof TorrentDownloadPendingError && addedId && matchedFile && stage === "confirm-cache") {
-      return { torrentId: addedId, file: matchedFile, downloadPending: true };
+      return {
+        torrentId: addedId,
+        file: matchedFile,
+        downloadPending: true,
+        progress: error.info?.progress ?? 0,
+      };
     }
+    const rejectedReason = error instanceof TorrentTerminalError
+      ? error.status
+      : error instanceof TorrentDownloadPendingError && stage === "load-files"
+        ? "metadata_timeout"
+        : stage === "match-file"
+          ? "file_mismatch"
+          : null;
     console.warn(JSON.stringify({
       message: "stream candidate rejected",
       stage,
@@ -509,8 +545,70 @@ async function cachedCandidate(
     if (addedId) {
       try { await deleteTorrent(origin, token, addedId); } catch { /* best-effort cleanup */ }
     }
-    return null;
+    return rejectedReason ? { rejectedReason } : null;
   }
+}
+
+async function quarantineInfoHash(
+  db: D1Database,
+  householdId: string,
+  programmeId: string,
+  contentType: StreamContentType,
+  videoId: string,
+  hash: string,
+  reason: string,
+  now: Date,
+): Promise<void> {
+  await db.prepare(`INSERT INTO stream_candidate_failures
+    (household_id, programme_id, content_type, video_id, info_hash, reason, failed_at, retry_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (household_id, content_type, video_id, info_hash) DO UPDATE SET
+      reason = excluded.reason,
+      failed_at = excluded.failed_at,
+      retry_at = excluded.retry_at`)
+    .bind(
+      householdId,
+      programmeId,
+      contentType,
+      videoId,
+      hash,
+      reason,
+      now.toISOString(),
+      new Date(now.getTime() + CANDIDATE_RETRY_DELAY_MS).toISOString(),
+    )
+    .run();
+}
+
+async function quarantineCandidate(
+  db: D1Database,
+  row: StoredSelection,
+  reason: string,
+  now: Date,
+): Promise<void> {
+  await quarantineInfoHash(
+    db,
+    row.household_id,
+    row.programme_id,
+    row.content_type,
+    row.video_id,
+    row.info_hash,
+    reason,
+    now,
+  );
+}
+
+async function quarantinedInfoHashes(
+  db: D1Database,
+  householdId: string,
+  contentType: StreamContentType,
+  videoId: string,
+  now: Date,
+): Promise<Set<string>> {
+  const { results } = await db.prepare(`SELECT info_hash FROM stream_candidate_failures
+    WHERE household_id = ? AND content_type = ? AND video_id = ? AND retry_at > ?`)
+    .bind(householdId, contentType, videoId, now.toISOString())
+    .all<{ info_hash: string }>();
+  return new Set(results.map((row) => row.info_hash));
 }
 
 async function cachedSelection(
@@ -531,21 +629,13 @@ async function cachedSelection(
     const selection = storedSelection(row);
     if (row.download_pending !== 1) return { selection, downloadPending: false };
     const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
+    let info: TorrentInfo;
     try {
-      const info = torrentInfo(await realDebridJson(
+      info = torrentInfo(await realDebridJson(
         origin,
         realDebridToken,
         `/torrents/info/${encodeURIComponent(row.torrent_id)}`,
       ));
-      if (info.status === "downloaded" && info.links.length > 0) {
-        await db.prepare(`UPDATE stream_selections SET download_pending = 0
-          WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
-          .bind(householdId, contentType, videoId, row.torrent_id).run();
-        return { selection, downloadPending: false };
-      }
-      if (!["magnet_error", "error", "virus", "dead"].includes(info.status)) {
-        return { selection, downloadPending: true };
-      }
     } catch (error) {
       console.warn(JSON.stringify({
         message: "pending stream status unavailable",
@@ -553,12 +643,43 @@ async function cachedSelection(
       }));
       return { selection, downloadPending: true };
     }
+    if (info.status === "downloaded" && info.links.length > 0) {
+      await db.prepare(`UPDATE stream_selections SET download_pending = 0
+        WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
+        .bind(householdId, contentType, videoId, row.torrent_id).run();
+      return { selection, downloadPending: false };
+    }
+    if (!TERMINAL_TORRENT_STATUSES.has(info.status)) {
+      const lastHealthyAt = Date.parse(row.last_progress_at ?? row.selected_at);
+      if (info.progress > row.last_progress || info.speed > 0) {
+        await db.prepare(`UPDATE stream_selections
+          SET last_progress = ?, last_progress_at = ?
+          WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
+          .bind(
+            Math.max(info.progress, row.last_progress),
+            now.toISOString(),
+            householdId,
+            contentType,
+            videoId,
+            row.torrent_id,
+          )
+          .run();
+        return { selection, downloadPending: true };
+      }
+      if (!Number.isFinite(lastHealthyAt) || now.getTime() - lastHealthyAt < DOWNLOAD_STALL_TIMEOUT_MS) {
+        return { selection, downloadPending: true };
+      }
+      await quarantineCandidate(db, row, "stalled", now);
+    } else {
+      await quarantineCandidate(db, row, info.status, now);
+    }
     await db.prepare(`DELETE FROM stream_selections
       WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
       .bind(householdId, contentType, videoId, row.torrent_id).run();
     try { await deleteTorrent(origin, realDebridToken, row.torrent_id); } catch { /* allow a new candidate */ }
     return null;
   }
+  if (row.download_pending === 1) await quarantineCandidate(db, row, "expired", now);
   await db.prepare(`DELETE FROM stream_selections
     WHERE household_id = ? AND content_type = ? AND video_id = ?`)
     .bind(householdId, contentType, videoId)
@@ -577,11 +698,12 @@ async function storeSelection(
   db: D1Database,
   selection: StreamSelection,
   downloadPending = false,
+  progress = 0,
 ): Promise<StoredSelectionState> {
   await db.prepare(`INSERT INTO stream_selections
     (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
-      quality, seeders, selected_at, stale_at, download_pending)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      quality, seeders, selected_at, stale_at, download_pending, last_progress, last_progress_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (household_id, content_type, video_id) DO NOTHING`)
     .bind(
       selection.householdId,
@@ -597,6 +719,8 @@ async function storeSelection(
       selection.selectedAt,
       selection.staleAt,
       downloadPending ? 1 : 0,
+      progress,
+      downloadPending ? selection.selectedAt : null,
     )
     .run();
   const stored = await db.prepare(`SELECT * FROM stream_selections
@@ -670,12 +794,32 @@ export async function selectCachedStream(
   const programme = await canonicalProgramme(db, householdId, contentType, videoId);
   if (!programme) return null;
 
+  const quarantinedHashes = await quarantinedInfoHashes(db, householdId, contentType, videoId, now);
   const candidates = await discover(programme, env);
-  const eligibleCandidates = candidates.filter((candidate) => !excludedInfoHashes.has(candidate.infoHash));
-  let pending: { candidate: DiscoveryCandidate; torrentId: string; file: TorrentFile } | null = null;
+  const eligibleCandidates = candidates.filter((candidate) =>
+    !excludedInfoHashes.has(candidate.infoHash) && !quarantinedHashes.has(candidate.infoHash));
+  let pending: {
+    candidate: DiscoveryCandidate;
+    torrentId: string;
+    file: TorrentFile;
+    progress: number;
+  } | null = null;
   for (const candidate of eligibleCandidates.slice(0, MAX_CACHE_CHECKS)) {
     const cached = await cachedCandidate(candidate, programme, realDebridToken, env);
     if (!cached) continue;
+    if ("rejectedReason" in cached) {
+      await quarantineInfoHash(
+        db,
+        householdId,
+        programme.programmeId,
+        contentType,
+        videoId,
+        candidate.infoHash,
+        cached.rejectedReason,
+        now,
+      );
+      continue;
+    }
     if (cached.downloadPending) {
       if (contentType !== "series") {
         try {
@@ -687,7 +831,12 @@ export async function selectCachedStream(
         } catch { /* movies retain the existing cached-only behavior */ }
         continue;
       }
-      if (!pending) pending = { candidate, torrentId: cached.torrentId, file: cached.file };
+      if (!pending) pending = {
+        candidate,
+        torrentId: cached.torrentId,
+        file: cached.file,
+        progress: cached.progress,
+      };
       else {
         try {
           await deleteTorrent(
@@ -740,7 +889,7 @@ export async function selectCachedStream(
       now,
     );
     try {
-      const stored = await storeSelection(db, selection, true);
+      const stored = await storeSelection(db, selection, true, pending.progress);
       if (stored.selection.torrentId !== selection.torrentId) {
         try {
           await deleteTorrent(

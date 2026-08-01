@@ -14,5 +14,6 @@ Consequences:
 - Real-Debrid media flows directly to Stremio and signed download URLs are neither persisted nor logged.
 - Provider failure is explicit Channel state rather than an empty stream list that strands playback.
 - Initial selection checks up to ten ranked cached candidates, preserving provider relevance when quality and seed availability tie. If a chosen torrent or restricted link later disappears (including HTTP 451 removals), resolution discards it and tries up to two different hashes inside the same Stremio request. Rate limits and other transient Real-Debrid failures do not invalidate a known-good selection.
+- A pending series torrent is retained while its Real-Debrid progress increases. If it makes no progress for five minutes, the Worker marks that hash stalled for the episode, removes its Real-Debrid job, and attempts the next ranked candidate in the same request. Stalled and terminal hashes are retried after 24 hours so a recovered swarm is not rejected forever. Torrent release titles remain advisory; canonical episode identity and file matching determine eligibility.
 
 This supersedes ADRs 0002 and 0004.
