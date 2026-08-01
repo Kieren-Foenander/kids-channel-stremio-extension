@@ -21,7 +21,16 @@ export interface StreamSelectionEnv {
 export interface StreamSelectionOptions {
   maxCacheChecks?: number;
   cacheCheckTimeoutMs?: number;
+  onOutcome?: (outcome: StreamSelectionOutcome) => void;
 }
+
+export type StreamSelectionOutcome =
+  | { status: "ready"; candidateCount: number }
+  | { status: "downloading"; candidateCount: number }
+  | { status: "no_candidates"; candidateCount: 0 }
+  | { status: "candidates_exhausted"; candidateCount: number }
+  | { status: "candidate_rejected"; candidateCount: number; reason: string }
+  | { status: "temporarily_unavailable"; candidateCount: number };
 
 export interface StreamSelection {
   householdId: string;
@@ -235,7 +244,9 @@ export function releaseMatchesEpisode(title: string, season: number, episode: nu
 function structuredEpisodeMatch(result: ZileanResult, season: number, episode: number): boolean {
   const seasons = Array.isArray(result.seasons) ? result.seasons.map(number) : [];
   const episodes = Array.isArray(result.episodes) ? result.episodes.map(number) : [];
-  return seasons.includes(season) && episodes.includes(episode);
+  // Zilean represents season packs with the season populated and no individual episodes.
+  // The torrent's file list remains the authoritative episode check before selection.
+  return seasons.includes(season) && (episodes.length === 0 || episodes.includes(episode));
 }
 
 function zileanCandidates(value: unknown, programme: CanonicalProgramme): DiscoveryCandidate[] {
@@ -333,7 +344,10 @@ async function providerJson(url: string, init?: RequestInit): Promise<unknown> {
   return response.json();
 }
 
-async function discover(programme: CanonicalProgramme, env: StreamSelectionEnv): Promise<DiscoveryCandidate[]> {
+async function discover(programme: CanonicalProgramme, env: StreamSelectionEnv): Promise<{
+  candidates: DiscoveryCandidate[];
+  providerAvailable: boolean;
+}> {
   const zileanUrl = new URL("/dmm/filtered", env.ZILEAN_ORIGIN || ZILEAN_ORIGIN);
   zileanUrl.searchParams.set("ImdbId", programme.imdbId);
   if (programme.season !== undefined) zileanUrl.searchParams.set("Season", String(programme.season));
@@ -365,7 +379,10 @@ async function discover(programme: CanonicalProgramme, env: StreamSelectionEnv):
     ...(results[0].status === "fulfilled" ? zileanCandidates(results[0].value, programme) : []),
     ...(results[1].status === "fulfilled" ? knabenCandidates(results[1].value, programme) : []),
   ];
-  return rankCandidates(candidates);
+  return {
+    candidates: rankCandidates(candidates),
+    providerAvailable: results.some((result) => result.status === "fulfilled"),
+  };
 }
 
 function formBody(values: Record<string, string>): URLSearchParams {
@@ -387,8 +404,14 @@ async function realDebridJson(
     headers,
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
-  if (!response.ok) throw new Error(`Real-Debrid returned HTTP ${response.status}`);
+  if (!response.ok) throw new RealDebridRequestError(response.status);
   return response.status === 204 ? null : response.json();
+}
+
+class RealDebridRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`Real-Debrid returned HTTP ${status}`);
+  }
 }
 
 function torrentId(value: unknown): string {
@@ -536,13 +559,23 @@ async function cachedCandidate(
         progress: error.info?.progress ?? 0,
       };
     }
+    const candidateHttpFailure = error instanceof RealDebridRequestError
+      && error.status >= 400
+      && error.status < 500
+      && ![401, 403, 429].includes(error.status);
     const rejectedReason = error instanceof TorrentTerminalError
       ? error.status
       : error instanceof TorrentDownloadPendingError && stage === "load-files"
         ? "metadata_timeout"
         : stage === "match-file"
           ? "file_mismatch"
-          : null;
+          : candidateHttpFailure && stage === "add-magnet"
+            ? "magnet_rejected"
+            : candidateHttpFailure && stage === "select-file"
+              ? "file_selection_failed"
+              : candidateHttpFailure
+                ? "torrent_rejected"
+                : null;
     console.warn(JSON.stringify({
       message: "stream candidate rejected",
       stage,
@@ -773,6 +806,7 @@ export async function selectCachedStream(
   excludedInfoHashes: ReadonlySet<string> = new Set(),
   options: StreamSelectionOptions = {},
 ): Promise<StreamSelection | null> {
+  const report = options.onOutcome ?? (() => undefined);
   const existing = await cachedSelection(
     db,
     householdId,
@@ -783,6 +817,7 @@ export async function selectCachedStream(
     now,
   );
   if (existing && !excludedInfoHashes.has(existing.selection.infoHash)) {
+    report({ status: existing.downloadPending ? "downloading" : "ready", candidateCount: 1 });
     return existing.downloadPending ? null : existing.selection;
   }
   if (existing) {
@@ -799,10 +834,14 @@ export async function selectCachedStream(
     } catch { /* an excluded remote torrent must not block reselection */ }
   }
   const programme = await canonicalProgramme(db, householdId, contentType, videoId);
-  if (!programme) return null;
+  if (!programme) {
+    report({ status: "no_candidates", candidateCount: 0 });
+    return null;
+  }
 
   const quarantinedHashes = await quarantinedInfoHashes(db, householdId, contentType, videoId, now);
-  const candidates = await discover(programme, env);
+  const discovery = await discover(programme, env);
+  const candidates = discovery.candidates;
   const eligibleCandidates = candidates.filter((candidate) =>
     !excludedInfoHashes.has(candidate.infoHash) && !quarantinedHashes.has(candidate.infoHash));
   let pending: {
@@ -811,12 +850,18 @@ export async function selectCachedStream(
     file: TorrentFile;
     progress: number;
   } | null = null;
+  let lastRejectedReason: string | null = null;
+  let temporarilyUnavailable = false;
   const maxCacheChecks = Math.max(1, Math.min(MAX_CACHE_CHECKS, options.maxCacheChecks ?? MAX_CACHE_CHECKS));
   const cacheCheckTimeoutMs = Math.max(POLL_INTERVAL_MS, options.cacheCheckTimeoutMs ?? CACHE_CHECK_TIMEOUT_MS);
   for (const candidate of eligibleCandidates.slice(0, maxCacheChecks)) {
     const cached = await cachedCandidate(candidate, programme, realDebridToken, env, cacheCheckTimeoutMs);
-    if (!cached) continue;
+    if (!cached) {
+      temporarilyUnavailable = true;
+      continue;
+    }
     if ("rejectedReason" in cached) {
+      lastRejectedReason = cached.rejectedReason;
       await quarantineInfoHash(
         db,
         householdId,
@@ -831,6 +876,7 @@ export async function selectCachedStream(
     }
     if (cached.downloadPending) {
       if (contentType !== "series") {
+        lastRejectedReason = "not_cached";
         try {
           await deleteTorrent(
             (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
@@ -879,6 +925,7 @@ export async function selectCachedStream(
           );
         } catch { /* the concurrent winner remains valid */ }
       }
+      report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
       return stored.downloadPending ? null : stored.selection;
     } catch (error) {
       try {
@@ -908,6 +955,7 @@ export async function selectCachedStream(
           );
         } catch { /* the concurrent winner remains valid */ }
       }
+      report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
       return stored.downloadPending ? null : stored.selection;
     } catch (error) {
       try {
@@ -920,5 +968,13 @@ export async function selectCachedStream(
       throw error;
     }
   }
+  if (candidates.length === 0) report({
+    status: discovery.providerAvailable ? "no_candidates" : "temporarily_unavailable",
+    candidateCount: 0,
+  });
+  else if (eligibleCandidates.length === 0) report({ status: "candidates_exhausted", candidateCount: candidates.length });
+  else if (lastRejectedReason) report({ status: "candidate_rejected", candidateCount: candidates.length, reason: lastRejectedReason });
+  else if (temporarilyUnavailable) report({ status: "temporarily_unavailable", candidateCount: candidates.length });
+  else report({ status: "candidates_exhausted", candidateCount: candidates.length });
   return null;
 }

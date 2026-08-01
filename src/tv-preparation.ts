@@ -1,6 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { loadRealDebridCredential } from "./real-debrid-credentials";
-import { selectCachedStream, type StreamSelectionEnv } from "./stream-selection";
+import { selectCachedStream, type StreamSelectionEnv, type StreamSelectionOutcome } from "./stream-selection";
 import type { TvScheduledProgramme } from "./tv-channel";
 
 const ROUND_INTERVAL = "5 minutes";
@@ -76,6 +76,16 @@ interface SelectionStateRow {
   quality: string;
   filename: string;
   info_hash: string;
+}
+
+export function tvPreparationOutcomeMessage(outcome?: StreamSelectionOutcome): string {
+  if (!outcome) return "Looking for a usable source";
+  if (outcome.status === "no_candidates") return "No matching torrent sources found; searching again next round";
+  if (outcome.status === "candidates_exhausted") return "Known sources are temporarily exhausted; searching again next round";
+  if (outcome.status === "candidate_rejected") return "Source rejected; the next round will try another source";
+  if (outcome.status === "temporarily_unavailable") return "Real-Debrid could not inspect this source; it will be retried";
+  if (outcome.status === "downloading") return "Real-Debrid is downloading this source";
+  return "Cached by Real-Debrid";
 }
 
 export interface TvPreparationWorkflowParams {
@@ -217,9 +227,10 @@ async function processBatch(
     .slice(batchIndex * ITEMS_PER_STEP, (batchIndex + 1) * ITEMS_PER_STEP)
     .filter((candidate) => !["ready", "unavailable", "cancelled"].includes(candidate.status));
   for (const item of items) {
+    let outcome: StreamSelectionOutcome | undefined;
     const selection = await selectCachedStream(
       env.DB, householdId, "series", item.videoId, token, env, now, new Set(),
-      { maxCacheChecks: 1, cacheCheckTimeoutMs: 1_000 },
+      { maxCacheChecks: 1, cacheCheckTimeoutMs: 1_000, onOutcome: (value) => { outcome = value; } },
     );
     const stored = await env.DB.prepare(`SELECT download_pending, quality, filename, info_hash FROM stream_selections
       WHERE household_id = ? AND content_type = 'series' AND video_id = ?`)
@@ -229,11 +240,7 @@ async function processBatch(
       : stored
         ? "downloading"
         : "trying";
-    const message = status === "ready"
-      ? "Cached by Real-Debrid"
-      : status === "downloading"
-        ? "Real-Debrid is downloading this source"
-        : "Looking for another usable source";
+    const message = tvPreparationOutcomeMessage(outcome);
     await env.DB.prepare(`UPDATE tv_preparation_items SET status = ?, attempts = attempts + 1,
       quality = ?, filename = ?, info_hash = ?, message = ?, updated_at = ?
       WHERE run_id = ? AND position = ? AND EXISTS (
