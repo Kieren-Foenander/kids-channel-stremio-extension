@@ -1,5 +1,7 @@
 # Use first-party cached stream resolution
 
+Status: Superseded for provider choice by ADR 0009. The first-party resolution boundary remains in force.
+
 Kids Channels will discover torrent candidates itself, verify them against the Household's Real-Debrid account, deterministically select one acceptable cached file, and return exactly one Stremio stream. The Worker stores the Household's Real-Debrid token encrypted and stores only short-lived torrent/file selections. Media bytes never pass through Cloudflare: the playback URL resolves through the Worker and redirects Stremio to a fresh Real-Debrid download URL.
 
 The earlier installed-addon design preserved canonical identity but could not remove Stremio's source picker or let Kids Channels react when a provider had no result. A deployed first-party feasibility probe demonstrated that Worker-originated Real-Debrid operations can hand playback to the client without Comet's cross-zone `Wrong IP` behavior.

@@ -1,4 +1,14 @@
-const REAL_DEBRID_ORIGIN = "https://api.real-debrid.com/rest/1.0";
+import {
+  createTorBoxTorrent,
+  deleteTorBoxTorrent,
+  getTorBoxTorrent,
+  TorBoxRequestError,
+  torBoxTorrentIsTerminal,
+  type TorBoxEnv,
+  type TorBoxFile,
+  type TorBoxTorrent,
+} from "./torbox";
+
 const ZILEAN_ORIGIN = "https://zileanfortheweebs.midnightignite.me";
 const KNABEN_ORIGIN = "https://api.knaben.org";
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -8,12 +18,10 @@ const MAX_CACHE_CHECKS = 10;
 const SELECTION_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const CANDIDATE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
-const TERMINAL_TORRENT_STATUSES = new Set(["magnet_error", "error", "virus", "dead"]);
 
 export type StreamContentType = "series" | "movie";
 
-export interface StreamSelectionEnv {
-  REAL_DEBRID_ORIGIN?: string;
+export interface StreamSelectionEnv extends TorBoxEnv {
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
 }
@@ -65,20 +73,8 @@ interface CanonicalProgramme {
   episode?: number;
 }
 
-interface TorrentFile {
-  id: number;
-  path: string;
-  bytes: number;
-}
-
-interface TorrentInfo {
-  status: string;
-  files: TorrentFile[];
-  links: string[];
-  progress: number;
-  speed: number;
-  seeders: number;
-}
+type TorrentFile = TorBoxFile;
+type TorrentInfo = TorBoxTorrent;
 
 interface ZileanResult {
   raw_title?: unknown;
@@ -385,72 +381,13 @@ async function discover(programme: CanonicalProgramme, env: StreamSelectionEnv):
   };
 }
 
-function formBody(values: Record<string, string>): URLSearchParams {
-  const body = new URLSearchParams();
-  for (const [key, value] of Object.entries(values)) body.set(key, value);
-  return body;
-}
-
-async function realDebridJson(
-  origin: string,
-  token: string,
-  path: string,
-  init?: RequestInit,
-): Promise<unknown> {
-  const headers = new Headers(init?.headers);
-  headers.set("authorization", `Bearer ${token}`);
-  const response = await fetch(`${origin}${path}`, {
-    ...init,
-    headers,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new RealDebridRequestError(response.status);
-  return response.status === 204 ? null : response.json();
-}
-
-class RealDebridRequestError extends Error {
-  constructor(readonly status: number) {
-    super(`Real-Debrid returned HTTP ${status}`);
-  }
-}
-
-function torrentId(value: unknown): string {
-  if (typeof value === "object" && value !== null && "id" in value && typeof value.id === "string" && value.id) {
-    return value.id;
-  }
-  throw new Error("Real-Debrid returned an invalid torrent id");
-}
-
-function torrentInfo(value: unknown): TorrentInfo {
-  if (typeof value !== "object" || value === null) throw new Error("Real-Debrid returned invalid torrent information");
-  const record = value as Record<string, unknown>;
-  if (typeof record.status !== "string" || !Array.isArray(record.files) || !Array.isArray(record.links)) {
-    throw new Error("Real-Debrid returned invalid torrent information");
-  }
-  const files = record.files.flatMap((entry): TorrentFile[] => {
-    if (typeof entry !== "object" || entry === null) return [];
-    const file = entry as Record<string, unknown>;
-    return typeof file.id === "number" && typeof file.path === "string" && typeof file.bytes === "number"
-      ? [{ id: file.id, path: file.path, bytes: file.bytes }]
-      : [];
-  });
-  return {
-    status: record.status,
-    files,
-    links: record.links.filter((link): link is string => typeof link === "string"),
-    progress: number(record.progress),
-    speed: number(record.speed),
-    seeders: number(record.seeders),
-  };
-}
-
 async function pause(milliseconds: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function waitForTorrent(
-  origin: string,
   token: string,
+  env: StreamSelectionEnv,
   id: string,
   ready: (info: TorrentInfo) => boolean,
   timeoutMs: number,
@@ -458,14 +395,10 @@ async function waitForTorrent(
   const startedAt = performance.now();
   let lastInfo: TorrentInfo | null = null;
   do {
-    const info = torrentInfo(await realDebridJson(
-      origin,
-      token,
-      `/torrents/info/${encodeURIComponent(id)}`,
-    ));
+    const info = await getTorBoxTorrent(token, env, id, true);
     lastInfo = info;
     if (ready(info)) return info;
-    if (TERMINAL_TORRENT_STATUSES.has(info.status)) {
+    if (torBoxTorrentIsTerminal(info)) {
       throw new TorrentTerminalError(info.status);
     }
     await pause(POLL_INTERVAL_MS);
@@ -481,7 +414,7 @@ class TorrentDownloadPendingError extends Error {
 
 class TorrentTerminalError extends Error {
   constructor(readonly status: string) {
-    super(`Real-Debrid torrent entered ${status} state`);
+    super(`TorBox torrent entered ${status} state`);
   }
 }
 
@@ -495,20 +428,12 @@ function selectedFile(files: TorrentFile[], programme: CanonicalProgramme): Torr
   return file;
 }
 
-async function deleteTorrent(origin: string, token: string, id: string): Promise<void> {
-  const response = await fetch(`${origin}/torrents/delete/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: { authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok && response.status !== 404) throw new Error(`Real-Debrid cleanup returned HTTP ${response.status}`);
-}
-
 async function cachedCandidate(
   candidate: DiscoveryCandidate,
   programme: CanonicalProgramme,
   token: string,
   env: StreamSelectionEnv,
+  cachedOnly: boolean,
   cacheCheckTimeoutMs = CACHE_CHECK_TIMEOUT_MS,
 ): Promise<{
   torrentId: string;
@@ -516,19 +441,15 @@ async function cachedCandidate(
   downloadPending: boolean;
   progress: number;
 } | { rejectedReason: string } | null> {
-  const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
   let addedId: string | null = null;
   let matchedFile: TorrentFile | null = null;
-  let stage = "add-magnet";
+  let stage = cachedOnly ? "add-cached-torrent" : "add-torrent";
   try {
-    addedId = torrentId(await realDebridJson(origin, token, "/torrents/addMagnet", {
-      method: "POST",
-      body: formBody({ magnet: candidate.magnet }),
-    }));
+    addedId = await createTorBoxTorrent(token, env, candidate.magnet, cachedOnly);
     stage = "load-files";
     const beforeSelection = await waitForTorrent(
-      origin,
       token,
+      env,
       addedId,
       (info) => info.files.length > 0,
       REQUEST_TIMEOUT_MS,
@@ -536,22 +457,17 @@ async function cachedCandidate(
     stage = "match-file";
     const file = selectedFile(beforeSelection.files, programme);
     matchedFile = file;
-    stage = "select-file";
-    await realDebridJson(origin, token, `/torrents/selectFiles/${encodeURIComponent(addedId)}`, {
-      method: "POST",
-      body: formBody({ files: String(file.id) }),
-    });
-    stage = "confirm-cache";
+    stage = "confirm-download";
     const downloaded = await waitForTorrent(
-      origin,
       token,
+      env,
       addedId,
-      (info) => info.status === "downloaded" && info.links.length > 0,
+      (info) => info.ready,
       cacheCheckTimeoutMs,
     );
     return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
-    if (error instanceof TorrentDownloadPendingError && addedId && matchedFile && stage === "confirm-cache") {
+    if (error instanceof TorrentDownloadPendingError && addedId && matchedFile && stage === "confirm-download") {
       return {
         torrentId: addedId,
         file: matchedFile,
@@ -559,7 +475,10 @@ async function cachedCandidate(
         progress: error.info?.progress ?? 0,
       };
     }
-    const candidateHttpFailure = error instanceof RealDebridRequestError
+    const notCached = error instanceof TorBoxRequestError
+      && (/cache/i.test(error.code ?? "") || /not cached/i.test(error.message));
+    if (cachedOnly && notCached) return { rejectedReason: "not_cached" };
+    const candidateHttpFailure = error instanceof TorBoxRequestError
       && error.status >= 400
       && error.status < 500
       && ![401, 403, 429].includes(error.status);
@@ -569,20 +488,18 @@ async function cachedCandidate(
         ? "metadata_timeout"
         : stage === "match-file"
           ? "file_mismatch"
-          : candidateHttpFailure && stage === "add-magnet"
+          : candidateHttpFailure && stage.startsWith("add-")
             ? "magnet_rejected"
-            : candidateHttpFailure && stage === "select-file"
-              ? "file_selection_failed"
-              : candidateHttpFailure
-                ? "torrent_rejected"
-                : null;
+            : candidateHttpFailure
+              ? "torrent_rejected"
+              : null;
     console.warn(JSON.stringify({
       message: "stream candidate rejected",
       stage,
       reason: error instanceof Error ? error.message : "unknown error",
     }));
     if (addedId) {
-      try { await deleteTorrent(origin, token, addedId); } catch { /* best-effort cleanup */ }
+      try { await deleteTorBoxTorrent(token, env, addedId); } catch { /* best-effort cleanup */ }
     }
     return rejectedReason ? { rejectedReason } : null;
   }
@@ -655,7 +572,7 @@ async function cachedSelection(
   householdId: string,
   contentType: StreamContentType,
   videoId: string,
-  realDebridToken: string,
+  torBoxToken: string,
   env: StreamSelectionEnv,
   now: Date,
 ): Promise<StoredSelectionState | null> {
@@ -667,14 +584,9 @@ async function cachedSelection(
   if (Date.parse(row.stale_at) > now.getTime()) {
     const selection = storedSelection(row);
     if (row.download_pending !== 1) return { selection, downloadPending: false };
-    const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
     let info: TorrentInfo;
     try {
-      info = torrentInfo(await realDebridJson(
-        origin,
-        realDebridToken,
-        `/torrents/info/${encodeURIComponent(row.torrent_id)}`,
-      ));
+      info = await getTorBoxTorrent(torBoxToken, env, row.torrent_id, true);
     } catch (error) {
       console.warn(JSON.stringify({
         message: "pending stream status unavailable",
@@ -682,13 +594,13 @@ async function cachedSelection(
       }));
       return { selection, downloadPending: true };
     }
-    if (info.status === "downloaded" && info.links.length > 0) {
+    if (info.ready) {
       await db.prepare(`UPDATE stream_selections SET download_pending = 0
         WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
         .bind(householdId, contentType, videoId, row.torrent_id).run();
       return { selection, downloadPending: false };
     }
-    if (!TERMINAL_TORRENT_STATUSES.has(info.status)) {
+    if (!torBoxTorrentIsTerminal(info)) {
       const lastHealthyAt = Date.parse(row.last_progress_at ?? row.selected_at);
       if (info.progress > row.last_progress || info.speed > 0) {
         await db.prepare(`UPDATE stream_selections
@@ -715,7 +627,7 @@ async function cachedSelection(
     await db.prepare(`DELETE FROM stream_selections
       WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
       .bind(householdId, contentType, videoId, row.torrent_id).run();
-    try { await deleteTorrent(origin, realDebridToken, row.torrent_id); } catch { /* allow a new candidate */ }
+    try { await deleteTorBoxTorrent(torBoxToken, env, row.torrent_id); } catch { /* allow a new candidate */ }
     return null;
   }
   if (row.download_pending === 1) await quarantineCandidate(db, row, "expired", now);
@@ -724,11 +636,7 @@ async function cachedSelection(
     .bind(householdId, contentType, videoId)
     .run();
   try {
-    await deleteTorrent(
-      (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-      realDebridToken,
-      row.torrent_id,
-    );
+    await deleteTorBoxTorrent(torBoxToken, env, row.torrent_id);
   } catch { /* stale local state must not block reselection */ }
   return null;
 }
@@ -800,7 +708,7 @@ export async function selectCachedStream(
   householdId: string,
   contentType: StreamContentType,
   videoId: string,
-  realDebridToken: string,
+  torBoxToken: string,
   env: StreamSelectionEnv,
   now = new Date(),
   excludedInfoHashes: ReadonlySet<string> = new Set(),
@@ -812,7 +720,7 @@ export async function selectCachedStream(
     householdId,
     contentType,
     videoId,
-    realDebridToken,
+    torBoxToken,
     env,
     now,
   );
@@ -826,11 +734,7 @@ export async function selectCachedStream(
       .bind(householdId, contentType, videoId)
       .run();
     try {
-      await deleteTorrent(
-        (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-        realDebridToken,
-        existing.selection.torrentId,
-      );
+      await deleteTorBoxTorrent(torBoxToken, env, existing.selection.torrentId);
     } catch { /* an excluded remote torrent must not block reselection */ }
   }
   const programme = await canonicalProgramme(db, householdId, contentType, videoId);
@@ -844,23 +748,18 @@ export async function selectCachedStream(
   const candidates = discovery.candidates;
   const eligibleCandidates = candidates.filter((candidate) =>
     !excludedInfoHashes.has(candidate.infoHash) && !quarantinedHashes.has(candidate.infoHash));
-  let pending: {
-    candidate: DiscoveryCandidate;
-    torrentId: string;
-    file: TorrentFile;
-    progress: number;
-  } | null = null;
   let lastRejectedReason: string | null = null;
   let temporarilyUnavailable = false;
   const maxCacheChecks = Math.max(1, Math.min(MAX_CACHE_CHECKS, options.maxCacheChecks ?? MAX_CACHE_CHECKS));
   const cacheCheckTimeoutMs = Math.max(POLL_INTERVAL_MS, options.cacheCheckTimeoutMs ?? CACHE_CHECK_TIMEOUT_MS);
   for (const candidate of eligibleCandidates.slice(0, maxCacheChecks)) {
-    const cached = await cachedCandidate(candidate, programme, realDebridToken, env, cacheCheckTimeoutMs);
+    const cached = await cachedCandidate(candidate, programme, torBoxToken, env, true, cacheCheckTimeoutMs);
     if (!cached) {
       temporarilyUnavailable = true;
       continue;
     }
     if ("rejectedReason" in cached) {
+      if (cached.rejectedReason === "not_cached") continue;
       lastRejectedReason = cached.rejectedReason;
       await quarantineInfoHash(
         db,
@@ -874,98 +773,65 @@ export async function selectCachedStream(
       );
       continue;
     }
-    if (cached.downloadPending) {
-      if (contentType !== "series") {
-        lastRejectedReason = "not_cached";
-        try {
-          await deleteTorrent(
-            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-            realDebridToken,
-            cached.torrentId,
-          );
-        } catch { /* movies retain the existing cached-only behavior */ }
-        continue;
-      }
-      if (!pending) pending = {
-        candidate,
-        torrentId: cached.torrentId,
-        file: cached.file,
-        progress: cached.progress,
-      };
-      else {
-        try {
-          await deleteTorrent(
-            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-            realDebridToken,
-            cached.torrentId,
-          );
-        } catch { /* keep checking candidates while retaining only the best download */ }
-      }
-      continue;
-    }
-    if (pending) {
-      try {
-        await deleteTorrent(
-          (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-          realDebridToken,
-          pending.torrentId,
-        );
-      } catch { /* a cached candidate is still preferable */ }
-      pending = null;
-    }
     const selection = selectionFromCandidate(householdId, contentType, videoId, programme, candidate, cached, now);
     try {
-      const stored = await storeSelection(db, selection);
+      const stored = await storeSelection(db, selection, cached.downloadPending, cached.progress);
       if (stored.selection.torrentId !== selection.torrentId) {
         try {
-          await deleteTorrent(
-            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-            realDebridToken,
-            selection.torrentId,
-          );
+          await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
         } catch { /* the concurrent winner remains valid */ }
       }
       report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
       return stored.downloadPending ? null : stored.selection;
     } catch (error) {
       try {
-        await deleteTorrent((env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""), realDebridToken, cached.torrentId);
+        await deleteTorBoxTorrent(torBoxToken, env, cached.torrentId);
       } catch { /* preserve the storage error */ }
       throw error;
     }
   }
-  if (pending) {
-    const selection = selectionFromCandidate(
-      householdId,
-      contentType,
-      videoId,
-      programme,
-      pending.candidate,
-      pending,
-      now,
-    );
-    try {
-      const stored = await storeSelection(db, selection, true, pending.progress);
-      if (stored.selection.torrentId !== selection.torrentId) {
-        try {
-          await deleteTorrent(
-            (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-            realDebridToken,
-            selection.torrentId,
-          );
-        } catch { /* the concurrent winner remains valid */ }
-      }
-      report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
-      return stored.downloadPending ? null : stored.selection;
-    } catch (error) {
+  if (contentType === "series" && eligibleCandidates.length > 0) {
+    const candidate = eligibleCandidates[0];
+    const pending = await cachedCandidate(candidate, programme, torBoxToken, env, false, cacheCheckTimeoutMs);
+    if (!pending) {
+      temporarilyUnavailable = true;
+    } else if ("rejectedReason" in pending) {
+      lastRejectedReason = pending.rejectedReason;
+      await quarantineInfoHash(
+        db,
+        householdId,
+        programme.programmeId,
+        contentType,
+        videoId,
+        candidate.infoHash,
+        pending.rejectedReason,
+        now,
+      );
+    } else {
+      const selection = selectionFromCandidate(
+        householdId,
+        contentType,
+        videoId,
+        programme,
+        candidate,
+        pending,
+        now,
+      );
       try {
-        await deleteTorrent(
-          (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-          realDebridToken,
-          selection.torrentId,
-        );
-      } catch { /* preserve the storage error */ }
-      throw error;
+        const stored = await storeSelection(db, selection, pending.downloadPending, pending.progress);
+        if (stored.selection.torrentId !== selection.torrentId) {
+          try {
+            await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
+          } catch { /* the concurrent winner remains valid */ }
+        }
+        report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
+        return stored.downloadPending ? null : stored.selection;
+      } catch (error) {
+        try {
+          await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
+        } catch { /* preserve the storage error */ }
+        throw error;
+      }
     }
   }
   if (candidates.length === 0) report({

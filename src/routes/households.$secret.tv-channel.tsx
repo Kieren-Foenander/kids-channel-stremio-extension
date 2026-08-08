@@ -109,7 +109,7 @@ function TvChannelPage() {
       await queryClient.invalidateQueries({ queryKey: parentKeys.tvPreparation(secret) });
       setPreparationMessage(action === "start"
         ? "Preparation started. You can close this page while Cloudflare continues."
-        : "Preparation stopped. Real-Debrid keeps anything already added or cached.");
+        : "Preparation stopped. TorBox keeps anything already added or cached.");
     } catch (error) {
       setPreparationFailed(true);
       setPreparationMessage(apiErrorMessage(error, `Preparation could not be ${action === "start" ? "started" : "stopped"}. Check your connection and try again.`));
@@ -172,13 +172,10 @@ function TvChannelPage() {
           <section className="rounded-[4px] border bg-card p-5" aria-labelledby="preparation-heading">
             <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
               <div className="max-w-2xl">
-                <Ident className="mb-2">Real-Debrid</Ident>
+                <Ident className="mb-2">TorBox</Ident>
                 <h2 id="preparation-heading" className="text-xl font-semibold tracking-[-0.01em]">Prepare for later</h2>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Ask Real-Debrid to cache programmes from this Channel Schedule. Cloudflare keeps trying usable alternatives during the selected window, even after you close this page.</p>
-                <div className="mt-4 rounded-[4px] border-2 border-destructive bg-destructive/10 px-4 py-3 text-sm leading-relaxed text-destructive" role="alert">
-                  <strong className="block text-base">Do not start this while anyone is using Stremio or Real-Debrid.</strong>
-                  Preparation accesses your account from Cloudflare. Using the Channel or Real-Debrid at the same time can make the account appear active from multiple IP addresses. Real-Debrid may suspend the account or invalidate its API token under its account-sharing and cloud-service rules. Only start when you know nobody will use the service until this run finishes or you stop it.
-                </div>
+                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Ask TorBox to cache programmes from this Channel Schedule. Cloudflare keeps trying usable alternatives during the selected window, even after you close this page.</p>
+                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">Preparation may run while the Channel is being watched. It checks cached sources first, then queues one matching uncached source when needed.</p>
               </div>
               {!preparationActive && (
                 <div className="grid shrink-0 grid-cols-2 gap-2 max-sm:w-full">
@@ -201,7 +198,7 @@ function TvChannelPage() {
 
             {preparation && (
               <div className="mt-5 border-t pt-4">
-                {preparationActive && <p className="mb-4 rounded-[4px] border-2 border-destructive bg-destructive/10 px-4 py-3 text-sm font-semibold text-destructive" role="alert">Preparation is active. Do not watch the Channel in Stremio or use this Real-Debrid account anywhere until the run finishes or you stop it.</p>}
+                {preparationActive && <p className="mb-4 text-sm text-muted-foreground">Preparation is active in the background. You can keep using the Channel while it runs.</p>}
                 <div className="flex flex-wrap items-center gap-2">
                   <StateBadge current={preparationActive}>{preparationStatusLabel(preparation.status)}</StateBadge>
                   <span className="font-mono text-xs text-muted-foreground">{preparation.counts.ready}/{preparation.requestedCount} ready</span>
@@ -336,12 +333,12 @@ function PreparationDialog({ open, pending, count, hours, onOpenChange, onConfir
     <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
       <DialogContent className="data-closed:hidden" showCloseButton={false}>
         <DialogHeader>
-          <DialogTitle>Only start when Real-Debrid is completely idle</DialogTitle>
-          <DialogDescription>Do not continue if anyone is watching the Channel in Stremio or using this Real-Debrid account. For up to {hours} hour{hours === 1 ? "" : "s"}, Cloudflare will prepare {count} programme{count === 1 ? "" : "s"} from a different IP address. Concurrent use may trigger Real-Debrid account suspension or API-token invalidation. Wait until you know nobody will use the service, such as overnight.</DialogDescription>
+          <DialogTitle>Prepare upcoming programmes?</DialogTitle>
+          <DialogDescription>For up to {hours} hour{hours === 1 ? "" : "s"}, Kids Channels will prepare {count} programme{count === 1 ? "" : "s"}. Cached matches become ready immediately; otherwise TorBox downloads one selected source and later rounds check its progress.</DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Starting…" : "I understand — start preparation"}</Button>
+          <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Starting…" : "Start preparation"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
