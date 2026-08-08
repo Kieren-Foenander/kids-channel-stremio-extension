@@ -68,5 +68,5 @@ export const parentKeys = {
   tv: (secret: string) => ["household", secret, "tv-channel"] as const,
   tvPreparation: (secret: string) => ["household", secret, "tv-preparation"] as const,
   movie: (secret: string) => ["household", secret, "movie-channel"] as const,
-  realDebrid: (secret: string) => ["household", secret, "real-debrid"] as const,
+  torBox: (secret: string) => ["household", secret, "torbox"] as const,
 };

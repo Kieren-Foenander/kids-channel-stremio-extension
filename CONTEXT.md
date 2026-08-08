@@ -37,11 +37,11 @@ The Current Programme followed by the upcoming programmes selected for continuou
 _Avoid_: Queue, playlist
 
 **Preparation Run**:
-A Parent-triggered, time-bounded background attempt to make programmes in the current Channel Schedule ready in Real-Debrid. It does not advance the Channel Schedule or Show Progress.
+A Parent-triggered, time-bounded background attempt to make programmes in the current Channel Schedule ready in TorBox. It checks cached candidates first and may start one matching download per programme. It does not advance the Channel Schedule or Show Progress.
 _Avoid_: Seeder, download queue, preload
 
 **Unavailable Episode**:
-An expected episode for which the configured stream provider cannot supply an acceptable cached stream. It remains the show's next episode while the TV Channel temporarily chooses another show.
+An expected episode for which TorBox cannot yet supply a ready, exact-match stream. It remains the show's next episode while the TV Channel temporarily chooses another show.
 _Avoid_: Skipped episode, missing episode
 
 **Household**:

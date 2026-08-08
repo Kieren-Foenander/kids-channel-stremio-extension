@@ -36,24 +36,24 @@ const deletionSchema = z.object({
   confirmation: z.string().refine((value: string): boolean => value === "DELETE", "Type DELETE exactly to confirm permanent deletion."),
 });
 
-const realDebridSchema = z.object({
+const torBoxSchema = z.object({
   token: z.string()
-    .min(1, "Enter your Real-Debrid API token.")
-    .max(512, "The Real-Debrid API token is too long.")
+    .min(1, "Enter your TorBox API token.")
+    .max(512, "The TorBox API token is too long.")
     .refine((value) => value === value.trim(), "Remove spaces before or after the token."),
 });
 
 type PinValues = z.infer<typeof pinSchema>;
 type DeletionValues = z.infer<typeof deletionSchema>;
-type RealDebridValues = z.infer<typeof realDebridSchema>;
+type TorBoxValues = z.infer<typeof torBoxSchema>;
 type PinResponse = { message: string };
-type RealDebridStatus = { configured: boolean; updatedAt: string | null; message?: string };
+type TorBoxStatus = { configured: boolean; updatedAt: string | null; message?: string };
 
 function SettingsPage() {
   const { secret } = Route.useParams();
   const queryClient = useQueryClient();
   const [result, setResult] = useState<{ kind: "success" | "error"; message: string } | null>(null);
-  const [realDebridResult, setRealDebridResult] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [torBoxResult, setTorBoxResult] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [deletionOpen, setDeletionOpen] = useState(false);
   const [deletionError, setDeletionError] = useState("");
   const form = useForm<PinValues>({
@@ -64,13 +64,13 @@ function SettingsPage() {
     resolver: zodResolver(deletionSchema),
     defaultValues: { currentPin: "", confirmation: "" },
   });
-  const realDebridForm = useForm<RealDebridValues>({
-    resolver: zodResolver(realDebridSchema),
+  const torBoxForm = useForm<TorBoxValues>({
+    resolver: zodResolver(torBoxSchema),
     defaultValues: { token: "" },
   });
-  const realDebrid = useQuery({
-    queryKey: parentKeys.realDebrid(secret),
-    queryFn: () => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`),
+  const torBox = useQuery({
+    queryKey: parentKeys.torBox(secret),
+    queryFn: () => parentApi<TorBoxStatus>(`/api/households/${secret}/torbox`),
   });
   const rotation = useMutation({
     mutationFn: (values: PinValues) => parentApi<PinResponse>(`/api/households/${secret}/pin`, {
@@ -84,41 +84,41 @@ function SettingsPage() {
       body: values,
     }),
   });
-  const saveRealDebrid = useMutation({
-    mutationFn: (values: RealDebridValues) => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`, {
+  const saveTorBox = useMutation({
+    mutationFn: (values: TorBoxValues) => parentApi<TorBoxStatus>(`/api/households/${secret}/torbox`, {
       method: "PUT",
       body: values,
     }),
   });
-  const clearRealDebrid = useMutation({
-    mutationFn: () => parentApi<RealDebridStatus>(`/api/households/${secret}/real-debrid`, {
+  const clearTorBox = useMutation({
+    mutationFn: () => parentApi<TorBoxStatus>(`/api/households/${secret}/torbox`, {
       method: "DELETE",
     }),
   });
 
-  async function saveRealDebridToken(values: RealDebridValues) {
-    if (saveRealDebrid.isPending || clearRealDebrid.isPending) return;
-    setRealDebridResult(null);
+  async function saveTorBoxToken(values: TorBoxValues) {
+    if (saveTorBox.isPending || clearTorBox.isPending) return;
+    setTorBoxResult(null);
     try {
-      const response = await saveRealDebrid.mutateAsync(values);
-      realDebridForm.reset();
-      queryClient.setQueryData(parentKeys.realDebrid(secret), response);
-      setRealDebridResult({ kind: "success", message: response.message || "Real-Debrid connected." });
+      const response = await saveTorBox.mutateAsync(values);
+      torBoxForm.reset();
+      queryClient.setQueryData(parentKeys.torBox(secret), response);
+      setTorBoxResult({ kind: "success", message: response.message || "TorBox connected." });
     } catch (error) {
-      setRealDebridResult({ kind: "error", message: apiErrorMessage(error, "The Real-Debrid token could not be saved. Try again.") });
+      setTorBoxResult({ kind: "error", message: apiErrorMessage(error, "The TorBox token could not be saved. Try again.") });
     }
   }
 
-  async function disconnectRealDebrid() {
-    if (saveRealDebrid.isPending || clearRealDebrid.isPending) return;
-    setRealDebridResult(null);
+  async function disconnectTorBox() {
+    if (saveTorBox.isPending || clearTorBox.isPending) return;
+    setTorBoxResult(null);
     try {
-      const response = await clearRealDebrid.mutateAsync();
-      realDebridForm.reset();
-      queryClient.setQueryData(parentKeys.realDebrid(secret), response);
-      setRealDebridResult({ kind: "success", message: response.message || "Real-Debrid disconnected." });
+      const response = await clearTorBox.mutateAsync();
+      torBoxForm.reset();
+      queryClient.setQueryData(parentKeys.torBox(secret), response);
+      setTorBoxResult({ kind: "success", message: response.message || "TorBox disconnected." });
     } catch (error) {
-      setRealDebridResult({ kind: "error", message: apiErrorMessage(error, "Real-Debrid could not be disconnected. Try again.") });
+      setTorBoxResult({ kind: "error", message: apiErrorMessage(error, "TorBox could not be disconnected. Try again.") });
     }
   }
 
@@ -162,13 +162,13 @@ function SettingsPage() {
     deletionForm.reset();
   }
 
-  const realDebridStatusText = realDebrid.isPending
+  const torBoxStatusText = torBox.isPending
     ? "Checking connection…"
-    : realDebrid.isError
-      ? "Real-Debrid connection status is unavailable."
-      : realDebrid.data?.configured
-        ? "Real-Debrid is connected."
-        : "Real-Debrid is not connected.";
+    : torBox.isError
+      ? "TorBox connection status is unavailable."
+      : torBox.data?.configured
+        ? "TorBox is connected."
+        : "TorBox is not connected.";
 
   return (
     <div className="grid gap-12">
@@ -182,40 +182,40 @@ function SettingsPage() {
         <InstallationDetails secret={secret} />
       </section>
 
-      <section className="grid gap-4 rounded-[4px] border bg-card p-5 md:grid-cols-[minmax(14rem,0.8fr)_minmax(18rem,1.2fr)] md:gap-8" aria-labelledby="real-debrid-heading">
+      <section className="grid gap-4 rounded-[4px] border bg-card p-5 md:grid-cols-[minmax(14rem,0.8fr)_minmax(18rem,1.2fr)] md:gap-8" aria-labelledby="torbox-heading">
         <div>
-          <h2 id="real-debrid-heading" className="text-xl font-semibold tracking-[-0.01em]">Connect Real-Debrid</h2>
-          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">Kids Channels uses your Household’s Real-Debrid account to choose one cached stream for each programme.</p>
+          <h2 id="torbox-heading" className="text-xl font-semibold tracking-[-0.01em]">Connect TorBox</h2>
+          <p className="mt-1 text-sm leading-relaxed text-muted-foreground">Kids Channels uses your Household’s TorBox account to prepare or choose one playable stream for each programme.</p>
           <p className="mt-3 text-sm leading-relaxed text-muted-foreground">The token is validated before it is stored encrypted. It is never shown again after saving. Clearing it stops Channel playback until another valid token is saved.</p>
         </div>
         <div className="grid content-start gap-4">
-          <p className="text-sm font-semibold" role="status">{realDebridStatusText}</p>
-          <form className="grid gap-3" noValidate onSubmit={realDebridForm.handleSubmit(saveRealDebridToken)}>
+          <p className="text-sm font-semibold" role="status">{torBoxStatusText}</p>
+          <form className="grid gap-3" noValidate onSubmit={torBoxForm.handleSubmit(saveTorBoxToken)}>
             <div>
-              <label htmlFor="real-debrid-token" className="text-sm font-semibold">Real-Debrid API token</label>
+              <label htmlFor="torbox-token" className="text-sm font-semibold">TorBox API token</label>
               <Input
-                id="real-debrid-token"
+                id="torbox-token"
                 type="password"
                 autoComplete="off"
                 spellCheck={false}
-                aria-invalid={Boolean(realDebridForm.formState.errors.token)}
-                aria-describedby="real-debrid-token-help real-debrid-token-error"
+                aria-invalid={Boolean(torBoxForm.formState.errors.token)}
+                aria-describedby="torbox-token-help torbox-token-error"
                 className="mt-2 font-mono"
-                {...realDebridForm.register("token")}
+                {...torBoxForm.register("token")}
               />
-              <p id="real-debrid-token-help" className="mt-1.5 text-sm leading-relaxed text-muted-foreground">Paste the private API token from your Real-Debrid account.</p>
-              <p id="real-debrid-token-error" className="mt-1 min-h-5 text-sm font-medium text-destructive" role="alert">{realDebridForm.formState.errors.token?.message}</p>
+              <p id="torbox-token-help" className="mt-1.5 text-sm leading-relaxed text-muted-foreground">Paste the private API token from your TorBox account.</p>
+              <p id="torbox-token-error" className="mt-1 min-h-5 text-sm font-medium text-destructive" role="alert">{torBoxForm.formState.errors.token?.message}</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button type="submit" disabled={saveRealDebrid.isPending || clearRealDebrid.isPending}>
-                {saveRealDebrid.isPending ? "Validating and saving…" : realDebrid.data?.configured ? "Replace token" : "Save token"}
+              <Button type="submit" disabled={saveTorBox.isPending || clearTorBox.isPending}>
+                {saveTorBox.isPending ? "Validating and saving…" : torBox.data?.configured ? "Replace token" : "Save token"}
               </Button>
-              {realDebrid.data?.configured
-                ? <Button type="button" variant="outline" disabled={saveRealDebrid.isPending || clearRealDebrid.isPending} onClick={disconnectRealDebrid}>{clearRealDebrid.isPending ? "Clearing…" : "Clear token"}</Button>
+              {torBox.data?.configured
+                ? <Button type="button" variant="outline" disabled={saveTorBox.isPending || clearTorBox.isPending} onClick={disconnectTorBox}>{clearTorBox.isPending ? "Clearing…" : "Clear token"}</Button>
                 : null}
             </div>
           </form>
-          <p className={realDebridResult?.kind === "error" ? "min-h-5 text-sm font-medium text-destructive" : "min-h-5 text-sm font-medium text-accent"} role={realDebridResult?.kind === "error" ? "alert" : "status"} aria-live="polite">{realDebridResult?.message}</p>
+          <p className={torBoxResult?.kind === "error" ? "min-h-5 text-sm font-medium text-destructive" : "min-h-5 text-sm font-medium text-accent"} role={torBoxResult?.kind === "error" ? "alert" : "status"} aria-live="polite">{torBoxResult?.message}</p>
         </div>
       </section>
 

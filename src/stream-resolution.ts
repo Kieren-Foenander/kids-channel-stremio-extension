@@ -1,9 +1,12 @@
-const REAL_DEBRID_ORIGIN = "https://api.real-debrid.com/rest/1.0";
-const REQUEST_TIMEOUT_MS = 10_000;
+import {
+  deleteTorBoxTorrent,
+  getTorBoxTorrent,
+  requestTorBoxDownload,
+  TorBoxRequestError,
+  type TorBoxEnv,
+} from "./torbox";
 
-export interface StreamResolutionEnv {
-  REAL_DEBRID_ORIGIN?: string;
-}
+export type StreamResolutionEnv = TorBoxEnv;
 
 export interface StreamIdentity {
   torrentId: string;
@@ -17,19 +20,14 @@ interface StoredSelection {
   stale_at: string;
 }
 
-interface TorrentFile {
-  id: number;
-  selected: boolean;
-}
-
 export class StreamSelectionGoneError extends Error {}
 
-export class RealDebridResolutionError extends Error {
+export class TorBoxResolutionError extends Error {
   constructor(
     public readonly status: number | null,
     public readonly retryAfter: string | null = null,
   ) {
-    super("Real-Debrid could not resolve the selected stream");
+    super("TorBox could not resolve the selected stream");
   }
 }
 
@@ -85,117 +83,49 @@ export async function discardStreamSelection(
   db: D1Database,
   householdId: string,
   identity: StreamIdentity,
-  realDebridToken: string,
+  torBoxToken: string,
   env: StreamResolutionEnv,
 ): Promise<void> {
   await invalidateStreamSelection(db, householdId, identity);
   try {
-    const response = await realDebridResponse(
-      (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, ""),
-      realDebridToken,
-      `/torrents/delete/${encodeURIComponent(identity.torrentId)}`,
-      { method: "DELETE" },
-    );
-    if (response.body) await response.body.cancel();
+    await deleteTorBoxTorrent(torBoxToken, env, identity.torrentId);
   } catch { /* a dead remote torrent must not block local failover */ }
-}
-
-async function realDebridResponse(
-  origin: string,
-  token: string,
-  path: string,
-  init?: RequestInit,
-): Promise<Response> {
-  const headers = new Headers(init?.headers);
-  headers.set("authorization", `Bearer ${token}`);
-  return fetch(`${origin}${path}`, {
-    ...init,
-    headers,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-}
-
-function torrentRestrictedLink(value: unknown, fileId: number): string {
-  if (typeof value !== "object" || value === null) throw new RealDebridResolutionError(null);
-  const record = value as Record<string, unknown>;
-  if (record.status !== "downloaded") throw new StreamSelectionGoneError("torrent is no longer downloaded");
-  if (!Array.isArray(record.files) || !Array.isArray(record.links)) {
-    throw new RealDebridResolutionError(null);
-  }
-
-  const files = record.files.flatMap((entry): TorrentFile[] => {
-    if (typeof entry !== "object" || entry === null) return [];
-    const file = entry as Record<string, unknown>;
-    if (typeof file.id !== "number") return [];
-    return [{ id: file.id, selected: file.selected === 1 || file.selected === true }];
-  });
-  if (!files.some((file) => file.id === fileId)) {
-    throw new StreamSelectionGoneError("selected file is no longer present");
-  }
-
-  const links = record.links.filter((link): link is string => typeof link === "string" && link.length > 0);
-  const selectedFiles = files.filter((file) => file.selected);
-  const selectedIndex = selectedFiles.findIndex((file) => file.id === fileId);
-  const link = selectedIndex >= 0 ? links[selectedIndex] : links.length === 1 ? links[0] : null;
-  if (!link || !/^https?:\/\//i.test(link)) {
-    throw new StreamSelectionGoneError("selected file no longer has a restricted link");
-  }
-  return link;
-}
-
-function directDownload(value: unknown): string {
-  if (typeof value !== "object" || value === null || !("download" in value)) {
-    throw new RealDebridResolutionError(null);
-  }
-  const download = value.download;
-  if (typeof download !== "string") throw new RealDebridResolutionError(null);
-  try {
-    const url = new URL(download);
-    if (url.protocol !== "https:") throw new RealDebridResolutionError(null);
-    return url.toString();
-  } catch (error) {
-    if (error instanceof RealDebridResolutionError) throw error;
-    throw new RealDebridResolutionError(null);
-  }
 }
 
 export async function resolveCachedStream(
   db: D1Database,
   householdId: string,
   identity: StreamIdentity,
-  realDebridToken: string,
+  torBoxToken: string,
   env: StreamResolutionEnv,
   now = Date.now(),
+  userIp?: string,
 ): Promise<string> {
   if (!(await selectionIsCurrent(db, householdId, identity, now))) {
     throw new StreamSelectionGoneError("stream selection is absent or stale");
   }
 
-  const origin = (env.REAL_DEBRID_ORIGIN || REAL_DEBRID_ORIGIN).replace(/\/$/, "");
-  const infoResponse = await realDebridResponse(
-    origin,
-    realDebridToken,
-    `/torrents/info/${encodeURIComponent(identity.torrentId)}`,
-  );
-  if (!infoResponse.ok) {
-    try { await infoResponse.body?.cancel(); } catch { /* response may already be owned by the runtime */ }
-    if (infoResponse.status === 400 || infoResponse.status === 404 || infoResponse.status === 451) {
-      throw new StreamSelectionGoneError("torrent no longer exists");
+  try {
+    const torrent = await getTorBoxTorrent(torBoxToken, env, identity.torrentId, true);
+    if (!torrent.ready) throw new StreamSelectionGoneError("TorBox torrent is no longer ready");
+    if (!torrent.files.some((file) => file.id === identity.fileId)) {
+      throw new StreamSelectionGoneError("selected file is no longer present");
     }
-    throw new RealDebridResolutionError(infoResponse.status, infoResponse.headers.get("retry-after"));
-  }
-  const restrictedLink = torrentRestrictedLink(await infoResponse.json(), identity.fileId);
-
-  const unrestrictResponse = await realDebridResponse(origin, realDebridToken, "/unrestrict/link", {
-    method: "POST",
-    body: new URLSearchParams({ link: restrictedLink }),
-  });
-  if (!unrestrictResponse.ok) {
-    try { await unrestrictResponse.body?.cancel(); } catch { /* response may already be owned by the runtime */ }
-    if (unrestrictResponse.status === 400 || unrestrictResponse.status === 404 || unrestrictResponse.status === 451) {
-      throw new StreamSelectionGoneError("restricted link is no longer valid");
+    return await requestTorBoxDownload(
+      torBoxToken,
+      env,
+      identity.torrentId,
+      identity.fileId,
+      userIp,
+    );
+  } catch (error) {
+    if (error instanceof StreamSelectionGoneError) throw error;
+    if (error instanceof TorBoxRequestError) {
+      if (error.status === 404 || error.code === "DOWNLOAD_NOT_FOUND") {
+        throw new StreamSelectionGoneError("TorBox torrent no longer exists");
+      }
+      throw new TorBoxResolutionError(error.status, error.retryAfter);
     }
-    throw new RealDebridResolutionError(unrestrictResponse.status, unrestrictResponse.headers.get("retry-after"));
+    throw new TorBoxResolutionError(null);
   }
-  return directDownload(await unrestrictResponse.json());
 }

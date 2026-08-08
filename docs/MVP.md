@@ -11,7 +11,7 @@ The household rule—not technical restrictions—keeps children out of Stremio'
 - One Household shares Channel state across Stremio devices.
 - The addon is configured and installed on desktop, then syncs through the same Stremio account to Fire TV.
 - Stremio may show a detail page requiring one Play action if Fire TV cannot start directly from a Channel tile.
-- Kids Channels returns exactly one cached source at programme transitions.
+- Kids Channels returns exactly one ready source at programme transitions, without exposing source selection.
 - Upcoming TV programmes may be visible and selectable. Selecting a distant programme skips bypassed programmes; the Parent can correct Show Progress.
 
 ## Parent Page
@@ -20,7 +20,7 @@ A Parent can:
 
 - Create a Household and install its secret addon URL.
 - Protect changes with a six-digit PIN.
-- Add and replace the Household's encrypted Real-Debrid credential.
+- Add and replace the Household's encrypted TorBox credential.
 - Search Cinemeta for shows and movies.
 - Manage the Approved Library.
 - Choose a show's starting episode, defaulting to S01E01.
@@ -43,7 +43,7 @@ There is no account, discovery, recovery, or forgotten-PIN workflow.
 - Mark an exhausted show Finished and pause it until the Parent restarts, repositions, or removes it.
 - Removing approved content immediately removes upcoming entries. A removed Current Programme may finish playing but cannot be launched again.
 
-If no acceptable cached stream exists, keep the best matching torrent downloading in Real-Debrid, preserve the episode as Show Progress, and mark it unavailable for five minutes. Use a 40-second holding bumper that exposes Stremio's in-player Next control and offers a stable autoplay group for another eligible show. Reserve the unavailable episode directly after that intervening programme; play it if the download completed or defer it behind one more programme without starting a duplicate download. The five-minute marker protects unrelated schedule rebuilds during the initial download. Web Stremio may still return to the Channel detail when the bumper ends; Fire TV behavior remains a human gate. If every show is unavailable, stop after the terminal bumper.
+If no acceptable cached stream exists, keep the best matching torrent downloading in TorBox, preserve the episode as Show Progress, and mark it unavailable for five minutes. Use a 40-second holding bumper that exposes Stremio's in-player Next control and offers a stable autoplay group for another eligible show. Reserve the unavailable episode directly after that intervening programme; play it if the download completed or defer it behind one more programme without starting a duplicate download. The five-minute marker protects unrelated schedule rebuilds during the initial download. Web Stremio may still return to the Channel detail when the bumper ends; Fire TV behavior remains a human gate. If every show is unavailable, stop after the terminal bumper.
 
 ## Movie Channel
 
@@ -60,8 +60,8 @@ If no acceptable cached stream exists, keep the best matching torrent downloadin
 - Canonical video IDs are preserved so Stremio can associate Viewing Progress and subtitle results.
 - Expose Channels through standard Stremio `series` and `movie` types.
 - Set the canonical Current Programme video ID as `behaviorHints.defaultVideoId`.
-- Discover candidates, verify Real-Debrid cache availability, and return exactly one deterministically selected stream.
-- Redirect Stremio to a fresh Real-Debrid download URL without proxying media through Cloudflare.
+- Discover and rank candidates, prefer a TorBox-cached exact file match, and prepare one uncached series source when required.
+- Redirect Stremio to a fresh TorBox download URL without proxying media through Cloudflare.
 - Use one stable TV `bingeGroup` across programmes and unavailable-programme bumpers.
 - Preserve canonical identities so subtitle selection and Viewing Progress remain Stremio concerns.
 
@@ -70,16 +70,16 @@ If no acceptable cached stream exists, keep the best matching torrent downloadin
 - Target Cloudflare Workers and D1 from the outset.
 - Identify each Household with a long opaque random secret.
 - Store only opaque Household identity in installation URLs.
-- Encrypt each Household's Real-Debrid credential at rest and never return or log it.
+- Encrypt each Household's TorBox credential at rest and never return or log it.
 - Rate-limit failed Parent PIN attempts.
-- Real-Debrid media flows directly to Stremio, not through Cloudflare.
+- TorBox media flows directly to Stremio, not through Cloudflare.
 
 ## Feasibility gate
 
 Before polishing the Parent Page, prove on Fire TV that:
 
 1. A Channel tile can start with no interaction beyond a protocol-imposed Play action.
-2. Kids Channels returns exactly one cached source without a source choice.
+2. Kids Channels returns exactly one ready source without a source choice.
 3. Canonical IDs preserve resume positions.
 4. Next moves to a programme from another show.
 5. Natural completion autoplays the next programme from another show.

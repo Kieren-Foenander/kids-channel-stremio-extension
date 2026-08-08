@@ -1,13 +1,13 @@
 # Kids Channels
 
-A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households, approve programmes from Cinemeta, and configure Real-Debrid. Kids Channels returns one cached stream without a source picker.
+A Cloudflare Worker Stremio addon that gives each Household one clearly identifiable TV Channel and one Movie Channel. Parents create PIN-protected Households, approve programmes from Cinemeta, and connect TorBox. Kids Channels prepares and returns one playable stream without a source picker.
 
 ## Requirements
 
 - Node.js 20+
 - pnpm 10+
 - A Cloudflare account for deployment
-- A Real-Debrid account
+- A TorBox account with API access
 
 ## Run locally
 
@@ -58,7 +58,7 @@ pnpm db:migrate:remote
 pnpm run deploy
 ```
 
-The Worker encrypts each Household's Real-Debrid credential with `CONFIG_SECRET`, selects only cached files, and redirects playback to fresh Real-Debrid download URLs; media bytes never pass through Cloudflare. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Parent API authentication uses a one-hour `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Browser documents apply a strict Content Security Policy to same-origin hashed scripts, styles, and fonts plus HTTPS programme imagery; framing and MIME sniffing are denied. No analytics, tracking, service worker, or offline mutation queue is included.
+The Worker encrypts each Household's TorBox API token with `CONFIG_SECRET`. It checks ranked candidates for an immediately cached match, starts one TorBox download for a series episode when none is cached, and redirects playback to a fresh TorBox download URL; media bytes never pass through Cloudflare. Household routes use a random 256-bit opaque secret; PINs are salted and hashed with PBKDF2-SHA-256. Parent API authentication uses a one-hour `HttpOnly`, `Secure`, `SameSite=Strict` cookie. Browser documents apply a strict Content Security Policy to same-origin hashed scripts, styles, and fonts plus HTTPS programme imagery; framing and MIME sniffing are denied. No analytics, tracking, service worker, or offline mutation queue is included.
 
 ## Routes
 
@@ -79,7 +79,7 @@ The Worker encrypts each Household's Real-Debrid credential with `CONFIG_SECRET`
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — one TV Channel tile
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — one Movie Channel tile
 - `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
-- `GET /addons/:secret/stream/series/:episodeId.json` — return one cached stream, atomically advance only after selection, or defer an Unavailable Episode behind an autoplay bumper
+- `GET /addons/:secret/stream/series/:episodeId.json` — return one ready stream, atomically advance only after selection, or start preparation and defer an Unavailable Episode behind an autoplay bumper
 - `GET /addons/:secret/meta/movie/kids-channels:movie.json` — the canonical Current Programme followed only by its final sign-off
 - `GET /addons/:secret/stream/movie/:videoId.json` — return one cached canonical movie stream, with a compatibility fallback for sign-off requests
 - `GET|HEAD /addons/:secret/media/movie-sign-off/:cycle/:position.mp4` — atomically consume the movie and directly serve its inline five-second sign-off without another source picker

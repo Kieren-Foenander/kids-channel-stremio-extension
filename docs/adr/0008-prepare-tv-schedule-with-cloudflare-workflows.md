@@ -1,5 +1,7 @@
 # Prepare the TV Channel Schedule with Cloudflare Workflows
 
+Status: Superseded for provider and concurrency policy by ADR 0009. The Workflow design remains in force.
+
 Kids Channels will let a Parent manually start a time-bounded Preparation Run for up to twenty programmes in the current Channel Schedule. The run snapshots those programmes, uses the Household's existing Real-Debrid credential to add and monitor torrent candidates, and continues in a Cloudflare Workflow after the Parent closes the page. It does not advance the Channel Schedule or Show Progress.
 
 Each five-minute round processes unfinished episodes sequentially in batches of at most five and permits the existing stream selector to inspect at most one new candidate per episode. The small Workflow steps stay below Worker subrequest limits while the complete eight-hour run remains within Workflow step limits. Existing pending selections are checked first. A progressing torrent remains in Real-Debrid; a stalled or terminal torrent follows the existing quarantine and cleanup rules so a later round can try the next ranked source. The run ends early when all items are ready, or marks unfinished items unavailable when its one-, four-, or eight-hour window expires.

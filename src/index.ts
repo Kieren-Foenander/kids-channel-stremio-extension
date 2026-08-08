@@ -1,6 +1,5 @@
 import { approveProgramme, approvedLibrary, approvedProgrammeDetail, hasApprovedProgramme } from "./approved-library";
 import { CinemetaClient, type ContentType } from "./cinemeta";
-import { firstPartyProviderProbeResponse } from "./first-party-provider-probe";
 import {
   authenticatePin,
   createHousehold,
@@ -22,13 +21,13 @@ import {
 } from "./movie-channel";
 import { householdOverview } from "./overview";
 import {
-  clearRealDebridCredential,
-  loadRealDebridCredential,
-  realDebridCredentialStatus,
-  storeRealDebridCredential,
-  validateRealDebridToken,
-  validRealDebridToken,
-} from "./real-debrid-credentials";
+  clearTorBoxCredential,
+  loadTorBoxCredential,
+  torBoxCredentialStatus,
+  storeTorBoxCredential,
+  validateTorBoxApiToken,
+  validTorBoxToken,
+} from "./torbox-credentials";
 import {
   issueParentToken,
   issueStreamToken,
@@ -41,7 +40,7 @@ import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannel
 import {
   discardStreamSelection,
   invalidateStreamSelection,
-  RealDebridResolutionError,
+  TorBoxResolutionError,
   resolveCachedStream,
   type StreamIdentity,
   streamSelectionContext,
@@ -73,7 +72,7 @@ export interface Env {
   CINEMETA_ORIGIN?: string;
   TV_SCHEDULE_SEED?: string;
   MOVIE_ROTATION_SEED?: string;
-  REAL_DEBRID_ORIGIN?: string;
+  TORBOX_ORIGIN?: string;
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
   TV_PREPARATION: Workflow<TvPreparationWorkflowParams>;
@@ -334,59 +333,41 @@ export default {
       );
     }
 
-    const realDebridMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/real-debrid$/);
-    if (realDebridMatch && ["GET", "PUT", "DELETE"].includes(request.method)) {
-      const household = await findHousehold(env.DB, realDebridMatch[1]);
+    const torBoxMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/torbox$/);
+    if (torBoxMatch && ["GET", "PUT", "DELETE"].includes(request.method)) {
+      const household = await findHousehold(env.DB, torBoxMatch[1]);
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
       }
       if (request.method === "GET") {
-        return json(await realDebridCredentialStatus(env.DB, household.id), 200, { "cache-control": "no-store" });
+        return json(await torBoxCredentialStatus(env.DB, household.id), 200, { "cache-control": "no-store" });
       }
       if (request.method === "DELETE") {
-        await clearRealDebridCredential(env.DB, household.id);
+        await clearTorBoxCredential(env.DB, household.id);
         return json(
-          { configured: false, updatedAt: null, message: "Real-Debrid disconnected. Channel playback is unavailable until another token is saved." },
+          { configured: false, updatedAt: null, message: "TorBox disconnected. Channel playback is unavailable until another token is saved." },
           200,
           { "cache-control": "no-store" },
         );
       }
       let input: { token?: unknown } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
-      if (!validRealDebridToken(input.token)) {
-        return json({ error: "Enter a Real-Debrid API token without leading or trailing spaces." }, 400, { "cache-control": "no-store" });
+      if (!validTorBoxToken(input.token)) {
+        return json({ error: "Enter a TorBox API token without leading or trailing spaces." }, 400, { "cache-control": "no-store" });
       }
-      const validation = await validateRealDebridToken(input.token, env.REAL_DEBRID_ORIGIN);
+      const validation = await validateTorBoxApiToken(input.token, env);
       if (validation === "invalid") {
-        return json({ error: "Real-Debrid rejected this token. Check it and try again." }, 400, { "cache-control": "no-store" });
+        return json({ error: "TorBox rejected this token. Check it and try again." }, 400, { "cache-control": "no-store" });
       }
       if (validation === "unavailable") {
-        return json({ error: "Real-Debrid could not validate this token right now. Nothing was saved." }, 502, { "cache-control": "no-store" });
+        return json({ error: "TorBox could not validate this token right now. Nothing was saved." }, 502, { "cache-control": "no-store" });
       }
-      const status = await storeRealDebridCredential(env.DB, household.id, input.token, env.CONFIG_SECRET);
+      const status = await storeTorBoxCredential(env.DB, household.id, input.token, env.CONFIG_SECRET);
       return json(
-        { ...status, message: "Real-Debrid connected. The token is stored encrypted for this Household." },
+        { ...status, message: "TorBox connected. The token is stored encrypted for this Household." },
         200,
         { "cache-control": "no-store" },
       );
-    }
-
-    const providerProbeMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/provider-probe(?:\/(redirect))?$/);
-    if (request.method === "POST" && providerProbeMatch) {
-      const household = await findHousehold(env.DB, providerProbeMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
-        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
-      }
-      let token: string | null;
-      try {
-        token = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
-      } catch {
-        return json({ error: "The Household Real-Debrid credential could not be decrypted. Save it again in Settings." }, 503, { "cache-control": "no-store" });
-      }
-      if (!token) {
-        return json({ error: "Connect Real-Debrid in Parent Page Settings before running the provider probe." }, 409, { "cache-control": "no-store" });
-      }
-      return firstPartyProviderProbeResponse(request, env, token, Boolean(providerProbeMatch[2]));
     }
 
     const deleteMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)$/);
@@ -563,8 +544,8 @@ export default {
       if (![1, 4, 8].includes(windowHours)) {
         return json({ error: "Choose a preparation window of 1, 4, or 8 hours." }, 400);
       }
-      if (!(await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET))) {
-        return json({ error: "Configure Real-Debrid before starting a Preparation Run." }, 409);
+      if (!(await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET))) {
+        return json({ error: "Configure TorBox before starting a Preparation Run." }, 409);
       }
       const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
       if (!schedule.length) return json({ error: "The TV Channel has no programmes to prepare." }, 409);
@@ -723,9 +704,9 @@ export default {
         return addonJson({ error: "Stream authorization is invalid or expired." }, 403, { "cache-control": "no-store" });
       }
       try {
-        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
-        if (!realDebridToken) {
-          return addonJson({ error: "Real-Debrid is not configured for this Household." }, 503, { "cache-control": "no-store" });
+        const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!torBoxToken) {
+          return addonJson({ error: "TorBox is not configured for this Household." }, 503, { "cache-control": "no-store" });
         }
         let currentIdentity: StreamIdentity = identity;
         let context = await streamSelectionContext(env.DB, household.id, currentIdentity);
@@ -736,8 +717,10 @@ export default {
               env.DB,
               household.id,
               currentIdentity,
-              realDebridToken,
+              torBoxToken,
               env,
+              Date.now(),
+              request.headers.get("cf-connecting-ip") ?? undefined,
             );
             return new Response(null, {
               status: 302,
@@ -755,7 +738,7 @@ export default {
               env.DB,
               household.id,
               currentIdentity,
-              realDebridToken,
+              torBoxToken,
               env,
             );
             excludedInfoHashes.add(context.infoHash);
@@ -765,7 +748,7 @@ export default {
               household.id,
               context.contentType,
               context.videoId,
-              realDebridToken,
+              torBoxToken,
               env,
               new Date(),
               excludedInfoHashes,
@@ -789,10 +772,10 @@ export default {
             { "cache-control": "no-store" },
           );
         }
-        if (error instanceof RealDebridResolutionError) {
+        if (error instanceof TorBoxResolutionError) {
           const retryAfter = error.retryAfter ? { "retry-after": error.retryAfter } : undefined;
           return addonJson(
-            { error: "Real-Debrid could not resolve this stream. Try again." },
+            { error: "TorBox could not resolve this stream. Try again." },
             error.status === 429 ? 503 : 502,
             { "cache-control": "no-store", ...retryAfter },
           );
@@ -830,8 +813,8 @@ export default {
         return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
       try {
-        const realDebridToken = await loadRealDebridCredential(env.DB, household.id, env.CONFIG_SECRET);
-        if (!realDebridToken) {
+        const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
+        if (!torBoxToken) {
           if (streamMatch[2] === "series") {
             await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
           }
@@ -842,7 +825,7 @@ export default {
           household.id,
           streamMatch[2] as StreamContentType,
           videoId,
-          realDebridToken,
+          torBoxToken,
           env,
         );
         if (!selection) {
@@ -881,7 +864,7 @@ export default {
         );
         return addonJson({ streams: [{
           name: "Kids Channels",
-          description: `${selection.quality} • Real-Debrid cached`,
+          description: `${selection.quality} • TorBox ready`,
           url: `${url.origin}/addons/${household.secret}/resolve/${resolveToken}`,
           behaviorHints: {
             bingeGroup: streamMatch[2] === "series"

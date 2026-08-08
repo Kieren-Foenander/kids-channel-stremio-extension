@@ -1,6 +1,6 @@
 import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { storeRealDebridCredential } from "../src/real-debrid-credentials";
+import { storeTorBoxCredential } from "../src/torbox-credentials";
 import { issueStreamToken } from "../src/secrets";
 import { cancelTvPreparationRun, createTvPreparationRun, tvPreparationRun } from "../src/tv-preparation";
 import { requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
@@ -35,7 +35,10 @@ beforeEach(async () => {
     auth_version INTEGER NOT NULL DEFAULT 1,
     real_debrid_token_ciphertext TEXT,
     real_debrid_token_iv TEXT,
-    real_debrid_token_updated_at TEXT
+    real_debrid_token_updated_at TEXT,
+    torbox_token_ciphertext TEXT,
+    torbox_token_iv TEXT,
+    torbox_token_updated_at TEXT
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS pin_attempts (
     household_id TEXT NOT NULL, origin_hash TEXT NOT NULL, failed_attempts INTEGER NOT NULL,
@@ -409,7 +412,7 @@ describe("Parent Page Household creation", () => {
   });
 });
 
-describe("Household Real-Debrid credential", () => {
+describe("Household TorBox credential", () => {
   async function access(created: CreatedHousehold) {
     const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/unlock`, {
       method: "POST",
@@ -423,16 +426,16 @@ describe("Household Real-Debrid credential", () => {
     const created = await create();
     const secret = secretFrom(created);
     const session = await access(created);
-    const token = "household-real-debrid-token";
-    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const token = "household-torbox-token";
+    const torBox = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
-      expect(url.pathname).toBe("/rest/1.0/user");
+      expect(url.pathname).toBe("/v1/api/user/me");
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${token}`);
-      return Response.json({ id: 123, username: "parent" });
+      return Response.json({ success: true, data: { id: 123, username: "parent" } });
     });
 
-    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`)).status).toBe(401);
-    const saved = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/torbox`)).status).toBe(401);
+    const saved = await SELF.fetch(`https://kids.test/api/households/${secret}/torbox`, {
       method: "PUT",
       headers: { ...session, "content-type": "application/json" },
       body: JSON.stringify({ token }),
@@ -443,18 +446,18 @@ describe("Household Real-Debrid credential", () => {
     expect(savedBody).toMatchObject({ configured: true, updatedAt: expect.any(String) });
     expect(savedBody).not.toHaveProperty("token");
     expect(JSON.stringify(savedBody)).not.toContain(token);
-    expect(realDebrid).toHaveBeenCalledOnce();
+    expect(torBox).toHaveBeenCalledOnce();
 
-    const stored = await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv
+    const stored = await env.DB.prepare(`SELECT torbox_token_ciphertext, torbox_token_iv
       FROM households WHERE id = ?`).bind(created.householdId).first<{
-        real_debrid_token_ciphertext: string;
-        real_debrid_token_iv: string;
+        torbox_token_ciphertext: string;
+        torbox_token_iv: string;
       }>();
-    expect(stored?.real_debrid_token_ciphertext).toBeTruthy();
-    expect(stored?.real_debrid_token_iv).toBeTruthy();
+    expect(stored?.torbox_token_ciphertext).toBeTruthy();
+    expect(stored?.torbox_token_iv).toBeTruthy();
     expect(JSON.stringify(stored)).not.toContain(token);
 
-    const status = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, { headers: session });
+    const status = await SELF.fetch(`https://kids.test/api/households/${secret}/torbox`, { headers: session });
     const statusText = await status.clone().text();
     expect(await status.json()).toMatchObject({ configured: true, updatedAt: savedBody.updatedAt });
     expect(statusText).not.toContain(token);
@@ -464,7 +467,7 @@ describe("Household Real-Debrid credential", () => {
     const created = await create();
     const secret = secretFrom(created);
     const session = await access(created);
-    const endpoint = `https://kids.test/api/households/${secret}/real-debrid`;
+    const endpoint = `https://kids.test/api/households/${secret}/torbox`;
 
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(Response.json({ error: "bad_token" }, { status: 401 }));
     const invalid = await SELF.fetch(endpoint, {
@@ -473,7 +476,7 @@ describe("Household Real-Debrid credential", () => {
       body: JSON.stringify({ token: "invalid-token" }),
     });
     expect(invalid.status).toBe(400);
-    expect(await invalid.json()).toEqual({ error: "Real-Debrid rejected this token. Check it and try again." });
+    expect(await invalid.json()).toEqual({ error: "TorBox rejected this token. Check it and try again." });
 
     vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("provider unavailable"));
     const unavailable = await SELF.fetch(endpoint, {
@@ -482,34 +485,34 @@ describe("Household Real-Debrid credential", () => {
       body: JSON.stringify({ token: "unvalidated-token" }),
     });
     expect(unavailable.status).toBe(502);
-    expect(await unavailable.json()).toEqual({ error: "Real-Debrid could not validate this token right now. Nothing was saved." });
-    expect(await env.DB.prepare("SELECT real_debrid_token_ciphertext FROM households WHERE id = ?")
-      .bind(created.householdId).first()).toMatchObject({ real_debrid_token_ciphertext: null });
+    expect(await unavailable.json()).toEqual({ error: "TorBox could not validate this token right now. Nothing was saved." });
+    expect(await env.DB.prepare("SELECT torbox_token_ciphertext FROM households WHERE id = ?")
+      .bind(created.householdId).first()).toMatchObject({ torbox_token_ciphertext: null });
   });
 
   it("clears only the Household credential and reports the resulting playback state", async () => {
     const created = await create();
     const secret = secretFrom(created);
     const session = await access(created);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ id: 123 }));
-    await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ success: true, data: { id: 123 } }));
+    await SELF.fetch(`https://kids.test/api/households/${secret}/torbox`, {
       method: "PUT",
       headers: { ...session, "content-type": "application/json" },
       body: JSON.stringify({ token: "token-to-clear" }),
     });
 
-    const cleared = await SELF.fetch(`https://kids.test/api/households/${secret}/real-debrid`, {
+    const cleared = await SELF.fetch(`https://kids.test/api/households/${secret}/torbox`, {
       method: "DELETE",
       headers: session,
     });
     const body = await cleared.json<Record<string, unknown>>();
     expect(body).toMatchObject({ configured: false, updatedAt: null });
     expect(body.message).toContain("playback is unavailable");
-    expect(await env.DB.prepare(`SELECT real_debrid_token_ciphertext, real_debrid_token_iv, real_debrid_token_updated_at
+    expect(await env.DB.prepare(`SELECT torbox_token_ciphertext, torbox_token_iv, torbox_token_updated_at
       FROM households WHERE id = ?`).bind(created.householdId).first()).toEqual({
-      real_debrid_token_ciphertext: null,
-      real_debrid_token_iv: null,
-      real_debrid_token_updated_at: null,
+      torbox_token_ciphertext: null,
+      torbox_token_iv: null,
+      torbox_token_updated_at: null,
     });
   });
 });
@@ -791,7 +794,7 @@ describe("TV Channel client-side stream resolution", () => {
   it("returns exactly one cached first-party stream and reuses its D1 selection", async () => {
     const created = await arrangePlayback();
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
-    await storeRealDebridCredential(
+    await storeTorBoxCredential(
       env.DB,
       created.householdId,
       "household-rd-token",
@@ -800,7 +803,6 @@ describe("TV Channel client-side stream resolution", () => {
     vi.restoreAllMocks();
 
     const hash = "a".repeat(40);
-    let selected = false;
     const outbound = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       if (url.hostname.includes("zilean")) {
@@ -814,22 +816,22 @@ describe("TV Channel client-side stream resolution", () => {
       }
       if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
-      if (url.pathname.endsWith("/torrents/addMagnet")) return Response.json({ id: "rd-torrent-one" });
-      if (url.pathname.endsWith("/torrents/info/rd-torrent-one")) {
-        return Response.json({
-          status: selected ? "downloaded" : "waiting_files_selection",
-          files: [{ id: 7, path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", bytes: 1_000, selected: selected ? 1 : 0 }],
-          links: selected ? ["https://restricted.test/link"] : [],
-        });
+      if (url.pathname.endsWith("/torrents/createtorrent")) {
+        expect((init?.body as FormData).get("add_only_if_cached")).toBe("true");
+        return Response.json({ success: true, data: { torrent_id: 71 } });
       }
-      if (url.pathname.endsWith("/torrents/selectFiles/rd-torrent-one")) {
-        expect((init?.body as URLSearchParams).get("files")).toBe("7");
-        selected = true;
-        return new Response(null, { status: 204 });
-      }
-      if (url.pathname.endsWith("/unrestrict/link")) {
-        expect((init?.body as URLSearchParams).get("link")).toBe("https://restricted.test/link");
-        return Response.json({ download: "https://download.real-debrid.test/fresh-signed-media" });
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 71,
+        hash,
+        download_state: "cached",
+        download_present: true,
+        download_finished: true,
+        files: [{ id: 7, name: "/Playback.Show.S01E01.1080p.WEB-DL.mkv", size: 1_000 }],
+      } });
+      if (url.pathname.endsWith("/torrents/requestdl")) {
+        expect(url.searchParams.get("token")).toBe("household-rd-token");
+        expect(url.searchParams.get("file_id")).toBe("7");
+        return Response.json({ success: true, data: "https://download.torbox.test/fresh-signed-media" });
       }
       throw new Error(`unexpected outbound request: ${url}`);
     });
@@ -841,7 +843,7 @@ describe("TV Channel client-side stream resolution", () => {
     expect(firstBody).toEqual({
       streams: [{
         name: "Kids Channels",
-        description: "1080p • Real-Debrid cached",
+        description: "1080p • TorBox ready",
         url: expect.stringMatching(new RegExp(`^${base}/resolve/[^/]+$`)),
         behaviorHints: {
           bingeGroup: "kids-channels-tv",
@@ -853,50 +855,50 @@ describe("TV Channel client-side stream resolution", () => {
     expect(await (await SELF.fetch(streamUrl)).json()).toEqual(firstBody);
     expect(outbound).toHaveBeenCalledTimes(requestCount);
     expect(await env.DB.prepare("SELECT torrent_id, file_id, video_id FROM stream_selections").first()).toMatchObject({
-      torrent_id: "rd-torrent-one",
+      torrent_id: "71",
       file_id: 7,
       video_id: canonicalEpisodeId,
     });
 
     const resolve = await SELF.fetch(firstBody.streams[0].url, { redirect: "manual" });
     expect(resolve.status).toBe(302);
-    expect(resolve.headers.get("location")).toBe("https://download.real-debrid.test/fresh-signed-media");
+    expect(resolve.headers.get("location")).toBe("https://download.torbox.test/fresh-signed-media");
     expect(resolve.headers.get("cache-control")).toBe("no-store");
     expect(resolve.headers.get("referrer-policy")).toBe("no-referrer");
     expect(await resolve.text()).toBe("");
   });
 
-  it("rejects forged resolution and invalidates a dead Real-Debrid selection", async () => {
+  it("rejects forged resolution and invalidates a dead TorBox selection", async () => {
     const created = await arrangePlayback();
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
       .bind(created.householdId)
       .first<{ id: string }>();
     await env.DB.prepare(`INSERT INTO stream_selections
       (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
         quality, seeders, selected_at, stale_at)
-      VALUES (?, ?, 'series', ?, 'dead-torrent', ?, 7, 'Playback.Show.S01E01.mkv',
+      VALUES (?, ?, 'series', ?, '69', ?, 7, 'Playback.Show.S01E01.mkv',
         '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
       .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
       .run();
     const token = await issueStreamToken(
       created.householdId,
-      "dead-torrent",
+      "69",
       7,
       Date.parse("2099-07-31T00:00:00.000Z"),
       env.CONFIG_SECRET,
     );
     vi.restoreAllMocks();
     let deadInfoRequests = 0;
-    const realDebrid = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const torBox = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
-      if (url.pathname.endsWith("/torrents/info/dead-torrent")) {
+      if (url.pathname.endsWith("/torrents/mylist") && url.searchParams.get("id") === "69") {
         deadInfoRequests += 1;
         expect(new Headers(init?.headers).get("authorization")).toBe("Bearer household-rd-token");
-        return Response.json({ status: "dead", files: [], links: [] });
+        return Response.json({ success: false, error: "DOWNLOAD_NOT_FOUND", detail: "Torrent not found" }, { status: 404 });
       }
-      if (url.pathname.endsWith("/torrents/delete/dead-torrent")) return new Response(null, { status: 204 });
+      if (url.pathname.endsWith("/torrents/controltorrent")) return Response.json({ success: true, data: true });
       if (url.pathname.endsWith("/dmm/filtered")) return Response.json([]);
       if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
       throw new Error(`unexpected outbound request: ${url}`);
@@ -906,14 +908,14 @@ describe("TV Channel client-side stream resolution", () => {
     const forgedToken = `${payload}.${signature.startsWith("A") ? "B" : "A"}${signature.slice(1)}`;
     const forged = await SELF.fetch(`${base}/resolve/${forgedToken}`, { redirect: "manual" });
     expect(forged.status).toBe(403);
-    expect(realDebrid).not.toHaveBeenCalled();
+    expect(torBox).not.toHaveBeenCalled();
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
 
     const dead = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
     const deadBody = await dead.text();
     expect(dead.status).toBe(410);
     expect(deadBody).toContain("Request the stream again");
-    expect(deadBody).not.toContain("dead-torrent");
+    expect(deadBody).not.toContain("69");
     expect(deadBody).not.toContain("household-rd-token");
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 0 });
     expect(deadInfoRequests).toBe(1);
@@ -923,10 +925,10 @@ describe("TV Channel client-side stream resolution", () => {
     expect(deadInfoRequests).toBe(1);
   });
 
-  it("preserves a valid selection when Real-Debrid is transiently rate limited", async () => {
+  it("preserves a valid selection when TorBox is transiently rate limited", async () => {
     const created = await arrangePlayback();
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
       .bind(created.householdId)
       .first<{ id: string }>();
@@ -953,27 +955,27 @@ describe("TV Channel client-side stream resolution", () => {
     const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
     expect(response.status).toBe(503);
     expect(response.headers.get("retry-after")).toBe("17");
-    expect(await response.json()).toEqual({ error: "Real-Debrid could not resolve this stream. Try again." });
+    expect(await response.json()).toEqual({ error: "TorBox could not resolve this stream. Try again." });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first()).toMatchObject({ count: 1 });
   });
 
   it("automatically retries a different cached torrent when the selected link was removed", async () => {
     const created = await arrangePlayback();
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const programme = await env.DB.prepare("SELECT id FROM approved_programmes WHERE household_id = ?")
       .bind(created.householdId)
       .first<{ id: string }>();
     await env.DB.prepare(`INSERT INTO stream_selections
       (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
         quality, seeders, selected_at, stale_at)
-      VALUES (?, ?, 'series', ?, 'removed-torrent', ?, 7, 'Playback.Show.S01E01.removed.mkv',
+      VALUES (?, ?, 'series', ?, '70', ?, 7, 'Playback.Show.S01E01.removed.mkv',
         '1080p', 10, '2026-07-30T00:00:00.000Z', '2099-07-31T00:00:00.000Z')`)
       .bind(created.householdId, programme!.id, canonicalEpisodeId, "a".repeat(40))
       .run();
     const token = await issueStreamToken(
       created.householdId,
-      "removed-torrent",
+      "70",
       7,
       Date.parse("2099-07-31T00:00:00.000Z"),
       env.CONFIG_SECRET,
@@ -985,23 +987,26 @@ describe("TV Channel client-side stream resolution", () => {
       const url = new URL(input instanceof Request ? input.url : input.toString());
       expect(new Headers(init?.headers).get("authorization") ?? "Bearer household-rd-token")
         .toBe("Bearer household-rd-token");
-      if (url.pathname.endsWith("/torrents/info/removed-torrent")) {
-        return Response.json({
-          status: "downloaded",
-          files: [{ id: 7, path: "/Playback.Show.S01E01.removed.mkv", bytes: 1_000, selected: 1 }],
-          links: ["https://restricted.test/removed"],
-        });
+      if (url.pathname.endsWith("/torrents/mylist") && url.searchParams.get("id") === "70") {
+        return Response.json({ success: true, data: {
+          id: "70",
+          hash: "a".repeat(40),
+          download_state: "cached",
+          download_present: true,
+          download_finished: true,
+          files: [{ id: 7, name: "/Playback.Show.S01E01.removed.mkv", size: 1_000 }],
+        } });
       }
-      if (url.pathname.endsWith("/torrents/delete/removed-torrent")) {
-        return new Response(null, { status: 204 });
+      if (url.pathname.endsWith("/torrents/controltorrent")) {
+        return Response.json({ success: true, data: true });
       }
-      if (url.pathname.endsWith("/unrestrict/link")) {
-        const link = (init?.body as URLSearchParams).get("link");
-        if (link === "https://restricted.test/removed") {
-          return Response.json({ error: "content infringement" }, { status: 451 });
+      if (url.pathname.endsWith("/torrents/requestdl")) {
+        if (url.searchParams.get("torrent_id") === "70") {
+          return Response.json({ success: false, error: "DOWNLOAD_NOT_FOUND", detail: "Download was removed" }, { status: 404 });
         }
-        expect(link).toBe("https://restricted.test/alternate");
-        return Response.json({ download: "https://download.real-debrid.test/alternate-media" });
+        expect(url.searchParams.get("torrent_id")).toBe("72");
+        expect(url.searchParams.get("file_id")).toBe("8");
+        return Response.json({ success: true, data: "https://download.torbox.test/alternate-media" });
       }
       if (url.pathname.endsWith("/dmm/filtered")) {
         expect(url.searchParams.get("ImdbId")).toBe("tt2468101");
@@ -1014,26 +1019,24 @@ describe("TV Channel client-side stream resolution", () => {
         }]);
       }
       if (url.pathname.endsWith("/v1")) return Response.json({ hits: [] });
-      if (url.pathname.endsWith("/torrents/addMagnet")) {
-        expect((init?.body as URLSearchParams).get("magnet")).toContain(alternateHash);
-        return Response.json({ id: "alternate-torrent" });
+      if (url.pathname.endsWith("/torrents/createtorrent")) {
+        expect((init?.body as FormData).get("magnet")).toContain(alternateHash);
+        return Response.json({ success: true, data: { torrent_id: 72 } });
       }
-      if (url.pathname.endsWith("/torrents/selectFiles/alternate-torrent")) {
-        expect((init?.body as URLSearchParams).get("files")).toBe("8");
-        return new Response(null, { status: 204 });
-      }
-      if (url.pathname.endsWith("/torrents/info/alternate-torrent")) {
+      if (url.pathname.endsWith("/torrents/mylist") && url.searchParams.get("id") === "72") {
         alternateInfoRequests += 1;
-        return Response.json({
-          status: alternateInfoRequests === 1 ? "waiting_files_selection" : "downloaded",
+        return Response.json({ success: true, data: {
+          id: 72,
+          hash: alternateHash,
+          download_state: "cached",
+          download_present: true,
+          download_finished: true,
           files: [{
             id: 8,
-            path: "/Playback.Show.S01E01.1080p.WEB-DL.mkv",
-            bytes: 2_000,
-            selected: alternateInfoRequests > 1 ? 1 : 0,
+            name: "/Playback.Show.S01E01.1080p.WEB-DL.mkv",
+            size: 2_000,
           }],
-          links: alternateInfoRequests > 1 ? ["https://restricted.test/alternate"] : [],
-        });
+        } });
       }
       throw new Error(`unexpected outbound request: ${url}`);
     });
@@ -1041,9 +1044,9 @@ describe("TV Channel client-side stream resolution", () => {
     const response = await SELF.fetch(`${base}/resolve/${token}`, { redirect: "manual" });
 
     expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("https://download.real-debrid.test/alternate-media");
+    expect(response.headers.get("location")).toBe("https://download.torbox.test/alternate-media");
     expect(await env.DB.prepare("SELECT torrent_id, info_hash FROM stream_selections").first()).toMatchObject({
-      torrent_id: "alternate-torrent",
+      torrent_id: "72",
       info_hash: alternateHash,
     });
   });
@@ -1168,7 +1171,7 @@ describe("rolling TV Channel Schedule", () => {
 
   it("defers an unavailable episode without consuming it and returns a stable-group holding bumper", async () => {
     const { created, base } = await arrangeShows(2);
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const before = await metadata(base);
     const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
     const unavailableProgramme = unavailableId.startsWith("tt9000001:") ? "programme-1" : "programme-2";
@@ -1216,7 +1219,7 @@ describe("rolling TV Channel Schedule", () => {
 
   it("uses a terminal bumper without autoplay when every show is unavailable", async () => {
     const { created, base } = await arrangeShows(1);
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const before = await metadata(base);
     const unavailableId = before.meta.behaviorHints.defaultVideoId as string;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
@@ -1244,7 +1247,7 @@ describe("rolling TV Channel Schedule", () => {
 
   it("finishes the prior programme before deferring an unavailable upcoming episode", async () => {
     const { created, base } = await arrangeShows(2);
-    await storeRealDebridCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const before = await metadata(base);
     const currentId = before.meta.videos[0].id as string;
     const unavailableId = before.meta.videos[1].id as string;

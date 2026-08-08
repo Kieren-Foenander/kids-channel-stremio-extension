@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { loadRealDebridCredential } from "./real-debrid-credentials";
+import { loadTorBoxCredential } from "./torbox-credentials";
 import { selectCachedStream, type StreamSelectionEnv, type StreamSelectionOutcome } from "./stream-selection";
 import type { TvScheduledProgramme } from "./tv-channel";
 
@@ -83,9 +83,9 @@ export function tvPreparationOutcomeMessage(outcome?: StreamSelectionOutcome): s
   if (outcome.status === "no_candidates") return "No matching torrent sources found; searching again next round";
   if (outcome.status === "candidates_exhausted") return "Known sources are temporarily exhausted; searching again next round";
   if (outcome.status === "candidate_rejected") return "Source rejected; the next round will try another source";
-  if (outcome.status === "temporarily_unavailable") return "Real-Debrid could not inspect this source; it will be retried";
-  if (outcome.status === "downloading") return "Real-Debrid is downloading this source";
-  return "Cached by Real-Debrid";
+  if (outcome.status === "temporarily_unavailable") return "TorBox could not inspect this source; it will be retried";
+  if (outcome.status === "downloading") return "TorBox is downloading this source";
+  return "Cached by TorBox";
 }
 
 export interface TvPreparationWorkflowParams {
@@ -230,7 +230,7 @@ async function processBatch(
     let outcome: StreamSelectionOutcome | undefined;
     const selection = await selectCachedStream(
       env.DB, householdId, "series", item.videoId, token, env, now, new Set(),
-      { maxCacheChecks: 1, cacheCheckTimeoutMs: 1_000, onOutcome: (value) => { outcome = value; } },
+      { maxCacheChecks: 10, cacheCheckTimeoutMs: 1_000, onOutcome: (value) => { outcome = value; } },
     );
     const stored = await env.DB.prepare(`SELECT download_pending, quality, filename, info_hash FROM stream_selections
       WHERE household_id = ? AND content_type = 'series' AND video_id = ?`)
@@ -290,8 +290,8 @@ export class TvSchedulePreparationWorkflow extends WorkflowEntrypoint<TvPreparat
             async () => {
               if (!this.env.CONFIG_SECRET) throw new Error("Configuration secret is unavailable");
               // Keep the decrypted credential inside the step callback so it is never persisted as Workflow output.
-              const token = await loadRealDebridCredential(this.env.DB, householdId, this.env.CONFIG_SECRET);
-              if (!token) throw new Error("Real-Debrid is not configured");
+              const token = await loadTorBoxCredential(this.env.DB, householdId, this.env.CONFIG_SECRET);
+              if (!token) throw new Error("TorBox is not configured");
               return processBatch(this.env, runId, householdId, token, batch);
             });
           if (complete) return;
