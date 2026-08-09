@@ -25,6 +25,8 @@ Keep `.dev.vars` private; `CONFIG_SECRET` signs one-hour Parent sessions. Open `
 
 Stremio retains loaded addon metadata in memory even when responses use `Cache-Control: no-store`. After a Parent changes the Approved Library or regenerates selections, fully close and reopen Stremio to load the updated Channel. The Worker state changes immediately and does not interrupt media already playing.
 
+When TorBox is connected, Kids Channels automatically warms the next twenty TV episodes. Every schedule advancement or correction reconciles the active Preparation Run in the background, and a fifteen-minute scheduled check restarts preparation when a selection expires or an earlier trigger was missed. The Parent Page reports progress but does not require a manual preparation action.
+
 Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN or account recovery. Five incorrect PIN attempts from one request origin within 15 minutes lock PIN access from that origin for 15 minutes for that Household only. A Parent can rotate the PIN by supplying the current PIN; rotation invalidates older Parent sessions. Permanent deletion requires the current PIN plus the exact confirmation `DELETE`, removes all Household data, and invalidates every synced addon route.
 
 ## Test

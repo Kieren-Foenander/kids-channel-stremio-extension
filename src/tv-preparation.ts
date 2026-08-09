@@ -1,12 +1,15 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { loadTorBoxCredential } from "./torbox-credentials";
+import { loadTorBoxCredential, torBoxCredentialStatus } from "./torbox-credentials";
 import { selectCachedStream, type StreamSelectionEnv, type StreamSelectionOutcome } from "./stream-selection";
-import type { TvScheduledProgramme } from "./tv-channel";
+import { tvChannelSchedule, type TvScheduledProgramme } from "./tv-channel";
 
 const ROUND_INTERVAL = "5 minutes";
 const MAX_ROUNDS = 96;
 const ITEMS_PER_STEP = 5;
 const MAX_ITEM_BATCHES = 4;
+const AUTOMATIC_PREPARATION_COUNT = 20;
+const AUTOMATIC_PREPARATION_WINDOW_HOURS = 8;
+const AUTOMATIC_HOUSEHOLD_LIMIT = 100;
 
 export type TvPreparationRunStatus = "queued" | "running" | "completed" | "cancelled" | "failed";
 export type TvPreparationItemStatus = "queued" | "trying" | "downloading" | "ready" | "unavailable" | "cancelled";
@@ -96,6 +99,12 @@ export interface TvPreparationWorkflowParams {
 interface TvPreparationWorkflowEnv extends StreamSelectionEnv {
   DB: D1Database;
   CONFIG_SECRET?: string;
+}
+
+export interface AutomaticTvPreparationEnv extends TvPreparationWorkflowEnv {
+  TV_PREPARATION: Workflow<TvPreparationWorkflowParams>;
+  TV_SCHEDULE_SEED?: string;
+  AUTOMATIC_TV_PREPARATION_DISABLED?: string;
 }
 
 export async function createTvPreparationRun(
@@ -194,7 +203,12 @@ export async function tvPreparationRun(
   };
 }
 
-export async function cancelTvPreparationRun(db: D1Database, householdId: string, now = new Date()): Promise<TvPreparationRun | null> {
+export async function cancelTvPreparationRun(
+  db: D1Database,
+  householdId: string,
+  now = new Date(),
+  message = "Stopped by Parent",
+): Promise<TvPreparationRun | null> {
   const active = await db.prepare(`SELECT id FROM tv_preparation_runs
     WHERE household_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`)
     .bind(householdId).first<{ id: string }>();
@@ -203,10 +217,152 @@ export async function cancelTvPreparationRun(db: D1Database, householdId: string
   await db.batch([
     db.prepare(`UPDATE tv_preparation_runs SET status = 'cancelled', completed_at = ?, updated_at = ?
       WHERE id = ? AND status IN ('queued', 'running')`).bind(timestamp, timestamp, active.id),
-    db.prepare(`UPDATE tv_preparation_items SET status = 'cancelled', message = 'Stopped by Parent', updated_at = ?
-      WHERE run_id = ? AND status NOT IN ('ready', 'unavailable')`).bind(timestamp, active.id),
+    db.prepare(`UPDATE tv_preparation_items SET status = 'cancelled', message = ?, updated_at = ?
+      WHERE run_id = ? AND status NOT IN ('ready', 'unavailable')`).bind(message, timestamp, active.id),
   ]);
   return tvPreparationRun(db, householdId, active.id);
+}
+
+async function activeTvPreparationRun(db: D1Database, householdId: string): Promise<TvPreparationRun | null> {
+  const active = await db.prepare(`SELECT id FROM tv_preparation_runs
+    WHERE household_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1`)
+    .bind(householdId).first<{ id: string }>();
+  return active ? tvPreparationRun(db, householdId, active.id) : null;
+}
+
+function snapshotMatches(run: TvPreparationRun, schedule: TvScheduledProgramme[]): boolean {
+  return run.items.length === schedule.length
+    && run.items.every((item, index) => item.videoId === schedule[index]?.episode.id);
+}
+
+async function scheduleIsHot(
+  db: D1Database,
+  householdId: string,
+  schedule: TvScheduledProgramme[],
+  now: Date,
+): Promise<boolean> {
+  if (!schedule.length) return true;
+  const placeholders = schedule.map(() => "?").join(", ");
+  const row = await db.prepare(`SELECT COUNT(DISTINCT video_id) AS count FROM stream_selections
+    WHERE household_id = ? AND content_type = 'series' AND download_pending = 0 AND stale_at > ?
+      AND video_id IN (${placeholders})`)
+    .bind(householdId, now.toISOString(), ...schedule.map((item) => item.episode.id))
+    .first<{ count: number }>();
+  return (row?.count ?? 0) === schedule.length;
+}
+
+async function terminateRun(env: AutomaticTvPreparationEnv, runId: string): Promise<void> {
+  if (env.AUTOMATIC_TV_PREPARATION_DISABLED === "true") return;
+  try { await (await env.TV_PREPARATION.get(runId)).terminate(); } catch { /* D1 status prevents further useful work */ }
+}
+
+export async function stopAutomaticTvPreparation(
+  env: AutomaticTvPreparationEnv,
+  householdId: string,
+  message: string,
+  now = new Date(),
+): Promise<void> {
+  const active = await activeTvPreparationRun(env.DB, householdId);
+  if (!active) return;
+  await cancelTvPreparationRun(env.DB, householdId, now, message);
+  await terminateRun(env, active.id);
+}
+
+export async function restartAutomaticTvPreparation(
+  env: AutomaticTvPreparationEnv,
+  householdId: string,
+  now = new Date(),
+): Promise<TvPreparationRun | null> {
+  await stopAutomaticTvPreparation(env, householdId, "Restarted after the TorBox connection changed", now);
+  return ensureAutomaticTvPreparation(env, householdId, undefined, now);
+}
+
+async function markRunFailed(db: D1Database, runId: string, reason: string, now = new Date()): Promise<void> {
+  const timestamp = now.toISOString();
+  await db.prepare(`UPDATE tv_preparation_runs
+    SET status = 'failed', failure_reason = ?, completed_at = ?, updated_at = ? WHERE id = ?`)
+    .bind(reason, timestamp, timestamp, runId).run();
+}
+
+export async function ensureAutomaticTvPreparation(
+  env: AutomaticTvPreparationEnv,
+  householdId: string,
+  suppliedSchedule?: TvScheduledProgramme[],
+  now = new Date(),
+): Promise<TvPreparationRun | null> {
+  if (!(await torBoxCredentialStatus(env.DB, householdId)).configured) return null;
+  const schedule = (suppliedSchedule ?? await tvChannelSchedule(env.DB, householdId, env.TV_SCHEDULE_SEED))
+    .slice(0, AUTOMATIC_PREPARATION_COUNT);
+  const active = await activeTvPreparationRun(env.DB, householdId);
+  if (active && snapshotMatches(active, schedule)) return active;
+  if (active) {
+    await cancelTvPreparationRun(env.DB, householdId, now, "Replaced by the latest Channel Schedule");
+    await terminateRun(env, active.id);
+  }
+  if (!schedule.length || await scheduleIsHot(env.DB, householdId, schedule, now)) return null;
+
+  let run: TvPreparationRun;
+  try {
+    run = await createTvPreparationRun(
+      env.DB,
+      householdId,
+      schedule,
+      AUTOMATIC_PREPARATION_COUNT,
+      AUTOMATIC_PREPARATION_WINDOW_HOURS,
+      now,
+    );
+  } catch (error) {
+    if (error instanceof Error && error.message === "preparation already active") {
+      return activeTvPreparationRun(env.DB, householdId);
+    }
+    throw error;
+  }
+  try {
+    if (env.AUTOMATIC_TV_PREPARATION_DISABLED === "true") return run;
+    await env.TV_PREPARATION.create({
+      id: run.id,
+      params: { runId: run.id, householdId },
+      retention: { successRetention: "7 days", errorRetention: "7 days" },
+    });
+  } catch (error) {
+    await markRunFailed(env.DB, run.id, "Cloudflare could not start automatic Channel preparation.", now);
+    throw error;
+  }
+  return run;
+}
+
+export async function ensureAutomaticTvPreparationForAll(env: AutomaticTvPreparationEnv): Promise<void> {
+  const timestamp = new Date().toISOString();
+  const { results } = await env.DB.prepare(`SELECT household.id FROM households household
+    WHERE household.torbox_token_ciphertext IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM tv_preparation_runs run
+        WHERE run.household_id = household.id AND run.status IN ('queued', 'running')
+      )
+      AND EXISTS (
+        SELECT 1 FROM channel_schedule schedule
+        WHERE schedule.household_id = household.id AND schedule.channel = 'tv'
+          AND NOT EXISTS (
+            SELECT 1 FROM stream_selections selection
+            WHERE selection.household_id = household.id AND selection.content_type = 'series'
+              AND selection.video_id = schedule.video_id AND selection.download_pending = 0
+              AND selection.stale_at > ?
+          )
+      )
+    ORDER BY household.created_at LIMIT ?`)
+    .bind(timestamp, AUTOMATIC_HOUSEHOLD_LIMIT)
+    .all<{ id: string }>();
+  for (const household of results) {
+    try {
+      await ensureAutomaticTvPreparation(env, household.id);
+    } catch (error) {
+      console.error(JSON.stringify({
+        message: "automatic TV preparation reconciliation failed",
+        householdId: household.id,
+        reason: error instanceof Error ? error.message : "unknown error",
+      }));
+    }
+  }
 }
 
 async function processBatch(

@@ -37,7 +37,7 @@ The Current Programme followed by the upcoming programmes selected for continuou
 _Avoid_: Queue, playlist
 
 **Preparation Run**:
-A Parent-triggered, time-bounded background attempt to make programmes in the current Channel Schedule ready in TorBox. It checks cached candidates first and may start one matching download per programme. It does not advance the Channel Schedule or Show Progress.
+An automatically triggered, time-bounded background attempt to keep the next twenty programmes in the current Channel Schedule ready in TorBox. It checks cached candidates first and may start one matching download per programme. It does not advance the Channel Schedule or Show Progress.
 _Avoid_: Seeder, download queue, preload
 
 **Unavailable Episode**:

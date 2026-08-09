@@ -13,6 +13,7 @@ The household rule—not technical restrictions—keeps children out of Stremio'
 - Stremio may show a detail page requiring one Play action if Fire TV cannot start directly from a Channel tile.
 - Kids Channels returns exactly one ready source at programme transitions, without exposing source selection.
 - Upcoming TV programmes may be visible and selectable. Selecting a distant programme skips bypassed programmes; the Parent can correct Show Progress.
+- With TorBox connected, automatically keep the next twenty scheduled TV episodes prepared without a Parent action.
 
 ## Parent Page
 

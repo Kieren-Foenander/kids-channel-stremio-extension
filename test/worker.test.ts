@@ -2,7 +2,12 @@ import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeTorBoxCredential } from "../src/torbox-credentials";
 import { issueStreamToken } from "../src/secrets";
-import { cancelTvPreparationRun, createTvPreparationRun, tvPreparationRun } from "../src/tv-preparation";
+import {
+  cancelTvPreparationRun,
+  createTvPreparationRun,
+  ensureAutomaticTvPreparation,
+  tvPreparationRun,
+} from "../src/tv-preparation";
 import { requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
 
 const SELF = {
@@ -1108,19 +1113,36 @@ describe("rolling TV Channel Schedule", () => {
     expect((await tvPreparationRun(env.DB, created.householdId))?.items.every((item) => item.message === "Stopped by Parent")).toBe(true);
   });
 
-  it("protects Preparation Run status and validates manual start settings", async () => {
+  it("exposes automatic preparation status without a manual start endpoint", async () => {
     const { created } = await arrangeShows(1);
     const endpoint = `https://kids.test/api/households/${secretFrom(created)}/tv-preparation`;
     expect((await SELF.fetch(endpoint)).status).toBe(401);
     const headers = await parentHeaders(created);
-    const invalid = await SELF.fetch(endpoint, {
+    expect(await (await SELF.fetch(endpoint, { headers })).json()).toEqual({ run: null });
+    const manualStart = await SELF.fetch(endpoint, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ count: 21, windowHours: 8 }),
     });
-    expect(invalid.status).toBe(400);
-    expect(await invalid.json()).toEqual({ error: "Choose between 1 and 20 programmes." });
-    expect(await (await SELF.fetch(endpoint, { headers })).json()).toEqual({ run: null });
+    expect(manualStart.status).toBe(404);
+  });
+
+  it("automatically snapshots twenty programmes and replaces the run after the schedule advances", async () => {
+    const { created } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-torbox-token", env.CONFIG_SECRET);
+    const firstSchedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const firstRun = await ensureAutomaticTvPreparation(env, created.householdId, firstSchedule, new Date("2026-08-01T10:00:00.000Z"));
+
+    expect(firstRun).toMatchObject({ status: "queued", requestedCount: 20 });
+    expect(firstRun?.items.map((item) => item.videoId)).toEqual(firstSchedule.map((item) => item.episode.id));
+
+    await requestTvProgramme(env.DB, created.householdId, firstSchedule[1].episode.id, "deterministic-test-seed");
+    const secondSchedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const secondRun = await ensureAutomaticTvPreparation(env, created.householdId, secondSchedule, new Date("2026-08-01T10:01:00.000Z"));
+
+    expect(secondRun?.id).not.toBe(firstRun?.id);
+    expect(secondRun?.items.map((item) => item.videoId)).toEqual(secondSchedule.map((item) => item.episode.id));
+    expect(await tvPreparationRun(env.DB, created.householdId, firstRun!.id)).toMatchObject({ status: "cancelled" });
   });
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {

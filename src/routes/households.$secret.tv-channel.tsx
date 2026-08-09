@@ -7,7 +7,6 @@ import { StateBadge } from "../components/StateBadge";
 import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Skeleton } from "../components/ui/skeleton";
-import { NativeSelect } from "../components/ui/native-select";
 import { useTvChannel, useTvPreparation } from "../lib/channel-queries";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
@@ -80,43 +79,12 @@ function TvChannelPage() {
   const [mutationStatus, setMutationStatus] = useState("");
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingRegeneration, setConfirmingRegeneration] = useState(false);
-  const [confirmingPreparation, setConfirmingPreparation] = useState(false);
-  const [preparationCount, setPreparationCount] = useState(20);
-  const [preparationHours, setPreparationHours] = useState(8);
-  const [preparationMessage, setPreparationMessage] = useState("");
-  const [preparationFailed, setPreparationFailed] = useState(false);
   const actionMutation = useMutation({
     mutationFn: async (kind: "undo" | "regenerate") => {
       const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
       return parentApi<{ message?: string }>(`${base}${path}`, { method: "POST" });
     },
   });
-  const preparationMutation = useMutation({
-    mutationFn: (action: "start" | "cancel") => parentApi<{ run: PreparationRun }>(
-      action === "start" ? `${base}/tv-preparation` : `${base}/tv-preparation/cancel`,
-      action === "start"
-        ? { method: "POST", body: { count: Math.min(preparationCount, state?.schedule.length ?? 20), windowHours: preparationHours } }
-        : { method: "POST" },
-    ),
-  });
-
-  async function changePreparation(action: "start" | "cancel") {
-    if (preparationMutation.isPending) return;
-    setPreparationMessage("");
-    setPreparationFailed(false);
-    try {
-      await preparationMutation.mutateAsync(action);
-      await queryClient.invalidateQueries({ queryKey: parentKeys.tvPreparation(secret) });
-      setPreparationMessage(action === "start"
-        ? "Preparation started. You can close this page while Cloudflare continues."
-        : "Preparation stopped. TorBox keeps anything already added or cached.");
-    } catch (error) {
-      setPreparationFailed(true);
-      setPreparationMessage(apiErrorMessage(error, `Preparation could not be ${action === "start" ? "started" : "stopped"}. Check your connection and try again.`));
-      throw error;
-    }
-  }
-
   async function performAction(kind: "undo" | "regenerate") {
     if (actionMutation.isPending) return;
     setMutationStatus("");
@@ -138,7 +106,6 @@ function TvChannelPage() {
   const visibleHistory = historyExpanded ? history : history.slice(0, HISTORY_PREVIEW_SIZE);
   const preparation = preparationQuery.data?.run;
   const preparationActive = preparation?.status === "queued" || preparation?.status === "running";
-  const countLimit = Math.max(1, Math.min(20, state?.schedule.length ?? 20));
 
   return (
     <section className="grid gap-10" aria-labelledby="page-heading">
@@ -170,42 +137,21 @@ function TvChannelPage() {
           </section>
 
           <section className="rounded-[4px] border bg-card p-5" aria-labelledby="preparation-heading">
-            <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-              <div className="max-w-2xl">
-                <Ident className="mb-2">TorBox</Ident>
-                <h2 id="preparation-heading" className="text-xl font-semibold tracking-[-0.01em]">Prepare for later</h2>
-                <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Ask TorBox to cache programmes from this Channel Schedule. Cloudflare keeps trying usable alternatives during the selected window, even after you close this page.</p>
-                <p className="mt-3 text-sm leading-relaxed text-muted-foreground">Preparation may run while the Channel is being watched. It checks cached sources first, then queues one matching uncached source when needed.</p>
-              </div>
-              {!preparationActive && (
-                <div className="grid shrink-0 grid-cols-2 gap-2 max-sm:w-full">
-                  <label className="grid gap-1 text-xs font-medium text-muted-foreground">Programmes
-                    <NativeSelect value={Math.min(preparationCount, countLimit)} onChange={(event) => setPreparationCount(Number(event.target.value))}>
-                      {Array.from({ length: countLimit }, (_, index) => index + 1).map((count) => <option key={count} value={count}>{count}</option>)}
-                    </NativeSelect>
-                  </label>
-                  <label className="grid gap-1 text-xs font-medium text-muted-foreground">Time window
-                    <NativeSelect value={preparationHours} onChange={(event) => setPreparationHours(Number(event.target.value))}>
-                      <option value={1}>1 hour</option>
-                      <option value={4}>4 hours</option>
-                      <option value={8}>8 hours</option>
-                    </NativeSelect>
-                  </label>
-                  <Button type="button" className="col-span-2" disabled={!state.schedule.length || preparationMutation.isPending} onClick={() => setConfirmingPreparation(true)}>Prepare schedule</Button>
-                </div>
-              )}
+            <div className="max-w-2xl">
+              <Ident className="mb-2">TorBox</Ident>
+              <h2 id="preparation-heading" className="text-xl font-semibold tracking-[-0.01em]">Automatic Channel warm-up</h2>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Kids Channels automatically keeps the next 20 scheduled episodes ready in TorBox. When the Channel advances or its schedule changes, the new final episode is queued for preparation in the background.</p>
+              <p className="mt-3 text-sm leading-relaxed text-muted-foreground">Cached matches become ready immediately. When none are cached, TorBox downloads one exact-match source and Kids Channels keeps checking it.</p>
             </div>
 
             {preparation && (
               <div className="mt-5 border-t pt-4">
-                {preparationActive && <p className="mb-4 text-sm text-muted-foreground">Preparation is active in the background. You can keep using the Channel while it runs.</p>}
                 <div className="flex flex-wrap items-center gap-2">
                   <StateBadge current={preparationActive}>{preparationStatusLabel(preparation.status)}</StateBadge>
                   <span className="font-mono text-xs text-muted-foreground">{preparation.counts.ready}/{preparation.requestedCount} ready</span>
                   {preparation.counts.downloading > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.downloading} downloading</span>}
                   {preparation.counts.trying + preparation.counts.queued > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.trying + preparation.counts.queued} trying</span>}
                   {preparation.counts.unavailable > 0 && <span className="font-mono text-xs text-muted-foreground">{preparation.counts.unavailable} unavailable</span>}
-                  {preparationActive && <Button type="button" variant="outline" size="sm" className="ml-auto" disabled={preparationMutation.isPending} onClick={() => void changePreparation("cancel").catch(() => undefined)}>{preparationMutation.variables === "cancel" ? "Stopping…" : "Stop preparation"}</Button>}
                 </div>
                 {preparation.failureReason && <p className="mt-3 text-sm text-destructive">{preparation.failureReason}</p>}
                 <ol className="mt-4 grid gap-2" aria-label="Preparation progress">
@@ -222,8 +168,8 @@ function TvChannelPage() {
                 </ol>
               </div>
             )}
+            {!preparation && !preparationQuery.isError && <p className="mt-4 text-sm text-muted-foreground">Warm-up begins automatically when TorBox is connected and the TV Channel has scheduled episodes.</p>}
             {preparationQuery.isError && <p className="mt-4 text-sm text-destructive">Preparation status could not be loaded.</p>}
-            <p className={preparationFailed ? "mt-4 text-sm font-medium text-destructive" : "mt-4 text-sm font-medium text-accent"} role={preparationFailed ? "alert" : "status"} aria-live="polite">{preparationMessage}</p>
           </section>
 
           <section aria-labelledby="schedule-heading">
@@ -281,20 +227,12 @@ function TvChannelPage() {
       )}
 
       <ConfirmationDialog open={confirmingRegeneration} pending={mutation === "regenerate"} onOpenChange={setConfirmingRegeneration} onConfirm={() => performAction("regenerate")} />
-      <PreparationDialog
-        open={confirmingPreparation}
-        pending={preparationMutation.isPending}
-        count={Math.min(preparationCount, countLimit)}
-        hours={preparationHours}
-        onOpenChange={setConfirmingPreparation}
-        onConfirm={() => changePreparation("start")}
-      />
     </section>
   );
 }
 
 function preparationStatusLabel(status: PreparationStatus) {
-  return ({ queued: "Starting", running: "Preparing", completed: "Finished", cancelled: "Stopped", failed: "Failed" } as const)[status];
+  return ({ queued: "Starting", running: "Preparing", completed: "Up to date", cancelled: "Refreshing", failed: "Retry pending" } as const)[status];
 }
 
 function preparationItemLabel(status: PreparationItemStatus) {
@@ -322,23 +260,6 @@ function ConfirmationDialog({ open, pending, onOpenChange, onConfirm }: { open: 
         <DialogFooter>
           <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Regenerating…" : "Regenerate selections"}</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function PreparationDialog({ open, pending, count, hours, onOpenChange, onConfirm }: { open: boolean; pending: boolean; count: number; hours: number; onOpenChange: (open: boolean) => void; onConfirm: () => Promise<void> }) {
-  return (
-    <Dialog modal={false} open={open} onOpenChange={(next) => { if (!pending) onOpenChange(next); }}>
-      <DialogContent className="data-closed:hidden" showCloseButton={false}>
-        <DialogHeader>
-          <DialogTitle>Prepare upcoming programmes?</DialogTitle>
-          <DialogDescription>For up to {hours} hour{hours === 1 ? "" : "s"}, Kids Channels will prepare {count} programme{count === 1 ? "" : "s"}. Cached matches become ready immediately; otherwise TorBox downloads one selected source and later rounds check its progress.</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button type="button" disabled={pending} onClick={() => { void onConfirm().then(() => onOpenChange(false)).catch(() => undefined); }}>{pending ? "Starting…" : "Start preparation"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

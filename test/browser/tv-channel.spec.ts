@@ -61,6 +61,9 @@ test("a Parent inspects and controls the TV Channel with progressive disclosure"
   await page.goto(`${parentUrl}/tv-channel`);
 
   await expect(page.getByRole("heading", { name: "TV Channel" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Automatic Channel warm-up" })).toBeVisible();
+  await expect(page.getByText("automatically keeps the next 20 scheduled episodes ready")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Prepare schedule" })).toBeHidden();
   const current = page.getByRole("heading", { name: "Current Programme" }).locator("..");
   await expect(current).toContainText("Green Adventures");
   await expect(current).toContainText("S01E01 — Episode 1");
