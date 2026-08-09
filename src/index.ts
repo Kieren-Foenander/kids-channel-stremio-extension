@@ -66,6 +66,7 @@ import {
   tvChannelSchedule,
   undoLatestTvAdvancement,
 } from "./tv-channel";
+import { pruneObsoleteChannelState } from "./channel-retention";
 
 export interface Env {
   DB: D1Database;
@@ -858,6 +859,20 @@ export default {
     return json({ error: "Not found." }, 404);
   },
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(ensureAutomaticTvPreparationForAll(env));
+    ctx.waitUntil(ensureAutomaticTvPreparationForAll(env).catch((error) => {
+      console.error(JSON.stringify({
+        message: "automatic TV preparation sweep failed",
+        reason: error instanceof Error ? error.message : "unknown error",
+      }));
+    }));
+    ctx.waitUntil(pruneObsoleteChannelState(env.DB).then((result) => {
+      const totalDeleted = Object.values(result.deleted).reduce((total, count) => total + count, 0);
+      if (totalDeleted > 0) console.log(JSON.stringify({ message: "obsolete Channel state pruned", ...result }));
+    }).catch((error) => {
+      console.error(JSON.stringify({
+        message: "obsolete Channel state cleanup failed",
+        reason: error instanceof Error ? error.message : "unknown error",
+      }));
+    }));
   },
 } satisfies ExportedHandler<Env>;

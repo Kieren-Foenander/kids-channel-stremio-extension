@@ -30,6 +30,7 @@ try {
   }
   execute(["--file", join(root, "test/fixtures/0019_duplicate_show_state.sql")]);
   execute(["--file", join(root, "migrations/0020_normalize_show_metadata.sql")]);
+  execute(["--file", join(root, "migrations/0021_add_channel_retention_cursor.sql")]);
 
   const counts = query(`SELECT
     (SELECT COUNT(*) FROM canonical_shows) AS canonical_shows,
@@ -64,7 +65,12 @@ try {
     throw new Error(`Household show metadata snapshots remain populated: ${JSON.stringify(snapshots)}`);
   }
 
-  console.log("Show metadata normalization migration preserved two Household states and deduplicated canonical rows.");
+  const retentionCursor = query("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'maintenance_cursors'");
+  if (retentionCursor[0]?.name !== "maintenance_cursors") {
+    throw new Error("Channel retention cursor migration was not applied");
+  }
+
+  console.log("D1 migrations preserved Household state, deduplicated canonical rows, and installed retention state.");
 } finally {
   rmSync(persistence, { recursive: true, force: true });
 }
