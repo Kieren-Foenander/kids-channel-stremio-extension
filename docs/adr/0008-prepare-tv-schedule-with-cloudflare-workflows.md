@@ -1,6 +1,6 @@
 # Prepare the TV Channel Schedule with Cloudflare Workflows
 
-Status: Superseded for provider and concurrency policy by ADR 0009. The Workflow design remains in force.
+Status: Superseded for provider and concurrency policy by ADR 0009, and for manual orchestration by ADR 0010. The bounded Workflow design remains in force.
 
 Kids Channels will let a Parent manually start a time-bounded Preparation Run for up to twenty programmes in the current Channel Schedule. The run snapshots those programmes, uses the Household's existing Real-Debrid credential to add and monitor torrent candidates, and continues in a Cloudflare Workflow after the Parent closes the page. It does not advance the Channel Schedule or Show Progress.
 

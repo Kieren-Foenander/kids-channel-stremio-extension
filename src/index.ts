@@ -48,8 +48,10 @@ import {
 } from "./stream-resolution";
 import { selectCachedStream, type StreamContentType } from "./stream-selection";
 import {
-  cancelTvPreparationRun,
-  createTvPreparationRun,
+  ensureAutomaticTvPreparation,
+  ensureAutomaticTvPreparationForAll,
+  restartAutomaticTvPreparation,
+  stopAutomaticTvPreparation,
   tvPreparationRun,
   TvSchedulePreparationWorkflow,
   type TvPreparationWorkflowParams,
@@ -75,6 +77,7 @@ export interface Env {
   TORBOX_ORIGIN?: string;
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
+  AUTOMATIC_TV_PREPARATION_DISABLED?: string;
   TV_PREPARATION: Workflow<TvPreparationWorkflowParams>;
 }
 
@@ -95,6 +98,16 @@ function json(value: unknown, status = 200, headers?: HeadersInit): Response {
 
 function addonJson(value: unknown, status = 200, headers?: HeadersInit): Response {
   return json(value, status, { "access-control-allow-origin": "*", ...headers });
+}
+
+function queueAutomaticTvPreparation(env: Env, ctx: ExecutionContext, householdId: string): void {
+  ctx.waitUntil(ensureAutomaticTvPreparation(env, householdId).catch((error) => {
+    console.error(JSON.stringify({
+      message: "automatic TV preparation trigger failed",
+      householdId,
+      reason: error instanceof Error ? error.message : "unknown error",
+    }));
+  }));
 }
 
 async function householdNotFoundResponse(request: Request, assets?: Fetcher): Promise<Response> {
@@ -227,7 +240,7 @@ function hasSameOrigin(request: Request): boolean {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
 
@@ -343,6 +356,7 @@ export default {
         return json(await torBoxCredentialStatus(env.DB, household.id), 200, { "cache-control": "no-store" });
       }
       if (request.method === "DELETE") {
+        await stopAutomaticTvPreparation(env, household.id, "Stopped because TorBox was disconnected");
         await clearTorBoxCredential(env.DB, household.id);
         return json(
           { configured: false, updatedAt: null, message: "TorBox disconnected. Channel playback is unavailable until another token is saved." },
@@ -363,6 +377,13 @@ export default {
         return json({ error: "TorBox could not validate this token right now. Nothing was saved." }, 502, { "cache-control": "no-store" });
       }
       const status = await storeTorBoxCredential(env.DB, household.id, input.token, env.CONFIG_SECRET);
+      ctx.waitUntil(restartAutomaticTvPreparation(env, household.id).catch((error) => {
+        console.error(JSON.stringify({
+          message: "automatic TV preparation could not restart after TorBox connection changed",
+          householdId: household.id,
+          reason: error instanceof Error ? error.message : "unknown error",
+        }));
+      }));
       return json(
         { ...status, message: "TorBox connected. The token is stored encrypted for this Household." },
         200,
@@ -444,6 +465,7 @@ export default {
         if (!title) return json({ error: "Programme was not found in Cinemeta." }, 404);
         const programme = await approveProgramme(env.DB, household.id, title, input.startingEpisodeId);
         if (programme.type === "movie") await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+        else queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ programme }, 201);
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
@@ -485,6 +507,7 @@ export default {
         await env.DB.prepare("UPDATE approved_programmes SET paused_at = ? WHERE id = ? AND household_id = ?")
           .bind(pausedAt, programme.id, household.id).run();
         await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
+        queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ message: `${input.paused ? "Show paused without changing Show Progress." : "Show resumed."} Restart Stremio to refresh the Channel.` });
       }
 
@@ -497,6 +520,7 @@ export default {
           env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
         ]);
         await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
+        queueAutomaticTvPreparation(env, ctx, household.id);
       } else {
         await removeApprovedMovie(env.DB, household.id, programme.id, env.MOVIE_ROTATION_SEED);
       }
@@ -526,64 +550,12 @@ export default {
     }
 
     const preparationMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-preparation$/);
-    if (preparationMatch && (request.method === "GET" || request.method === "POST")) {
+    if (preparationMatch && request.method === "GET") {
       const household = await findHousehold(env.DB, preparationMatch[1]);
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
       }
-      if (request.method === "GET") {
-        return json({ run: await tvPreparationRun(env.DB, household.id) }, 200, { "cache-control": "no-store" });
-      }
-      let input: { count?: unknown; windowHours?: unknown } = {};
-      try { input = await request.json() as typeof input; } catch { /* handled below */ }
-      const count = Number(input.count);
-      const windowHours = Number(input.windowHours);
-      if (!Number.isInteger(count) || count < 1 || count > 20) {
-        return json({ error: "Choose between 1 and 20 programmes." }, 400);
-      }
-      if (![1, 4, 8].includes(windowHours)) {
-        return json({ error: "Choose a preparation window of 1, 4, or 8 hours." }, 400);
-      }
-      if (!(await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET))) {
-        return json({ error: "Configure TorBox before starting a Preparation Run." }, 409);
-      }
-      const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
-      if (!schedule.length) return json({ error: "The TV Channel has no programmes to prepare." }, 409);
-      try {
-        const run = await createTvPreparationRun(env.DB, household.id, schedule, count, windowHours);
-        try {
-          await env.TV_PREPARATION.create({
-            id: run.id,
-            params: { runId: run.id, householdId: household.id },
-            retention: { successRetention: "7 days", errorRetention: "7 days" },
-          });
-        } catch (error) {
-          const timestamp = new Date().toISOString();
-          await env.DB.prepare(`UPDATE tv_preparation_runs
-            SET status = 'failed', failure_reason = ?, completed_at = ?, updated_at = ? WHERE id = ?`)
-            .bind("Cloudflare could not start the Preparation Run.", timestamp, timestamp, run.id).run();
-          throw error;
-        }
-        return json({ run }, 202, { "cache-control": "no-store" });
-      } catch (error) {
-        if (error instanceof Error && error.message === "preparation already active") {
-          return json({ error: "A Preparation Run is already active for this Household." }, 409);
-        }
-        console.error(JSON.stringify({ message: "TV preparation could not start", reason: error instanceof Error ? error.message : "unknown error" }));
-        return json({ error: "The Preparation Run could not be started." }, 503);
-      }
-    }
-
-    const preparationCancelMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-preparation\/cancel$/);
-    if (request.method === "POST" && preparationCancelMatch) {
-      const household = await findHousehold(env.DB, preparationCancelMatch[1]);
-      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
-        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
-      }
-      const run = await cancelTvPreparationRun(env.DB, household.id);
-      if (!run) return json({ error: "There is no active Preparation Run to stop." }, 409);
-      try { await (await env.TV_PREPARATION.get(run.id)).terminate(); } catch { /* database status prevents further useful work */ }
-      return json({ run }, 200, { "cache-control": "no-store" });
+      return json({ run: await tvPreparationRun(env.DB, household.id) }, 200, { "cache-control": "no-store" });
     }
 
     const movieStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-state$/);
@@ -622,6 +594,7 @@ export default {
         }
         throw error;
       }
+      queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: "Show Progress corrected and incompatible future selections repaired. The active stream was not interrupted. Restart Stremio to refresh the Channel." });
     }
 
@@ -633,6 +606,7 @@ export default {
       }
       const undone = await undoLatestTvAdvancement(env.DB, household.id, env.TV_SCHEDULE_SEED);
       if (!undone) return json({ error: "There is no latest TV advancement to undo." }, 409);
+      queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: "Most recent advancement undone without changing later corrections to other shows. The active stream was not interrupted. Restart Stremio to refresh the Channel." });
     }
 
@@ -643,6 +617,7 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       await refreshTvChannelSchedule(env.DB, household.id, true, env.TV_SCHEDULE_SEED);
+      queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress. Restart Stremio to refresh the Channel." });
     }
 
@@ -817,6 +792,7 @@ export default {
         if (!torBoxToken) {
           if (streamMatch[2] === "series") {
             await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+            queueAutomaticTvPreparation(env, ctx, household.id);
           }
           return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
         }
@@ -833,6 +809,7 @@ export default {
             return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
           }
           await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          queueAutomaticTvPreparation(env, ctx, household.id);
           const deferred = await deferUnavailableTvProgramme(
             env.DB,
             household.id,
@@ -854,6 +831,7 @@ export default {
         if (streamMatch[2] === "series") {
           await clearUnavailableTvProgramme(env.DB, household.id, videoId);
           await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          queueAutomaticTvPreparation(env, ctx, household.id);
         }
         const resolveToken = await issueStreamToken(
           household.id,
@@ -879,5 +857,8 @@ export default {
     }
 
     return json({ error: "Not found." }, 404);
+  },
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(ensureAutomaticTvPreparationForAll(env));
   },
 } satisfies ExportedHandler<Env>;

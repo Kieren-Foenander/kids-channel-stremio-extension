@@ -23,6 +23,7 @@ Unlike Stremio's open catalogue or algorithmic kids' profiles, a Channel here is
 - The Parent Page is reached via a private, unrecoverable Household URL; sessions expire after one hour and can be locked.
 - Installation happens once per Household: a Stremio addon (manifest URL) installed on the Stremio account shared by the Household's devices, completed on desktop.
 - Streams are resolved through the Household's encrypted TorBox API token. Kids Channels discovers candidates, checks exact episode files, prefers cached sources, and prepares one uncached series source when necessary.
+- The next twenty scheduled TV episodes are warmed automatically. Schedule changes trigger immediate reconciliation and a periodic safety check repairs expired or missed preparation.
 - Changes to Channel state require a Stremio restart to take effect.
 
 ## Capabilities and Constraints
