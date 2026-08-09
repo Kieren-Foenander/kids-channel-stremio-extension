@@ -82,8 +82,18 @@ export async function approvedProgrammeDetail(
   householdId: string,
   programmeId: string,
 ): Promise<ApprovedProgramme | null> {
-  const row = await db.prepare(`SELECT p.*, progress.next_video_id
+  const row = await db.prepare(`SELECT p.id, p.imdb_id, p.content_type,
+      CASE WHEN p.content_type = 'show' THEN canonical.title ELSE p.title END AS title,
+      CASE WHEN p.content_type = 'show' THEN canonical.description ELSE p.description END AS description,
+      CASE WHEN p.content_type = 'show' THEN canonical.poster ELSE p.poster END AS poster,
+      CASE WHEN p.content_type = 'show' THEN canonical.background ELSE p.background END AS background,
+      CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
+      CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
+      CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
+      p.approved_at, p.paused_at, progress.next_video_id
     FROM approved_programmes p
+    LEFT JOIN canonical_shows canonical
+      ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
     LEFT JOIN show_progress progress ON progress.programme_id = p.id
     WHERE p.id = ? AND p.household_id = ?`).bind(programmeId, householdId)
     .first<StoredProgramme & { next_video_id: string | null }>();
@@ -160,19 +170,29 @@ type SummaryRow = StoredProgramme & {
 /** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
  * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
 export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
-  const rows = await db.prepare(`SELECT p.*,
+  const rows = await db.prepare(`SELECT p.id, p.imdb_id, p.content_type,
+      CASE WHEN p.content_type = 'show' THEN canonical.title ELSE p.title END AS title,
+      CASE WHEN p.content_type = 'show' THEN canonical.description ELSE p.description END AS description,
+      CASE WHEN p.content_type = 'show' THEN canonical.poster ELSE p.poster END AS poster,
+      CASE WHEN p.content_type = 'show' THEN canonical.background ELSE p.background END AS background,
+      CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
+      CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
+      CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
+      p.approved_at, p.paused_at,
       CASE WHEN current.programme_id IS NULL THEN 0 ELSE 1 END AS is_current,
       progress.next_video_id AS progress_video_id,
       episode.season AS progress_season, episode.episode AS progress_episode,
       episode.title AS progress_title, episode.released_at AS progress_released_at
     FROM approved_programmes p
+    LEFT JOIN canonical_shows canonical
+      ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
     LEFT JOIN current_programmes current
       ON current.household_id = p.household_id AND current.programme_id = p.id
     LEFT JOIN show_progress progress ON progress.programme_id = p.id
     LEFT JOIN show_episodes episode
       ON episode.programme_id = p.id AND episode.video_id = progress.next_video_id
     WHERE p.household_id = ?
-    ORDER BY p.approved_at, p.title`).bind(householdId).all<SummaryRow>();
+    ORDER BY p.approved_at, title`).bind(householdId).all<SummaryRow>();
 
   return rows.results.map((row) => {
     const programme = programmeFromRow(row);

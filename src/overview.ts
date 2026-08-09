@@ -76,17 +76,19 @@ export async function householdOverview(
       SUM(CASE WHEN content_type = 'show' THEN 1 ELSE 0 END) AS shows,
       SUM(CASE WHEN content_type = 'movie' THEN 1 ELSE 0 END) AS movies
       FROM approved_programmes WHERE household_id = ?`).bind(householdId).first<CountRow>(),
-    db.prepare(`SELECT programme.id AS programme_id, programme.title, programme.poster,
+    db.prepare(`SELECT programme.id AS programme_id, canonical.title, canonical.poster,
         episode.video_id, episode.season, episode.episode, episode.title AS episode_title
       FROM current_programmes current
       JOIN approved_programmes programme ON programme.id = current.programme_id AND programme.household_id = current.household_id
+      JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
       JOIN show_episodes episode ON episode.programme_id = current.programme_id AND episode.video_id = current.video_id
       WHERE current.household_id = ? AND current.channel = 'tv'`).bind(householdId).first<TvRow>(),
-    db.prepare(`SELECT programme.id AS programme_id, programme.title, programme.poster,
+    db.prepare(`SELECT programme.id AS programme_id, canonical.title, canonical.poster,
         episode.video_id, episode.season, episode.episode, episode.title AS episode_title
       FROM channel_schedule schedule
       JOIN channel_state state ON state.household_id = schedule.household_id AND state.channel = schedule.channel
       JOIN approved_programmes programme ON programme.id = schedule.programme_id AND programme.household_id = schedule.household_id
+      JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
       JOIN show_episodes episode ON episode.programme_id = schedule.programme_id AND episode.video_id = schedule.video_id
       WHERE schedule.household_id = ? AND schedule.channel = 'tv' AND schedule.position > state.current_position
       ORDER BY schedule.position

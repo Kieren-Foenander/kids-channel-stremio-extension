@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeTorBoxCredential } from "../src/torbox-credentials";
 import { reconcileMovieChannel } from "../src/movie-channel";
 import { issueStreamToken } from "../src/secrets";
+import { deleteHousehold } from "../src/households";
 import {
   cancelTvPreparationRun,
   createTvPreparationRun,
@@ -57,11 +58,53 @@ beforeEach(async () => {
     release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL,
     paused_at TEXT, UNIQUE (household_id, content_type, imdb_id)
   )`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_episodes (
-    programme_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL,
-    title TEXT NOT NULL, released_at TEXT NOT NULL, overview TEXT,
-    PRIMARY KEY (programme_id, video_id), UNIQUE (programme_id, season, episode)
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS canonical_shows (
+    imdb_id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT,
+    background TEXT, release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS canonical_show_episodes (
+    show_imdb_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL,
+    title TEXT NOT NULL, released_at TEXT NOT NULL, overview TEXT,
+    PRIMARY KEY (show_imdb_id, video_id), UNIQUE (show_imdb_id, season, episode)
+  )`).run();
+  await env.DB.prepare(`CREATE VIEW IF NOT EXISTS show_episodes AS
+    SELECT programme.id AS programme_id, episode.video_id, episode.season, episode.episode,
+      episode.title, episode.released_at, episode.overview
+    FROM approved_programmes programme
+    JOIN canonical_show_episodes episode ON episode.show_imdb_id = programme.imdb_id
+    WHERE programme.content_type = 'show'`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS approved_show_metadata_insert
+    AFTER INSERT ON approved_programmes WHEN NEW.content_type = 'show' BEGIN
+      INSERT INTO canonical_shows
+        (imdb_id, title, description, poster, background, release_info, genres_json, imdb_rating)
+      VALUES (NEW.imdb_id, NEW.title, NEW.description, NEW.poster, NEW.background,
+        NEW.release_info, NEW.genres_json, NEW.imdb_rating)
+      ON CONFLICT(imdb_id) DO UPDATE SET title = excluded.title, description = excluded.description,
+        poster = excluded.poster, background = excluded.background, release_info = excluded.release_info,
+        genres_json = excluded.genres_json, imdb_rating = excluded.imdb_rating;
+      UPDATE approved_programmes SET title = '', description = NULL, poster = NULL, background = NULL,
+        release_info = NULL, genres_json = '[]', imdb_rating = NULL WHERE id = NEW.id;
+    END`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS show_episodes_insert
+    INSTEAD OF INSERT ON show_episodes BEGIN
+      INSERT INTO canonical_show_episodes
+        (show_imdb_id, video_id, season, episode, title, released_at, overview)
+      SELECT programme.imdb_id, NEW.video_id, NEW.season, NEW.episode,
+        NEW.title, NEW.released_at, NEW.overview
+      FROM approved_programmes programme WHERE programme.id = NEW.programme_id
+      ON CONFLICT(show_imdb_id, video_id) DO UPDATE SET season = excluded.season,
+        episode = excluded.episode, title = excluded.title, released_at = excluded.released_at,
+        overview = excluded.overview;
+    END`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS show_episodes_update
+    INSTEAD OF UPDATE ON show_episodes BEGIN
+      UPDATE canonical_show_episodes SET video_id = NEW.video_id, season = NEW.season,
+        episode = NEW.episode, title = NEW.title, released_at = NEW.released_at, overview = NEW.overview
+      WHERE show_imdb_id = (SELECT imdb_id FROM approved_programmes WHERE id = OLD.programme_id)
+        AND video_id = OLD.video_id;
+    END`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS show_episodes_delete
+    INSTEAD OF DELETE ON show_episodes BEGIN SELECT 1; END`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_progress (
     programme_id TEXT PRIMARY KEY NOT NULL, next_video_id TEXT NOT NULL
   )`).run();
@@ -164,8 +207,9 @@ beforeEach(async () => {
   await env.DB.prepare("DELETE FROM channel_state").run();
   await env.DB.prepare("DELETE FROM current_programmes").run();
   await env.DB.prepare("DELETE FROM show_progress").run();
-  await env.DB.prepare("DELETE FROM show_episodes").run();
   await env.DB.prepare("DELETE FROM approved_programmes").run();
+  await env.DB.prepare("DELETE FROM canonical_show_episodes").run();
+  await env.DB.prepare("DELETE FROM canonical_shows").run();
   await env.DB.prepare("DELETE FROM households").run();
   vi.restoreAllMocks();
 });
@@ -687,6 +731,65 @@ describe("Cinemeta Approved Library", () => {
     expect(library.programmes[0]).not.toHaveProperty("description");
     expect(library.programmes[0]).not.toHaveProperty("background");
     expect(JSON.stringify(library.programmes[0])).not.toContain("Second");
+  });
+
+  it("shares canonical show metadata across Households and preserves it when one Household is deleted", async () => {
+    const first = await create();
+    const second = await create();
+    const firstHeaders = await parentAccess(first);
+    const secondHeaders = await parentAccess(second);
+    mockCinemeta();
+
+    const firstApproval = await SELF.fetch(`https://kids.test/api/households/${secretFrom(first)}/library`, {
+      method: "POST",
+      headers: { ...firstHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ type: "show", imdbId: "tt1234567" }),
+    });
+    const secondApproval = await SELF.fetch(`https://kids.test/api/households/${secretFrom(second)}/library`, {
+      method: "POST",
+      headers: { ...secondHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ type: "show", imdbId: "tt1234567", startingEpisodeId: "tt1234567:1:2" }),
+    });
+    expect(firstApproval.status).toBe(201);
+    expect(secondApproval.status).toBe(201);
+    const secondProgrammeId = (await secondApproval.json<any>()).programme.id as string;
+
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM canonical_shows").first()).toMatchObject({ count: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM canonical_show_episodes").first()).toMatchObject({ count: 2 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM approved_programmes").first()).toMatchObject({ count: 2 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM show_episodes").first()).toMatchObject({ count: 4 });
+
+    await tvChannelSchedule(env.DB, first.householdId, "first-household-seed");
+    const secondSchedule = await tvChannelSchedule(env.DB, second.householdId, "second-household-seed");
+    expect(secondSchedule[0]).toMatchObject({
+      programmeId: secondProgrammeId,
+      showTitle: "The Example",
+      episode: { id: "tt1234567:1:2", title: "Second" },
+    });
+
+    await deleteHousehold(env.DB, first.householdId);
+
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM canonical_shows").first()).toMatchObject({ count: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM canonical_show_episodes").first()).toMatchObject({ count: 2 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM approved_programmes").first()).toMatchObject({ count: 1 });
+    const detail = await SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(second)}/library/${secondProgrammeId}`,
+      { headers: secondHeaders },
+    );
+    expect(detail.status).toBe(200);
+    expect(await detail.json<any>()).toMatchObject({
+      programme: {
+        id: secondProgrammeId,
+        title: "The Example",
+        showProgress: { id: "tt1234567:1:2" },
+        episodes: [
+          { id: "tt1234567:1:1", title: "First" },
+          { id: "tt1234567:1:2", title: "Second" },
+        ],
+      },
+    });
+    expect(await tvChannelSchedule(env.DB, second.householdId, "second-household-seed"))
+      .toEqual(secondSchedule);
   });
 
   it("loads an approved show's stored episode detail without consulting current Cinemeta metadata", async () => {
