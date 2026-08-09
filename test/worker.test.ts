@@ -1,6 +1,7 @@
 import { env, SELF as worker } from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeTorBoxCredential } from "../src/torbox-credentials";
+import { reconcileMovieChannel } from "../src/movie-channel";
 import { issueStreamToken } from "../src/secrets";
 import {
   cancelTvPreparationRun,
@@ -8,7 +9,7 @@ import {
   ensureAutomaticTvPreparation,
   tvPreparationRun,
 } from "../src/tv-preparation";
-import { requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
+import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -564,6 +565,24 @@ describe("Household Overview summary", () => {
     expect(summary.movie.current).toMatchObject({ title: "Overview Movie", releaseInfo: "2023" });
     expect(summary.tv.current).not.toHaveProperty("description");
     expect(summary.movie.current).not.toHaveProperty("signOffId");
+
+    const scheduleBefore = await env.DB.prepare(`SELECT position, programme_id, video_id, scheduled_at
+      FROM channel_schedule WHERE household_id = ? AND channel = 'tv' ORDER BY position`)
+      .bind(populated.householdId).all();
+    const currentBefore = await env.DB.prepare(`SELECT programme_id, video_id, selected_at
+      FROM current_programmes WHERE household_id = ? AND channel = 'tv'`)
+      .bind(populated.householdId).first();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeated = await SELF.fetch(`https://kids.test/api/households/${secretFrom(populated)}/overview`, {
+      headers: await access(populated),
+    });
+    expect(repeated.status).toBe(200);
+    expect((await env.DB.prepare(`SELECT position, programme_id, video_id, scheduled_at
+      FROM channel_schedule WHERE household_id = ? AND channel = 'tv' ORDER BY position`)
+      .bind(populated.householdId).all()).results).toEqual(scheduleBefore.results);
+    expect(await env.DB.prepare(`SELECT programme_id, video_id, selected_at
+      FROM current_programmes WHERE household_id = ? AND channel = 'tv'`)
+      .bind(populated.householdId).first()).toEqual(currentBefore);
 
     const isolatedSummary = await (await SELF.fetch(
       `https://kids.test/api/households/${secretFrom(isolated)}/overview`,
@@ -1171,6 +1190,36 @@ describe("rolling TV Channel Schedule", () => {
     );
   });
 
+  it("bounds episode catalogue queries to the persisted schedule length", async () => {
+    const { created } = await arrangeShows(1, 250);
+    await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const prepared: string[] = [];
+    const instrumented = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (query: string) => {
+            prepared.push(query);
+            return target.prepare(query);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    const schedule = await refreshTvChannelSchedule(
+      instrumented,
+      created.householdId,
+      false,
+      "deterministic-test-seed",
+    );
+
+    expect(schedule).toHaveLength(20);
+    const episodeQueries = prepared.filter((query) => query.includes("FROM show_episodes episode"));
+    expect(episodeQueries).toHaveLength(1);
+    expect(episodeQueries[0]).toContain("LIMIT ?");
+  });
+
   it("advances naturally or through Next exactly once and replenishes the shared schedule", async () => {
     const { base } = await arrangeShows(2);
     const before = await metadata(base);
@@ -1600,6 +1649,43 @@ describe("Movie Channel rotation and sign-off", () => {
       await SELF.fetch(current.meta.videos[1].streams[0].url);
     }
     expect(new Set(selected)).toEqual(new Set(["tt8000001", "tt8000002", "tt8000003"]));
+  });
+
+  it("adds one movie with bounded rotation mutations regardless of library size", async () => {
+    const { created } = await arrangeMovies(100);
+    await reconcileMovieChannel(env.DB, created.householdId, "bounded-rotation-seed");
+
+    const before = await env.DB.prepare(`SELECT position, programme_id FROM movie_rotation
+      WHERE household_id = ? AND cycle = 0 ORDER BY position`).bind(created.householdId)
+      .all<{ position: number; programme_id: string }>();
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+      VALUES ('movie-101', ?, 'tt8000101', 'movie', 'Movie 101', '[]', ?)`).bind(created.householdId, now).run();
+
+    const mutations: string[] = [];
+    const instrumented = new Proxy(env.DB, {
+      get(target, property) {
+        if (property === "prepare") {
+          return (query: string) => {
+            if (/^(?:INSERT|UPDATE|DELETE)/.test(query.trim())) mutations.push(query.trim());
+            return target.prepare(query);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+
+    await reconcileMovieChannel(instrumented, created.householdId, "bounded-rotation-seed");
+
+    expect(mutations).toHaveLength(3);
+    expect(mutations.some((query) => query.startsWith("DELETE FROM movie_rotation"))).toBe(false);
+    const after = await env.DB.prepare(`SELECT position, programme_id FROM movie_rotation
+      WHERE household_id = ? AND cycle = 0 ORDER BY position`).bind(created.householdId)
+      .all<{ position: number; programme_id: string }>();
+    expect(after.results.slice(0, before.results.length)).toEqual(before.results);
+    expect(after.results.at(-1)).toEqual({ position: 100, programme_id: "movie-101" });
   });
 
   it("shows the Current Programme, remaining rotation, and snapshot history only to the Parent", async () => {

@@ -66,9 +66,18 @@ test("movie search state, details, pagination, and approval survive navigation",
 test("a movie can be approved in one click from the search results", async ({ page }) => {
   await page.route("https://placehold.co/**", (route) => route.abort());
   const parentUrl = await createHousehold(page);
+  let libraryReads = 0;
+  page.on("request", (request) => {
+    if (request.method() === "GET" && /\/api\/households\/[^/]+\/library$/.test(new URL(request.url()).pathname)) {
+      libraryReads += 1;
+    }
+  });
   await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=1`);
 
   const movie = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Example: The Movie" }) });
+  await expect(movie).toBeVisible();
+  const readsBeforeApproval = libraryReads;
+  expect(readsBeforeApproval).toBeGreaterThan(0);
   const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST" && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
   await movie.getByRole("button", { name: "Approve Example: The Movie" }).click();
   expect((await approvalResponse).status()).toBe(201);
@@ -76,6 +85,8 @@ test("a movie can be approved in one click from the search results", async ({ pa
   await expect(page.locator("[data-sonner-toaster]")).toHaveCSS("position", "fixed");
   await expect(movie.getByText("Already approved")).toBeVisible();
   await expect(movie.getByRole("button", { name: "Approve Example: The Movie" })).toHaveCount(0);
+  await page.waitForTimeout(100);
+  expect(libraryReads).toBe(readsBeforeApproval);
 });
 
 test("a show can be approved from a non-default released episode without losing search context", async ({ page }) => {
