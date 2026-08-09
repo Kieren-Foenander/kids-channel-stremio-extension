@@ -179,34 +179,32 @@ async function synchronizeRotation(db: D1Database, householdId: string): Promise
   for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
     const currentState = await state(db, householdId);
     if (!currentState) return;
-    const [movies, existing, membership] = await Promise.all([
+    const [movies, membership] = await Promise.all([
       approvedMovies(db, householdId),
-      remainingRows(db, householdId, currentState),
-      db.prepare(`SELECT programme_id FROM movie_rotation WHERE household_id = ? AND cycle = ?`)
-        .bind(householdId, currentState.cycle).all<{ programme_id: string }>(),
+      db.prepare(`SELECT position, programme_id FROM movie_rotation WHERE household_id = ? AND cycle = ?`)
+        .bind(householdId, currentState.cycle).all<{ position: number; programme_id: string }>(),
     ]);
     const present = new Set(membership.results.map((movie) => movie.programme_id));
     const additions = movies.filter((movie) => !present.has(movie.programme_id));
     if (additions.length === 0) return;
 
-    const future: MovieRow[] = [...existing];
-    for (const movie of additions) {
-      const insertion = stableIndex(`${currentState.selection_seed}:${movie.programme_id}`,
-        currentState.cycle, currentState.revision, future.length + 1);
-      future.splice(insertion, 0, movie);
-    }
+    // Keep every existing coordinate stable: sign-off URLs embed cycle and position, and
+    // rewriting the complete tail makes sequential approvals quadratic. Newly approved
+    // movies join the end of this cycle in deterministic approval order, before any repeat.
+    const finalPosition = membership.results.reduce(
+      (maximum, movie) => Math.max(maximum, movie.position),
+      currentState.current_position,
+    );
     const owner = crypto.randomUUID();
     const now = new Date().toISOString();
     const owns = mutationOwnership(householdId, currentState.revision, owner);
     const statements: D1PreparedStatement[] = [
       claimMutation(db, householdId, currentState.revision, owner, now),
-      db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND cycle = ? AND position > ? AND ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position, ...owns.values),
     ];
-    for (const [offset, movie] of future.entries()) {
+    for (const [offset, movie] of additions.entries()) {
       statements.push(db.prepare(`INSERT INTO movie_rotation (household_id, cycle, position, programme_id)
         SELECT ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position + offset + 1,
+        .bind(householdId, currentState.cycle, finalPosition + offset + 1,
           movie.programme_id, ...owns.values));
     }
     statements.push(db.prepare(`UPDATE movie_channel_state SET revision = revision + 1

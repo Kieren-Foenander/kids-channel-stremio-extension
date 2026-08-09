@@ -32,11 +32,28 @@ type SearchProgramme = {
   genres: string[];
   imdbRating?: string;
 };
-type ProgrammeSummary = { imdbId: string; type: ProgrammeType };
+type ProgrammeSummary = {
+  id: string;
+  imdbId: string;
+  type: ProgrammeType;
+  title: string;
+  poster?: string;
+  releaseInfo?: string;
+  genres: string[];
+  imdbRating?: string;
+  approvedAt: string;
+  pausedAt?: string;
+  current: boolean;
+  finished: boolean;
+  showProgress?: SelectableEpisode;
+};
 type SearchResponse = { results: SearchProgramme[] };
 type LibraryResponse = { programmes: ProgrammeSummary[] };
 type ShowDetailResponse = { title: SearchProgramme & { type: "show"; episodes: SelectableEpisode[] } };
 type ApprovalInput = { programme: SearchProgramme; startingEpisodeId?: string };
+type ApprovalResponse = {
+  programme: Omit<ProgrammeSummary, "current" | "finished">;
+};
 
 const PAGE_SIZE = 12;
 
@@ -95,33 +112,45 @@ function AddProgrammesPage() {
     retry: false,
   });
 
-  const approveProgramme = ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<{ programme: unknown }>(`/api/households/${secret}/library`, {
+  const approveProgramme = ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<ApprovalResponse>(`/api/households/${secret}/library`, {
     method: "POST",
     body: { type: programme.type, imdbId: programme.id, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
   });
-  const invalidateAfterApproval = () => Promise.all([
-    queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
-    queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-    queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret) }),
-    queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) }),
-  ]);
+  const settleAfterApproval = (response: ApprovalResponse) => {
+    queryClient.setQueryData<LibraryResponse>(parentKeys.library(secret), (current) => {
+      if (!current || current.programmes.some((item) => item.id === response.programme.id)) return current;
+      const currentForType = current.programmes.some((item) => item.type === response.programme.type && item.current);
+      return {
+        programmes: [...current.programmes, {
+          ...response.programme,
+          current: !currentForType,
+          finished: false,
+        }],
+      };
+    });
+    return Promise.all([
+      queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret), refetchType: "none" }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret), refetchType: "none" }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret), refetchType: "none" }),
+    ]);
+  };
 
   const approval = useMutation({
     mutationFn: approveProgramme,
-    onSuccess: async (_data, { programme }) => {
+    onSuccess: async (data, { programme }) => {
       window.dispatchEvent(new Event("stremio-restart-required"));
       toast.success(`“${programme.title}” added to the Approved Library.`);
       setDetail(null);
-      await invalidateAfterApproval();
+      await settleAfterApproval(data);
     },
   });
 
   const quickApproval = useMutation({
     mutationFn: approveProgramme,
-    onSuccess: async (_data, { programme }) => {
+    onSuccess: async (data, { programme }) => {
       window.dispatchEvent(new Event("stremio-restart-required"));
       toast.success(`“${programme.title}” added to the Approved Library.`);
-      await invalidateAfterApproval();
+      await settleAfterApproval(data);
     },
     onError: (error, { programme }) => {
       toast.error(apiErrorMessage(error, `“${programme.title}” could not be approved. Try again.`));

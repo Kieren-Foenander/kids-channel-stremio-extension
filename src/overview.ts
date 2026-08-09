@@ -1,5 +1,5 @@
 import { reconcileMovieChannel } from "./movie-channel";
-import { refreshTvChannelSchedule } from "./tv-channel";
+import { tvChannelSchedule } from "./tv-channel";
 
 export interface OverviewEpisode {
   id: string;
@@ -67,8 +67,8 @@ export async function householdOverview(
   tvSeed?: string,
   movieSeed?: string,
 ): Promise<HouseholdOverview> {
-  // Keep the same lazy Channel initialization behaviour as the detailed Channel APIs.
-  await refreshTvChannelSchedule(db, householdId, false, tvSeed);
+  // Keep lazy initialization, but do not rebuild valid Channel state during a read.
+  await tvChannelSchedule(db, householdId, tvSeed);
   await reconcileMovieChannel(db, householdId, movieSeed);
 
   const [counts, currentTv, nextTvRows, currentMovie] = await Promise.all([

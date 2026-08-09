@@ -122,17 +122,22 @@ async function loadShows(db: D1Database, householdId: string): Promise<Show[]> {
     WHERE programme.household_id = ? AND programme.content_type = 'show' AND programme.paused_at IS NULL
     ORDER BY programme.approved_at, programme.id`).bind(householdId).all<ShowRow>();
 
-  const episodeRows = await db.prepare(`SELECT episode.programme_id, episode.video_id, episode.season,
-      episode.episode, episode.title AS episode_title, episode.released_at, episode.overview
-    FROM show_episodes episode
-    JOIN approved_programmes programme ON programme.id = episode.programme_id
-    WHERE programme.household_id = ? AND programme.content_type = 'show'
-    ORDER BY episode.programme_id, episode.season, episode.episode`).bind(householdId).all<EpisodeRow>();
+  const episodeWindows = showRows.results.length === 0
+    ? []
+    : await db.batch<EpisodeRow>(showRows.results.map((row) => db.prepare(`SELECT episode.programme_id,
+        episode.video_id, episode.season, episode.episode, episode.title AS episode_title,
+        episode.released_at, episode.overview
+      FROM show_episodes episode
+      JOIN show_episodes progress
+        ON progress.programme_id = episode.programme_id AND progress.video_id = ?
+      WHERE episode.programme_id = ?
+        AND (episode.season, episode.episode) >= (progress.season, progress.episode)
+      ORDER BY episode.season, episode.episode
+      LIMIT ?`).bind(row.next_video_id, row.programme_id, TV_SCHEDULE_LENGTH)));
 
-  return showRows.results.flatMap((row) => {
-    const episodes = episodeRows.results.filter((episode) => episode.programme_id === row.programme_id).map(episodeFromRow);
-    const progressIndex = episodes.findIndex((episode) => episode.id === row.next_video_id);
-    return progressIndex < 0 ? [] : [{
+  return showRows.results.flatMap((row, index) => {
+    const episodes = (episodeWindows[index]?.results ?? []).map(episodeFromRow);
+    return episodes.length === 0 ? [] : [{
       programmeId: row.programme_id,
       imdbId: row.imdb_id,
       title: row.show_title,
@@ -140,7 +145,7 @@ async function loadShows(db: D1Database, householdId: string): Promise<Show[]> {
       poster: row.poster ?? undefined,
       background: row.background ?? undefined,
       episodes,
-      progressIndex,
+      progressIndex: 0,
     }];
   });
 }
@@ -415,10 +420,16 @@ export async function refreshTvChannelSchedule(
     WHERE household_id = ? AND channel = 'tv'`).bind(householdId)
     .first<{ programme_id: string; video_id: string }>();
   const currentShow = storedCurrent
-    ? shows.find((show) => show.programmeId === storedCurrent.programme_id
-      && show.episodes.some((episode) => episode.id === storedCurrent.video_id))
+    ? shows.find((show) => show.programmeId === storedCurrent.programme_id)
     : undefined;
-  const currentEpisode = currentShow?.episodes.find((episode) => episode.id === storedCurrent?.video_id);
+  let currentEpisode = currentShow?.episodes.find((episode) => episode.id === storedCurrent?.video_id);
+  if (currentShow && storedCurrent && !currentEpisode) {
+    const storedEpisode = await db.prepare(`SELECT programme_id, video_id, season, episode,
+        title AS episode_title, released_at, overview
+      FROM show_episodes WHERE programme_id = ? AND video_id = ?`)
+      .bind(storedCurrent.programme_id, storedCurrent.video_id).first<EpisodeRow>();
+    currentEpisode = storedEpisode ? episodeFromRow(storedEpisode) : undefined;
+  }
   const seed = regenerate ? crypto.randomUUID() : currentState.selection_seed;
   const position = currentState.current_position;
   const programmes: TvScheduledProgramme[] = currentShow && currentEpisode
