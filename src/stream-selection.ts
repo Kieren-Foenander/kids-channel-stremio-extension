@@ -156,8 +156,10 @@ async function canonicalProgramme(
     } : null;
   }
 
-  const row = await db.prepare(`SELECT p.id, p.imdb_id, p.title, p.release_info, e.season, e.episode
+  const row = await db.prepare(`SELECT p.id, p.imdb_id, canonical.title, canonical.release_info,
+      e.season, e.episode
     FROM approved_programmes p
+    JOIN canonical_shows canonical ON canonical.imdb_id = p.imdb_id
     JOIN show_episodes e ON e.programme_id = p.id
     WHERE p.household_id = ? AND p.content_type = 'show' AND e.video_id = ?`)
     .bind(householdId, videoId)

@@ -13,10 +13,11 @@
     "db:migrate:local": "wrangler d1 migrations apply kids-channels --local",
     "db:migrate:remote": "wrangler d1 migrations apply kids-channels --remote",
     "db:migrate:development": "wrangler d1 migrations apply DB --remote --env development",
-    "test": "pnpm build && vitest run && vitest run --config vitest.component.config.ts",
+    "test": "pnpm build && pnpm test:migrations && vitest run && vitest run --config vitest.component.config.ts",
     "test:watch": "vitest",
     "test:component": "vitest run --config vitest.component.config.ts",
     "test:browser": "playwright test",
+    "test:migrations": "node scripts/test-normalize-show-metadata-migration.mjs",
     "test:all": "pnpm test && pnpm test:browser",
     "typecheck": "tsc"
   },

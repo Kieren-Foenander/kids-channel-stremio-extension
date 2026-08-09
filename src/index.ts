@@ -516,7 +516,6 @@ export default {
           env.DB.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
           env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
           env.DB.prepare("DELETE FROM show_progress WHERE programme_id = ?").bind(programme.id),
-          env.DB.prepare("DELETE FROM show_episodes WHERE programme_id = ?").bind(programme.id),
           env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
         ]);
         await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);

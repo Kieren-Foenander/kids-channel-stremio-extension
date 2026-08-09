@@ -169,7 +169,6 @@ export async function deleteHousehold(db: D1Database, householdId: string): Prom
     db.prepare("DELETE FROM channel_state WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM current_programmes WHERE household_id = ?").bind(householdId),
     db.prepare(`DELETE FROM show_progress WHERE programme_id IN (${approved})`).bind(householdId),
-    db.prepare(`DELETE FROM show_episodes WHERE programme_id IN (${approved})`).bind(householdId),
     db.prepare("DELETE FROM approved_programmes WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM pin_attempts WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM households WHERE id = ?").bind(householdId),

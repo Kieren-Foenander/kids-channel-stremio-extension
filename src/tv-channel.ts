@@ -115,9 +115,10 @@ function programmeFromRow(row: ScheduleRow): TvScheduledProgramme {
 
 async function loadShows(db: D1Database, householdId: string): Promise<Show[]> {
   const showRows = await db.prepare(`SELECT programme.id AS programme_id, programme.imdb_id,
-      programme.title AS show_title, programme.description, programme.poster, programme.background,
+      canonical.title AS show_title, canonical.description, canonical.poster, canonical.background,
       progress.next_video_id
     FROM approved_programmes programme
+    JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
     JOIN show_progress progress ON progress.programme_id = programme.id
     WHERE programme.household_id = ? AND programme.content_type = 'show' AND programme.paused_at IS NULL
     ORDER BY programme.approved_at, programme.id`).bind(householdId).all<ShowRow>();
@@ -236,11 +237,12 @@ async function releaseExpiredUnavailableEpisodes(
 
 async function scheduleRows(db: D1Database, householdId: string): Promise<TvScheduledProgramme[]> {
   const rows = await db.prepare(`SELECT schedule.position, schedule.programme_id, programme.imdb_id,
-      programme.title AS show_title, programme.description, programme.poster, programme.background,
+      canonical.title AS show_title, canonical.description, canonical.poster, canonical.background,
       episode.video_id, episode.season, episode.episode, episode.title AS episode_title,
       episode.released_at, episode.overview
     FROM channel_schedule schedule
     JOIN approved_programmes programme ON programme.id = schedule.programme_id
+    JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
     JOIN show_episodes episode ON episode.programme_id = schedule.programme_id AND episode.video_id = schedule.video_id
     JOIN channel_state state ON state.household_id = schedule.household_id AND state.channel = schedule.channel
     WHERE schedule.household_id = ? AND schedule.channel = 'tv' AND schedule.position >= state.current_position
@@ -484,11 +486,12 @@ export async function parentTvChannelState(
   configuredSeed?: string,
 ): Promise<ParentTvChannelState> {
   const schedule = await tvChannelSchedule(db, householdId, configuredSeed);
-  const history = await db.prepare(`SELECT programme.title AS show_title,
+  const history = await db.prepare(`SELECT canonical.title AS show_title,
       episode.video_id, episode.season, episode.episode, episode.title, episode.released_at, episode.overview,
       history.advanced_at
     FROM tv_advancement_history history
     JOIN approved_programmes programme ON programme.id = history.previous_programme_id
+    JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
     JOIN show_episodes episode ON episode.programme_id = history.previous_programme_id
       AND episode.video_id = history.previous_video_id
     WHERE history.household_id = ?

@@ -46,14 +46,47 @@ beforeEach(async () => {
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS approved_programmes (
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
-    content_type TEXT NOT NULL, title TEXT NOT NULL, release_info TEXT,
-    genres_json TEXT NOT NULL DEFAULT '[]', approved_at TEXT NOT NULL
+    content_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT, background TEXT,
+    release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL
   )`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_episodes (
-    programme_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL,
-    episode INTEGER NOT NULL, title TEXT NOT NULL, released_at TEXT NOT NULL,
-    PRIMARY KEY (programme_id, video_id)
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS canonical_shows (
+    imdb_id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT,
+    background TEXT, release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS canonical_show_episodes (
+    show_imdb_id TEXT NOT NULL, video_id TEXT NOT NULL, season INTEGER NOT NULL,
+    episode INTEGER NOT NULL, title TEXT NOT NULL, released_at TEXT NOT NULL, overview TEXT,
+    PRIMARY KEY (show_imdb_id, video_id)
+  )`).run();
+  await env.DB.prepare(`CREATE VIEW IF NOT EXISTS show_episodes AS
+    SELECT programme.id AS programme_id, episode.video_id, episode.season, episode.episode,
+      episode.title, episode.released_at, episode.overview
+    FROM approved_programmes programme
+    JOIN canonical_show_episodes episode ON episode.show_imdb_id = programme.imdb_id
+    WHERE programme.content_type = 'show'`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS approved_show_metadata_insert
+    AFTER INSERT ON approved_programmes WHEN NEW.content_type = 'show' BEGIN
+      INSERT INTO canonical_shows
+        (imdb_id, title, description, poster, background, release_info, genres_json, imdb_rating)
+      VALUES (NEW.imdb_id, NEW.title, NEW.description, NEW.poster, NEW.background,
+        NEW.release_info, NEW.genres_json, NEW.imdb_rating)
+      ON CONFLICT(imdb_id) DO UPDATE SET title = excluded.title, description = excluded.description,
+        poster = excluded.poster, background = excluded.background, release_info = excluded.release_info,
+        genres_json = excluded.genres_json, imdb_rating = excluded.imdb_rating;
+      UPDATE approved_programmes SET title = '', description = NULL, poster = NULL, background = NULL,
+        release_info = NULL, genres_json = '[]', imdb_rating = NULL WHERE id = NEW.id;
+    END`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS show_episodes_insert
+    INSTEAD OF INSERT ON show_episodes BEGIN
+      INSERT INTO canonical_show_episodes
+        (show_imdb_id, video_id, season, episode, title, released_at, overview)
+      SELECT programme.imdb_id, NEW.video_id, NEW.season, NEW.episode,
+        NEW.title, NEW.released_at, NEW.overview
+      FROM approved_programmes programme WHERE programme.id = NEW.programme_id
+      ON CONFLICT(show_imdb_id, video_id) DO UPDATE SET season = excluded.season,
+        episode = excluded.episode, title = excluded.title, released_at = excluded.released_at,
+        overview = excluded.overview;
+    END`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS stream_selections (
     household_id TEXT NOT NULL, programme_id TEXT NOT NULL, content_type TEXT NOT NULL,
     video_id TEXT NOT NULL, torrent_id TEXT NOT NULL, info_hash TEXT NOT NULL,
@@ -70,8 +103,9 @@ beforeEach(async () => {
   )`).run();
   await env.DB.prepare("DELETE FROM stream_candidate_failures").run();
   await env.DB.prepare("DELETE FROM stream_selections").run();
-  await env.DB.prepare("DELETE FROM show_episodes").run();
   await env.DB.prepare("DELETE FROM approved_programmes").run();
+  await env.DB.prepare("DELETE FROM canonical_show_episodes").run();
+  await env.DB.prepare("DELETE FROM canonical_shows").run();
   await env.DB.prepare("DELETE FROM households").run();
   await env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
     VALUES ('household', 'secret', 'salt', 'hash', 'now')`).run();
