@@ -4,6 +4,7 @@ import { storeTorBoxCredential } from "../src/torbox-credentials";
 import { reconcileMovieChannel } from "../src/movie-channel";
 import { issueStreamToken } from "../src/secrets";
 import { deleteHousehold } from "../src/households";
+import { CHANNEL_RETENTION, pruneObsoleteChannelState } from "../src/channel-retention";
 import {
   cancelTvPreparationRun,
   createTvPreparationRun,
@@ -189,8 +190,12 @@ beforeEach(async () => {
     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, quality TEXT, filename TEXT, info_hash TEXT,
     message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, position)
   )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS maintenance_cursors (
+    name TEXT PRIMARY KEY NOT NULL, last_household_id TEXT, updated_at TEXT NOT NULL
+  )`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
+  await env.DB.prepare("DELETE FROM maintenance_cursors").run();
   await env.DB.prepare("DELETE FROM tv_preparation_items").run();
   await env.DB.prepare("DELETE FROM tv_preparation_runs").run();
   await env.DB.prepare("DELETE FROM unavailable_episodes").run();
@@ -2000,6 +2005,116 @@ describe("Household deletion", () => {
       expect(body).not.toContain(unknownSecret);
       expect(body).not.toMatch(/PIN|Approved Library|Channel Schedule/);
     }
+  });
+});
+
+describe("scheduled Channel state retention", () => {
+  it("prunes bounded expired state while preserving active ownership, undo, and Parent history", async () => {
+    const now = new Date("2026-08-09T12:00:00.000Z");
+    const expired = "2026-08-07T12:00:00.000Z";
+    const active = "2026-08-09T11:00:00.000Z";
+    await env.DB.batch([
+      env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+        VALUES ('retention-a', 'retention-secret-a', 'salt', 'hash', ?)`),
+      env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+        VALUES ('retention-b', 'retention-secret-b', 'salt', 'hash', ?)`),
+    ].map((statement) => statement.bind(now.toISOString())));
+    await env.DB.prepare("INSERT INTO channel_state VALUES ('retention-a', 'tv', 99, 'seed', ?)")
+      .bind(expired).run();
+    await env.DB.prepare("INSERT INTO movie_channel_state VALUES ('retention-a', 2, 0, 'seed', ?, 0)")
+      .bind(expired).run();
+
+    const statements: D1PreparedStatement[] = [
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 1, 2, 'expired-tv-claim', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 2, 3, 'active-tv-claim', ?)").bind(active),
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 98, 99, 'undo-history', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 0, 0, 'expired-movie-claim', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 2, 0, 'active-movie-claim', ?)").bind(active),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 0, 'expired-mutation', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 1, 'active-mutation', ?)").bind(active),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-b', 0, 'other-household-expired', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO tv_advancement_history VALUES ('undo-history', 'retention-a', 98, 99, 'show', 'episode-98', 'show', 'episode-99', '{}', '{}', ?, NULL, NULL)").bind("2026-07-01T00:00:00.000Z"),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 0, 0, 'movie-old-0', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 1, 0, 'movie-old-1', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 2, 0, 'movie-current', NULL)"),
+      env.DB.prepare(`INSERT INTO stream_selections
+        (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+         quality, seeders, selected_at, stale_at, download_pending, last_progress)
+        VALUES ('retention-a', 'show', 'series', 'expired-stream', '1', ?, 1, 'expired.mkv', '1080p', 1, ?, ?, 0, 100)`)
+        .bind("a".repeat(40), expired, expired),
+      env.DB.prepare(`INSERT INTO stream_selections
+        (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+         quality, seeders, selected_at, stale_at, download_pending, last_progress)
+        VALUES ('retention-a', 'show', 'series', 'active-stream', '2', ?, 2, 'active.mkv', '1080p', 1, ?, ?, 0, 100)`)
+        .bind("b".repeat(40), active, "2026-08-10T12:00:00.000Z"),
+      env.DB.prepare(`INSERT INTO stream_candidate_failures
+        VALUES ('retention-a', 'show', 'series', 'episode', ?, 'failed', ?, ?)`)
+        .bind("c".repeat(40), expired, expired),
+      env.DB.prepare(`INSERT INTO stream_candidate_failures
+        VALUES ('retention-a', 'show', 'series', 'episode', ?, 'failed', ?, ?)`)
+        .bind("d".repeat(40), active, "2026-08-10T12:00:00.000Z"),
+      env.DB.prepare("INSERT INTO unavailable_episodes VALUES ('retention-a', 'show', 'expired-episode', ?, ?)")
+        .bind(expired, expired),
+      env.DB.prepare("INSERT INTO unavailable_episodes VALUES ('retention-a', 'show', 'active-episode', ?, ?)")
+        .bind(active, "2026-08-10T12:00:00.000Z"),
+    ];
+    for (let index = 0; index < 11; index += 1) {
+      const timestamp = new Date(Date.UTC(2026, 7, 1, 0, index)).toISOString();
+      statements.push(env.DB.prepare(`INSERT INTO tv_advancement_history VALUES
+        (?, 'retention-a', ?, ?, 'show', ?, 'show', ?, '{}', '{}', ?, NULL, NULL)`)
+        .bind(`tv-history-${index}`, index, index + 1, `episode-${index}`, `episode-${index + 1}`, timestamp));
+      statements.push(env.DB.prepare(`INSERT INTO movie_playback_history VALUES
+        (?, 'retention-a', 'movie', 'tt1234567', 'Movie', 0, ?, ?)`)
+        .bind(`movie-history-${index}`, index, timestamp));
+    }
+    for (let index = 0; index < 12; index += 1) {
+      const timestamp = new Date(Date.UTC(2026, 7, 1, 1, index)).toISOString();
+      statements.push(env.DB.prepare(`INSERT INTO tv_preparation_runs
+        (id, household_id, status, requested_count, deadline_at, completed_at, created_at, updated_at)
+        VALUES (?, 'retention-a', 'completed', 1, ?, ?, ?, ?)`)
+        .bind(`run-${index}`, timestamp, timestamp, timestamp, timestamp));
+    }
+    statements.push(env.DB.prepare(`INSERT INTO tv_preparation_runs
+      (id, household_id, status, requested_count, deadline_at, created_at, updated_at)
+      VALUES ('active-run', 'retention-a', 'running', 1, ?, ?, ?)`)
+      .bind(expired, "2026-07-01T00:00:00.000Z", active));
+    await env.DB.batch(statements);
+
+    const first = await pruneObsoleteChannelState(env.DB, now, 1, 500);
+    expect(first.households).toBe(1);
+    expect(first.deleted).toMatchObject({
+      channel_advancements: 1,
+      movie_advancements: 1,
+      movie_channel_mutations: 1,
+      tv_advancement_history: 1,
+      movie_playback_history: 1,
+      movie_rotation: 2,
+      tv_preparation_runs: 2,
+      stream_selections: 1,
+      stream_candidate_failures: 1,
+      unavailable_episodes: 1,
+    });
+    expect(await env.DB.prepare("SELECT owner_token FROM channel_advancements ORDER BY from_position")
+      .all<{ owner_token: string }>()).toMatchObject({
+      results: [{ owner_token: "active-tv-claim" }, { owner_token: "undo-history" }],
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_advancement_history").first())
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold + 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_playback_history").first())
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_preparation_runs").first())
+      .toMatchObject({ count: CHANNEL_RETENTION.preparationRunsPerHousehold + 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation").first()).toMatchObject({ count: 1 });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_channel_mutations WHERE household_id = 'retention-b'").first())
+      .toMatchObject({ count: 1 });
+
+    const second = await pruneObsoleteChannelState(env.DB, now, 1, 500);
+    expect(second.households).toBe(1);
+    expect(second.deleted.movie_channel_mutations).toBe(1);
+    const wrapped = await pruneObsoleteChannelState(env.DB, now, 1, 500);
+    expect(wrapped).toMatchObject({ households: 0, wrapped: true, deleted: {} });
+    const repeated = await pruneObsoleteChannelState(env.DB, now, 1, 500);
+    expect(Object.values(repeated.deleted).every((count) => count === 0)).toBe(true);
   });
 });
 

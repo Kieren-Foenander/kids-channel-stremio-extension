@@ -27,7 +27,8 @@
     "crons": ["*/15 * * * *"]
   },
   "observability": {
-    "enabled": false
+    "enabled": true,
+    "head_sampling_rate": 1
   },
   "env": {
     "development": {
