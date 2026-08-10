@@ -59,7 +59,7 @@ beforeEach(async () => {
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
     content_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT, background TEXT,
     release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL,
-    paused_at TEXT, UNIQUE (household_id, content_type, imdb_id)
+    UNIQUE (household_id, content_type, imdb_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channels (
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, channel_type TEXT NOT NULL,
@@ -776,13 +776,14 @@ describe("Cinemeta Approved Library", () => {
     });
     const approved = await response.json<any>();
     expect(response.status).toBe(201);
-    expect(approved.programme).toMatchObject({ imdbId: "tt1234567", type: "show", showProgress: { id: "tt1234567:1:1", season: 1, episode: 1 } });
+    expect(approved.programme).toMatchObject({ imdbId: "tt1234567", type: "show",
+      assignments: [{ showProgress: { id: "tt1234567:1:1", season: 1, episode: 1 } }] });
 
     const library = await (await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, { headers })).json<any>();
     expect(library.programmes).toHaveLength(1);
     expect(library.programmes[0]).toMatchObject({
       imdbId: "tt1234567", type: "show", current: true, finished: false,
-      showProgress: { id: "tt1234567:1:1", season: 1, episode: 1, title: "First" },
+      assignments: [{ showProgress: { id: "tt1234567:1:1", season: 1, episode: 1, title: "First" } }],
     });
     expect(library.programmes[0]).not.toHaveProperty("episodes");
     expect(library.programmes[0]).not.toHaveProperty("description");
@@ -840,7 +841,7 @@ describe("Cinemeta Approved Library", () => {
       programme: {
         id: secondProgrammeId,
         title: "The Example",
-        showProgress: { id: "tt1234567:1:2" },
+        assignments: [{ showProgress: { id: "tt1234567:1:2" } }],
         episodes: [
           { id: "tt1234567:1:1", title: "First" },
           { id: "tt1234567:1:2", title: "Second" },
@@ -902,7 +903,7 @@ describe("Cinemeta Approved Library", () => {
       method: "POST", headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ type: "show", imdbId: "tt1234567", startingEpisodeId: "tt1234567:1:2" }),
     });
-    expect(await accepted.json<any>()).toMatchObject({ programme: { showProgress: { id: "tt1234567:1:2" } } });
+    expect(await accepted.json<any>()).toMatchObject({ programme: { assignments: [{ showProgress: { id: "tt1234567:1:2" } }] } });
   });
 
   it("approves a movie once and reports a duplicate without another Cinemeta request", async () => {

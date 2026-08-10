@@ -46,10 +46,8 @@ type ProgrammeSummary = {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   current: boolean;
   finished: boolean;
-  showProgress?: EpisodeSummary;
   assignments: ProgrammeAssignment[];
 };
 type LibraryResponse = { programmes: ProgrammeSummary[] };

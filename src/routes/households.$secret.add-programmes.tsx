@@ -43,10 +43,8 @@ type ProgrammeSummary = {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   current: boolean;
   finished: boolean;
-  showProgress?: SelectableEpisode;
 };
 type SearchResponse = { results: SearchProgramme[] };
 type LibraryResponse = { programmes: ProgrammeSummary[] };

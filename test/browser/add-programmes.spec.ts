@@ -133,7 +133,7 @@ test("a show can be approved from a non-default released episode without losing 
   await dialog.getByRole("button", { name: "Approve show" }).click();
   const approval = await approvalResponse;
   expect(approval.status()).toBe(201);
-  expect((await approval.json()).programme.showProgress.id).toBe("tt1234567:1:2");
+  expect((await approval.json()).programme.assignments[0].showProgress.id).toBe("tt1234567:1:2");
   await expect(dialog).toBeHidden();
   await expect(page.getByText("added to the Approved Library.")).toBeVisible();
   await expect(page).toHaveURL(/\?q=Example&type=show&page=1$/);

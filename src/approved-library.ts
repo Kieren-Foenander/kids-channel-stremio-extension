@@ -24,9 +24,7 @@ export interface ApprovedProgramme {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   episodes?: CinemetaEpisode[];
-  showProgress?: CinemetaEpisode;
   assignments: ProgrammeAssignment[];
 }
 
@@ -40,10 +38,8 @@ export interface ApprovedProgrammeSummary {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   current: boolean;
   finished: boolean;
-  showProgress?: CinemetaEpisode;
   assignments: ProgrammeAssignment[];
 }
 
@@ -59,8 +55,6 @@ interface StoredProgramme {
   genres_json: string;
   imdb_rating: string | null;
   approved_at: string;
-  paused_at: string | null;
-  next_video_id: string | null;
 }
 
 interface AssignmentRow {
@@ -101,7 +95,6 @@ function programmeFromRow(row: StoredProgramme): ApprovedProgramme {
     genres: JSON.parse(row.genres_json) as string[],
     imdbRating: row.imdb_rating ?? undefined,
     approvedAt: row.approved_at,
-    pausedAt: row.paused_at ?? undefined,
     assignments: [],
   };
 }
@@ -169,20 +162,17 @@ export async function approvedProgrammeDetail(
       CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
       CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
       CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
-      p.approved_at, NULL AS paused_at, NULL AS next_video_id
+      p.approved_at
     FROM approved_programmes p
     LEFT JOIN canonical_shows canonical
       ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
     WHERE p.id = ? AND p.household_id = ?`).bind(programmeId, householdId)
-    .first<StoredProgramme & { next_video_id: string | null }>();
+    .first<StoredProgramme>();
   if (!row) return null;
 
   const programme = programmeFromRow(row);
   const assignments = await assignmentRows(db, householdId, programmeId);
   programme.assignments = assignments.map(assignmentFromRow);
-  const primary = programme.assignments[0];
-  programme.pausedAt = primary?.pausedAt;
-  programme.showProgress = primary?.showProgress;
   if (programme.type !== "show") return programme;
 
   const episodes = await db.prepare(`SELECT video_id, season, episode, title, released_at, overview
@@ -257,7 +247,6 @@ export async function approveProgramme(
     id,
     imdbId: title.id,
     approvedAt,
-    showProgress: startingEpisode,
     assignments: requested.map((channelId) => ({
       channelId,
       channelName: channelById.get(channelId)!.name,
@@ -270,15 +259,6 @@ export async function approveProgramme(
   };
 }
 
-type SummaryRow = StoredProgramme & {
-  is_current: number;
-  progress_video_id: string | null;
-  progress_season: number | null;
-  progress_episode: number | null;
-  progress_title: string | null;
-  progress_released_at: string | null;
-};
-
 export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
       CASE WHEN p.content_type = 'show' THEN canonical.title ELSE p.title END AS title,
       CASE WHEN p.content_type = 'show' THEN canonical.description ELSE p.description END AS description,
@@ -287,10 +267,7 @@ export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
       CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
       CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
       CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
-      p.approved_at, NULL AS paused_at,
-      0 AS is_current, NULL AS progress_video_id,
-      NULL AS progress_season, NULL AS progress_episode,
-      NULL AS progress_title, NULL AS progress_released_at
+      p.approved_at
     FROM approved_programmes p
     LEFT JOIN canonical_shows canonical
       ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
@@ -304,7 +281,7 @@ export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
  * the last one, so an unassigned programme is not part of the library. */
 export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
   const [rows, assignments] = await Promise.all([
-    db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<SummaryRow>(),
+    db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<StoredProgramme>(),
     assignmentRows(db, householdId),
   ]);
   const assignmentsByProgramme = new Map<string, ProgrammeAssignment[]>();
@@ -317,7 +294,6 @@ export async function approvedLibrary(db: D1Database, householdId: string): Prom
   return rows.results.map((row) => {
     const programme = programmeFromRow(row);
     const programmeAssignments = assignmentsByProgramme.get(programme.id) ?? [];
-    const primary = programmeAssignments[0];
     return {
       id: programme.id,
       imdbId: programme.imdbId,
@@ -328,11 +304,9 @@ export async function approvedLibrary(db: D1Database, householdId: string): Prom
       genres: programme.genres,
       imdbRating: programme.imdbRating,
       approvedAt: programme.approvedAt,
-      pausedAt: primary?.pausedAt,
       current: programmeAssignments.some((assignment) => assignment.current),
       finished: programme.type === "show" && programmeAssignments.length > 0
         && programmeAssignments.every((assignment) => assignment.finished),
-      showProgress: primary?.showProgress,
       assignments: programmeAssignments,
     };
   });

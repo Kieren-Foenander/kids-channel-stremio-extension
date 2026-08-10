@@ -303,4 +303,7 @@ CREATE INDEX tv_preparation_items_status_idx
 
 DROP TABLE show_progress;
 
+-- Pause state now belongs to a Channel Assignment rather than the programme.
+ALTER TABLE approved_programmes DROP COLUMN paused_at;
+
 PRAGMA defer_foreign_keys = off;
