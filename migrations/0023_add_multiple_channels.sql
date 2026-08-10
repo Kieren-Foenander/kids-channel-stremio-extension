@@ -60,7 +60,7 @@ CREATE TABLE current_programmes_v2 (
   FOREIGN KEY (programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
 
-INSERT INTO current_programmes_v2
+INSERT INTO current_programmes_v2 (household_id, channel_id, programme_id, video_id, selected_at)
 SELECT household_id, household_id || CASE channel WHEN 'tv' THEN '-tv' ELSE '-movie' END,
   programme_id, video_id, selected_at FROM current_programmes;
 
@@ -78,7 +78,7 @@ CREATE TABLE channel_state_v2 (
   FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE,
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
-INSERT INTO channel_state_v2
+INSERT INTO channel_state_v2 (household_id, channel_id, current_position, selection_seed, initialized_at)
 SELECT household_id, household_id || '-tv', current_position, selection_seed, initialized_at
 FROM channel_state WHERE channel = 'tv';
 DROP TABLE channel_state;
@@ -96,7 +96,7 @@ CREATE TABLE channel_schedule_v2 (
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
   FOREIGN KEY (programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
-INSERT INTO channel_schedule_v2
+INSERT INTO channel_schedule_v2 (household_id, channel_id, position, programme_id, video_id, scheduled_at)
 SELECT household_id, household_id || '-tv', position, programme_id, video_id, scheduled_at
 FROM channel_schedule WHERE channel = 'tv';
 DROP TABLE channel_schedule;
@@ -118,6 +118,7 @@ CREATE TABLE channel_advancements_v2 (
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 INSERT INTO channel_advancements_v2
+  (household_id, channel_id, from_position, target_position, owner_token, advanced_at)
 SELECT household_id, household_id || '-tv', from_position, target_position, owner_token, advanced_at
 FROM channel_advancements WHERE channel = 'tv';
 DROP TABLE channel_advancements;
@@ -144,6 +145,9 @@ CREATE TABLE tv_advancement_history_v2 (
   FOREIGN KEY (target_programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
 INSERT INTO tv_advancement_history_v2
+  (id, household_id, channel_id, from_position, target_position,
+   previous_programme_id, previous_video_id, target_programme_id, target_video_id,
+   progress_before_json, progress_after_json, advanced_at, undone_at, undo_owner_token)
 SELECT id, household_id, household_id || '-tv', from_position, target_position,
   previous_programme_id, previous_video_id, target_programme_id, target_video_id,
   progress_before_json, progress_after_json, advanced_at, undone_at, undo_owner_token
@@ -165,6 +169,7 @@ CREATE TABLE movie_channel_state_v2 (
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 INSERT INTO movie_channel_state_v2
+  (household_id, channel_id, cycle, current_position, selection_seed, initialized_at, revision)
 SELECT household_id, household_id || '-movie', cycle, current_position,
   selection_seed, initialized_at, revision FROM movie_channel_state;
 DROP TABLE movie_channel_state;
@@ -183,7 +188,7 @@ CREATE TABLE movie_rotation_v2 (
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
   FOREIGN KEY (programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
-INSERT INTO movie_rotation_v2
+INSERT INTO movie_rotation_v2 (household_id, channel_id, cycle, position, programme_id, consumed_at)
 SELECT household_id, household_id || '-movie', cycle, position, programme_id, consumed_at
 FROM movie_rotation;
 DROP TABLE movie_rotation;
@@ -200,7 +205,7 @@ CREATE TABLE movie_advancements_v2 (
   FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE,
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
-INSERT INTO movie_advancements_v2
+INSERT INTO movie_advancements_v2 (household_id, channel_id, cycle, position, owner_token, advanced_at)
 SELECT household_id, household_id || '-movie', cycle, position, owner_token, advanced_at
 FROM movie_advancements;
 DROP TABLE movie_advancements;
@@ -216,7 +221,7 @@ CREATE TABLE movie_channel_mutations_v2 (
   FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE,
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
-INSERT INTO movie_channel_mutations_v2
+INSERT INTO movie_channel_mutations_v2 (household_id, channel_id, revision, owner_token, claimed_at)
 SELECT household_id, household_id || '-movie', revision, owner_token, claimed_at
 FROM movie_channel_mutations;
 DROP TABLE movie_channel_mutations;
@@ -236,6 +241,7 @@ CREATE TABLE movie_playback_history_v2 (
   FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE
 );
 INSERT INTO movie_playback_history_v2
+  (id, household_id, channel_id, programme_id, imdb_id, title, cycle, position, played_at)
 SELECT id, household_id, household_id || '-movie', programme_id, imdb_id,
   title, cycle, position, played_at FROM movie_playback_history;
 DROP TABLE movie_playback_history;
@@ -256,7 +262,12 @@ CREATE TABLE tv_preparation_runs_v2 (
   updated_at TEXT NOT NULL,
   FOREIGN KEY (household_id) REFERENCES households(id) ON DELETE CASCADE
 );
-INSERT INTO tv_preparation_runs_v2 SELECT * FROM tv_preparation_runs;
+INSERT INTO tv_preparation_runs_v2
+  (id, household_id, status, requested_count, started_at, deadline_at,
+   completed_at, failure_reason, created_at, updated_at)
+SELECT id, household_id, status, requested_count, started_at, deadline_at,
+  completed_at, failure_reason, created_at, updated_at
+FROM tv_preparation_runs;
 
 CREATE TABLE tv_preparation_items_v2 (
   run_id TEXT NOT NULL,
@@ -284,6 +295,8 @@ CREATE TABLE tv_preparation_items_v2 (
   FOREIGN KEY (programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
 INSERT INTO tv_preparation_items_v2
+  (run_id, channel_id, position, sequence, programme_id, video_id, show_title,
+   season, episode, episode_title, status, attempts, quality, filename, info_hash, message, updated_at)
 SELECT item.run_id, run.household_id || '-tv', item.position, item.position, item.programme_id,
   item.video_id, item.show_title, item.season, item.episode, item.episode_title,
   item.status, item.attempts, item.quality, item.filename, item.info_hash, item.message, item.updated_at
