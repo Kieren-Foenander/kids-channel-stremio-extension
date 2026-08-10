@@ -137,12 +137,13 @@ export async function createTvPreparationRun(
     throw error;
   }
   try {
-    await db.batch(selected.map((programme) => db.prepare(`INSERT INTO tv_preparation_items
-      (run_id, channel_id, position, programme_id, video_id, show_title, season, episode, episode_title, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
+    await db.batch(selected.map((programme, sequence) => db.prepare(`INSERT INTO tv_preparation_items
+      (run_id, channel_id, position, sequence, programme_id, video_id, show_title, season, episode, episode_title, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
       id,
       programme.channelId,
       programme.position,
+      sequence,
       programme.programmeId,
       programme.episode.id,
       programme.showTitle,
@@ -169,9 +170,8 @@ export async function tvPreparationRun(
     : await db.prepare("SELECT * FROM tv_preparation_runs WHERE household_id = ? ORDER BY created_at DESC LIMIT 1")
       .bind(householdId).first<RunRow>();
   if (!row) return null;
-  const { results } = await db.prepare(`SELECT item.* FROM tv_preparation_items item
-      JOIN channels channel ON channel.id = item.channel_id
-      WHERE item.run_id = ? ORDER BY item.position, channel.created_at, channel.id`)
+  const { results } = await db.prepare(`SELECT * FROM tv_preparation_items
+      WHERE run_id = ? ORDER BY sequence`)
     .bind(row.id).all<ItemRow>();
   const counts: Record<TvPreparationItemStatus, number> = {
     queued: 0, trying: 0, downloading: 0, ready: 0, unavailable: 0, cancelled: 0,

@@ -262,6 +262,9 @@ CREATE TABLE tv_preparation_items_v2 (
   run_id TEXT NOT NULL,
   channel_id TEXT NOT NULL,
   position INTEGER NOT NULL,
+  -- Preparation visits Channels breadth-first, so the run's own order cannot be
+  -- recovered from the Channel-relative schedule position alone.
+  sequence INTEGER NOT NULL,
   programme_id TEXT NOT NULL,
   video_id TEXT NOT NULL,
   show_title TEXT NOT NULL,
@@ -281,7 +284,7 @@ CREATE TABLE tv_preparation_items_v2 (
   FOREIGN KEY (programme_id) REFERENCES approved_programmes(id) ON DELETE CASCADE
 );
 INSERT INTO tv_preparation_items_v2
-SELECT item.run_id, run.household_id || '-tv', item.position, item.programme_id,
+SELECT item.run_id, run.household_id || '-tv', item.position, item.position, item.programme_id,
   item.video_id, item.show_title, item.season, item.episode, item.episode_title,
   item.status, item.attempts, item.quality, item.filename, item.info_hash, item.message, item.updated_at
 FROM tv_preparation_items item

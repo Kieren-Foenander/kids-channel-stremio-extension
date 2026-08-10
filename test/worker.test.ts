@@ -12,6 +12,7 @@ import {
   tvPreparationRun,
 } from "../src/tv-preparation";
 import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
+import { createChannel } from "../src/channels";
 import { APPROVED_LIBRARY_SQL } from "../src/approved-library";
 
 const SELF = {
@@ -197,7 +198,8 @@ beforeEach(async () => {
   await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS tv_preparation_runs_active_household_idx
     ON tv_preparation_runs (household_id) WHERE status IN ('queued', 'running')`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_preparation_items (
-    run_id TEXT NOT NULL, channel_id TEXT NOT NULL, position INTEGER NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    run_id TEXT NOT NULL, channel_id TEXT NOT NULL, position INTEGER NOT NULL, sequence INTEGER NOT NULL,
+    programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
     show_title TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, episode_title TEXT NOT NULL,
     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, quality TEXT, filename TEXT, info_hash TEXT,
     message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, channel_id, position)
@@ -1309,6 +1311,28 @@ describe("rolling TV Channel Schedule", () => {
     expect(secondRun?.id).not.toBe(firstRun?.id);
     expect(secondRun?.items.map((item) => item.videoId)).toEqual(secondSchedule.slice(0, 5).map((item) => item.episode.id));
     expect(await tvPreparationRun(env.DB, created.householdId, firstRun!.id)).toMatchObject({ status: "cancelled" });
+  });
+
+  it("keeps one breadth-first run while TV Channels sit at different schedule positions", async () => {
+    const { created, channelId } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-torbox-token", env.CONFIG_SECRET);
+    const secondChannel = await createChannel(env.DB, created.householdId, "tv", "Second");
+    await env.DB.prepare(`INSERT INTO channel_assignments (channel_id, programme_id, next_video_id, created_at)
+      SELECT ?, programme_id, next_video_id, created_at FROM channel_assignments WHERE channel_id = ?`)
+      .bind(secondChannel.id, channelId).run();
+
+    const schedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
+    await requestTvProgramme(env.DB, created.householdId, channelId, schedule[3].episode.id, "deterministic-test-seed");
+
+    const first = await ensureAutomaticTvPreparation(env, created.householdId, undefined, new Date("2026-08-01T10:00:00.000Z"));
+    expect(first?.items).toHaveLength(10);
+    // Every Channel's Current Programme is prepared before any Channel's second programme.
+    expect(first?.items.map((item) => item.channelId))
+      .toEqual([channelId, secondChannel.id, channelId, secondChannel.id, channelId,
+        secondChannel.id, channelId, secondChannel.id, channelId, secondChannel.id]);
+
+    const second = await ensureAutomaticTvPreparation(env, created.householdId, undefined, new Date("2026-08-01T10:01:00.000Z"));
+    expect(second?.id).toBe(first?.id);
   });
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
