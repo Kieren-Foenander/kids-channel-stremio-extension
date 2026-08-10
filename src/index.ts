@@ -111,6 +111,27 @@ function addonJson(value: unknown, status = 200, headers?: HeadersInit): Respons
   return json(value, status, { "access-control-allow-origin": "*", ...headers });
 }
 
+/** Stremio Web fetches inline playback URLs from the browser, so they need the same
+ * cross-origin allowance as the manifest, catalog, metadata, and resolve routes. */
+function playbackResponse(message: string, status: number): Response {
+  return new Response(message, {
+    status,
+    headers: { "access-control-allow-origin": "*", "cache-control": "no-store" },
+  });
+}
+
+function playbackRedirect(location: string): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location,
+      "access-control-allow-origin": "*",
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
 function queueAutomaticTvPreparation(env: Env, ctx: ExecutionContext, householdId: string): void {
   ctx.waitUntil(ensureAutomaticTvPreparation(env, householdId).catch((error) => {
     console.error(JSON.stringify({
@@ -145,7 +166,7 @@ async function playChannelProgramme(
   contentType: StreamContentType,
   videoId: string,
 ): Promise<Response> {
-  if (!env.CONFIG_SECRET) return new Response("Playback is temporarily unavailable.", { status: 503 });
+  if (!env.CONFIG_SECRET) return playbackResponse("Playback is temporarily unavailable.", 503);
   try {
     const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
     if (!torBoxToken) {
@@ -154,7 +175,7 @@ async function playChannelProgramme(
         queueAutomaticTvPreparation(env, ctx, household.id);
         return programmeUnavailable(request);
       }
-      return new Response("TorBox is not configured for this Household.", { status: 503 });
+      return playbackResponse("TorBox is not configured for this Household.", 503);
     }
     const selection = await selectCachedStream(
       env.DB,
@@ -165,7 +186,7 @@ async function playChannelProgramme(
       env,
     );
     if (!selection) {
-      if (contentType !== "series") return new Response("Movie stream is unavailable.", { status: 404 });
+      if (contentType !== "series") return playbackResponse("Movie stream is unavailable.", 404);
       await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
       await deferUnavailableTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
@@ -183,9 +204,8 @@ async function playChannelProgramme(
       Date.parse(selection.staleAt),
       env.CONFIG_SECRET,
     );
-    return Response.redirect(
+    return playbackRedirect(
       `${new URL(request.url).origin}/addons/${household.secret}/resolve/${resolveToken}`,
-      302,
     );
   } catch (error) {
     console.error(JSON.stringify({
@@ -197,7 +217,7 @@ async function playChannelProgramme(
     }));
     return contentType === "series"
       ? programmeUnavailable(request)
-      : new Response("Movie playback is temporarily unavailable.", { status: 502 });
+      : playbackResponse("Movie playback is temporarily unavailable.", 502);
   }
 }
 
@@ -1040,12 +1060,12 @@ export default {
     );
     if ((request.method === "GET" || request.method === "HEAD") && playMatch) {
       const household = await findHousehold(env.DB, playMatch[1]);
-      if (!household) return new Response("Household not found.", { status: 404 });
+      if (!household) return playbackResponse("Household not found.", 404);
       const channelType = playMatch[2] === "series" ? "tv" : "movie";
       const channel = await findChannel(env.DB, household.id, playMatch[3], channelType);
-      if (!channel) return new Response("Channel not found.", { status: 404 });
+      if (!channel) return playbackResponse("Channel not found.", 404);
       const videoId = decodedPathSegment(playMatch[4]);
-      if (!videoId) return new Response("Programme not found.", { status: 404 });
+      if (!videoId) return playbackResponse("Programme not found.", 404);
       return playChannelProgramme(request, env, ctx, household, channel, playMatch[2] as StreamContentType, videoId);
     }
 

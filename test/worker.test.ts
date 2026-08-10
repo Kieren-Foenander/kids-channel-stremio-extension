@@ -2270,6 +2270,13 @@ describe("Stremio protocol", () => {
     const comedyMeta = await (await SELF.fetch(`${base}/meta/movie/${encodeURIComponent(`kids-channels:movie:${comedy.id}`)}.json`)).json<any>();
     expect(comedyMeta.meta.videos[0]).toMatchObject({ id: "tt5555555", streams: [{ url: expect.stringContaining(`/play/movie/${comedy.id}/tt5555555`) }] });
 
+    const playback = await SELF.fetch(`${base}/play/movie/${comedy.id}/tt5555555`, { redirect: "manual" });
+    expect(playback.status).toBe(503);
+    expect(playback.headers.get("access-control-allow-origin")).toBe("*");
+    const unknownChannel = await SELF.fetch(`${base}/play/movie/unknown-channel/tt5555555`);
+    expect(unknownChannel.status).toBe(404);
+    expect(unknownChannel.headers.get("access-control-allow-origin")).toBe("*");
+
     const defaultMovieId = initial.channels.find((channel: any) => channel.type === "movie").id;
     const reassigned = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
       method: "PUT", headers, body: JSON.stringify({ channelIds: [defaultMovieId, comedy.id] }),
