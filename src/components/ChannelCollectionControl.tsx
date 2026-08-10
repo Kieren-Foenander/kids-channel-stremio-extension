@@ -26,8 +26,10 @@ export function ChannelCollectionControl({
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
 
+  // A missing or deleted selection falls back to the first Channel, including when the
+  // Default Channel a link once pointed at has been deleted.
   useEffect(() => {
-    if (selectedId && selected && selected.id !== selectedId) onSelect(selected.id);
+    if (selected && selected.id !== selectedId) onSelect(selected.id);
   }, [onSelect, selected, selectedId]);
 
   const refresh = async () => {

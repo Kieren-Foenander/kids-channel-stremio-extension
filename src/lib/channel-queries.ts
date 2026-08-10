@@ -7,10 +7,8 @@ const POLL_INTERVAL_MS = 30_000;
 export function useTvChannel<T>(secret: string, channelId?: string) {
   const query = useQuery({
     queryKey: parentKeys.tv(secret, channelId),
-    queryFn: () => parentApi<T>(channelId
-      ? `/api/households/${secret}/channels/${channelId}/tv-state`
-      : `/api/households/${secret}/tv-state`),
-    enabled: channelId !== "",
+    queryFn: () => parentApi<T>(`/api/households/${secret}/channels/${channelId}/tv-state`),
+    enabled: Boolean(channelId),
     refetchInterval: POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
   });
@@ -21,10 +19,8 @@ export function useTvChannel<T>(secret: string, channelId?: string) {
 export function useTvPreparation<T extends { run: { status: string } | null }>(secret: string, channelId?: string) {
   const query = useQuery({
     queryKey: parentKeys.tvPreparation(secret, channelId),
-    queryFn: () => parentApi<T>(channelId
-      ? `/api/households/${secret}/channels/${channelId}/tv-preparation`
-      : `/api/households/${secret}/tv-preparation`),
-    enabled: channelId !== "",
+    queryFn: () => parentApi<T>(`/api/households/${secret}/channels/${channelId}/tv-preparation`),
+    enabled: Boolean(channelId),
     refetchInterval: (current) => ["queued", "running"].includes(current.state.data?.run?.status ?? "") ? 10_000 : false,
     refetchIntervalInBackground: false,
   });
@@ -35,10 +31,8 @@ export function useTvPreparation<T extends { run: { status: string } | null }>(s
 export function useMovieChannel<T>(secret: string, channelId?: string) {
   const query = useQuery({
     queryKey: parentKeys.movie(secret, channelId),
-    queryFn: () => parentApi<T>(channelId
-      ? `/api/households/${secret}/channels/${channelId}/movie-state`
-      : `/api/households/${secret}/movie-state`),
-    enabled: channelId !== "",
+    queryFn: () => parentApi<T>(`/api/households/${secret}/channels/${channelId}/movie-state`),
+    enabled: Boolean(channelId),
     refetchInterval: POLL_INTERVAL_MS,
     refetchIntervalInBackground: false,
   });

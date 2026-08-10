@@ -9,6 +9,7 @@ import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { useTvChannel, useTvPreparation } from "../lib/channel-queries";
+import { useChannels } from "../lib/channels";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
 export const Route = createFileRoute("/households/$secret/tv-channel")({
@@ -83,8 +84,11 @@ function TvChannelPage() {
   }, [navigate]);
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
-  const channelQuery = useTvChannel<TvState>(secret, channel);
-  const preparationQuery = useTvPreparation<{ run: PreparationRun | null }>(secret, channel);
+  const channelsQuery = useChannels(secret, "tv");
+  const channels = channelsQuery.data ?? [];
+  const activeChannelId = channels.find((candidate) => candidate.id === channel)?.id ?? channels[0]?.id;
+  const channelQuery = useTvChannel<TvState>(secret, activeChannelId);
+  const preparationQuery = useTvPreparation<{ run: PreparationRun | null }>(secret, activeChannelId);
   const state = channelQuery.data;
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [mutationStatus, setMutationStatus] = useState("");
@@ -93,9 +97,7 @@ function TvChannelPage() {
   const actionMutation = useMutation({
     mutationFn: async (kind: "undo" | "regenerate") => {
       const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
-      return parentApi<{ message?: string }>(channel
-        ? `${base}/channels/${channel}${path}`
-        : `${base}${path}`, { method: "POST" });
+      return parentApi<{ message?: string }>(`${base}/channels/${activeChannelId}${path}`, { method: "POST" });
     },
   });
   async function performAction(kind: "undo" | "regenerate") {
@@ -104,7 +106,7 @@ function TvChannelPage() {
     setMutationFailed(false);
     try {
       const result = await actionMutation.mutateAsync(kind);
-      await queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret, channel) });
+      await queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret, activeChannelId) });
       setMutationStatus(result.message || (kind === "undo" ? "Most recent advancement undone." : "Upcoming TV selections regenerated."));
       window.dispatchEvent(new Event("stremio-restart-required"));
     } catch (error) {
@@ -125,7 +127,12 @@ function TvChannelPage() {
       <PageHeader ident="Channels" title="TV Channels" description="Create named TV Channels, then inspect the schedule and playback state for each one." />
       <ChannelCollectionControl secret={secret} type="tv" selectedId={channel} onSelect={chooseChannel} />
 
-      {!state ? (
+      {!channelsQuery.isPending && channels.length === 0 ? (
+        <section className="rounded-[4px] border bg-card p-5">
+          <h2 className="text-lg font-semibold">No TV Channels</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Create a TV Channel above to start scheduling approved shows.</p>
+        </section>
+      ) : !state ? (
         channelQuery.isError ? (
           <section className="rounded-[4px] border bg-card p-5" role="alert">
             <h2 className="text-lg font-semibold">TV Channel unavailable</h2>

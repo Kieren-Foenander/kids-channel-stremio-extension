@@ -68,22 +68,45 @@ test("a Parent deliberately creates, renames, selects, and deletes a TV Channel"
   await expect(page.getByText("1/5 TV Channels configured.")).toBeVisible();
 });
 
+test("the TV Channel page selects a surviving Channel after the Default Channel is deleted", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  const channelSelect = page.getByLabel("TV Channel", { exact: true });
+
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create TV Channel" });
+  await createDialog.getByLabel("Channel name").fill("Weekend");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+  await expect(createDialog).toBeHidden();
+
+  await channelSelect.selectOption({ label: "TV Channel" });
+  await page.getByRole("button", { name: "Delete" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "Delete TV Channel?" });
+  await deleteDialog.getByRole("button", { name: "Delete Channel" }).click();
+  await expect(deleteDialog).toBeHidden();
+
+  await page.goto(`${parentUrl}/tv-channel`);
+  await expect(channelSelect.locator("option:checked")).toHaveText("Weekend");
+  await expect(page.getByRole("heading", { name: "TV Channel unavailable" })).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Channel Schedule" })).toBeVisible();
+});
+
 test("a Parent inspects and controls the TV Channel with progressive disclosure", async ({ page }) => {
   let state = channelState();
   let stateRequests = 0;
   let undoRequests = 0;
   let regenerationRequests = 0;
 
-  await page.route("**/api/households/*/tv-state", async route => {
+  await page.route("**/tv-state", async route => {
     stateRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
   });
-  await page.route("**/api/households/*/tv-schedule/undo", async route => {
+  await page.route("**/tv-schedule/undo", async route => {
     undoRequests += 1;
     state = { ...state, canUndo: false };
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "Most recent advancement undone." }) });
   });
-  await page.route("**/api/households/*/tv-schedule/regenerate", async route => {
+  await page.route("**/tv-schedule/regenerate", async route => {
     regenerationRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "Upcoming TV selections regenerated." }) });
   });
@@ -140,7 +163,7 @@ test("a mutation queues a fresh state load behind an overlapping refresh", async
   const overlappingRefreshStarted = new Promise<void>(resolve => { markRefreshStarted = resolve; });
   const overlappingRefreshReleased = new Promise<void>(resolve => { releaseOverlappingRefresh = resolve; });
 
-  await page.route("**/api/households/*/tv-state", async route => {
+  await page.route("**/tv-state", async route => {
     stateRequests += 1;
     if (stateRequests === 2) {
       const staleState = state;
@@ -151,7 +174,7 @@ test("a mutation queues a fresh state load behind an overlapping refresh", async
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
   });
-  await page.route("**/api/households/*/tv-schedule/undo", async route => {
+  await page.route("**/tv-schedule/undo", async route => {
     undoRequests += 1;
     state = { ...state, canUndo: false };
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ message: "Most recent advancement undone." }) });
@@ -176,7 +199,7 @@ test("a mutation queues a fresh state load behind an overlapping refresh", async
 test("TV Channel refreshes on focus and polls only while visible", async ({ page }) => {
   await page.clock.install();
   let stateRequests = 0;
-  await page.route("**/api/households/*/tv-state", async route => {
+  await page.route("**/tv-state", async route => {
     stateRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(channelState(false)) });
   });

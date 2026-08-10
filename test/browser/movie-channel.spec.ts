@@ -36,11 +36,11 @@ test("a Parent inspects the Movie Channel and deliberately resets its rotation",
   let releaseReset!: () => void;
   const resetReleased = new Promise<void>(resolve => { releaseReset = resolve; });
 
-  await page.route("**/api/households/*/movie-state", async route => {
+  await page.route("**/movie-state", async route => {
     stateRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
   });
-  await page.route("**/api/households/*/movie-rotation/reset", async route => {
+  await page.route("**/movie-rotation/reset", async route => {
     resetRequests += 1;
     await resetReleased;
     state = { ...state, remaining: [...state.remaining].reverse() };
@@ -101,12 +101,12 @@ test("a Parent inspects the Movie Channel and deliberately resets its rotation",
 
 test("a failed reset preserves the operational view and remains available to retry", async ({ page }) => {
   let resetRequests = 0;
-  await page.route("**/api/households/*/movie-state", route => route.fulfill({
+  await page.route("**/movie-state", route => route.fulfill({
     status: 200,
     contentType: "application/json",
     body: JSON.stringify(channelState()),
   }));
-  await page.route("**/api/households/*/movie-rotation/reset", route => {
+  await page.route("**/movie-rotation/reset", route => {
     resetRequests += 1;
     return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Rotation service is unavailable." }) });
   });
@@ -128,7 +128,7 @@ test("a failed reset preserves the operational view and remains available to ret
 test("Movie Channel refreshes on focus and polls only while visible", async ({ page }) => {
   await page.clock.install();
   let stateRequests = 0;
-  await page.route("**/api/households/*/movie-state", async route => {
+  await page.route("**/movie-state", async route => {
     stateRequests += 1;
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(channelState()) });
   });

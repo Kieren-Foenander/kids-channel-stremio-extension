@@ -8,6 +8,7 @@ import { Button } from "../components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Skeleton } from "../components/ui/skeleton";
 import { useMovieChannel } from "../lib/channel-queries";
+import { useChannels } from "../lib/channels";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
 export const Route = createFileRoute("/households/$secret/movie-channel")({
@@ -51,7 +52,10 @@ function MovieChannelPage() {
   }, [navigate]);
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
-  const channelQuery = useMovieChannel<MovieState>(secret, channel);
+  const channelsQuery = useChannels(secret, "movie");
+  const channels = channelsQuery.data ?? [];
+  const activeChannelId = channels.find((candidate) => candidate.id === channel)?.id ?? channels[0]?.id;
+  const channelQuery = useMovieChannel<MovieState>(secret, activeChannelId);
   const state = channelQuery.data;
   const [rotationExpanded, setRotationExpanded] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
@@ -59,9 +63,8 @@ function MovieChannelPage() {
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const resetMutation = useMutation({
-    mutationFn: () => parentApi<{ message?: string }>(channel
-      ? `${base}/channels/${channel}/movie-rotation/reset`
-      : `${base}/movie-rotation/reset`, { method: "POST" }),
+    mutationFn: () => parentApi<{ message?: string }>(
+      `${base}/channels/${activeChannelId}/movie-rotation/reset`, { method: "POST" }),
   });
 
   async function resetRotation() {
@@ -70,7 +73,7 @@ function MovieChannelPage() {
     setMutationFailed(false);
     try {
       const result = await resetMutation.mutateAsync();
-      await queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret, channel) });
+      await queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret, activeChannelId) });
       setMutationStatus(result.message || "Movie rotation reset without interrupting the Current Programme.");
       window.dispatchEvent(new Event("stremio-restart-required"));
     } catch (error) {
@@ -91,7 +94,12 @@ function MovieChannelPage() {
       <PageHeader ident="Channels" title="Movie Channels" description="Create named Movie Channels, then inspect the current movie and remaining rotation for each one." />
       <ChannelCollectionControl secret={secret} type="movie" selectedId={channel} onSelect={chooseChannel} />
 
-      {!state ? (
+      {!channelsQuery.isPending && channels.length === 0 ? (
+        <section className="rounded-[4px] border bg-card p-5">
+          <h2 className="text-lg font-semibold">No Movie Channels</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Create a Movie Channel above to start rotating approved movies.</p>
+        </section>
+      ) : !state ? (
         channelQuery.isError ? (
           <section className="rounded-[4px] border bg-card p-5" role="alert">
             <h2 className="text-lg font-semibold">Movie Channel unavailable</h2>
