@@ -1,6 +1,8 @@
 export const CHANNEL_RETENTION = {
   claimHours: 24,
-  playbackHistoryPerHousehold: 10,
+  // Both history tables are ranked per Channel, so a Household holding the maximum ten
+  // Channels retains ten times this bound.
+  playbackHistoryPerChannel: 10,
   preparationRunsPerHousehold: 10,
   // D1 permits 100 bound parameters per statement; reserve ten for cutoffs and limits.
   householdsPerSweep: 90,
@@ -77,7 +79,7 @@ export async function pruneObsoleteChannelState(
         WHERE state.household_id = old.household_id AND state.channel_id = old.channel_id
           AND old.undone_at IS NULL AND old.target_position = state.current_position
       ) LIMIT ?
-    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerHousehold, rowLimit),
+    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerChannel, rowLimit),
     db.prepare(`DELETE FROM movie_playback_history WHERE id IN (
       SELECT id FROM (
         SELECT id, ROW_NUMBER() OVER (
@@ -85,7 +87,7 @@ export async function pruneObsoleteChannelState(
         ) AS history_rank
         FROM movie_playback_history WHERE household_id IN (${householdSql})
       ) old WHERE old.history_rank > ? LIMIT ?
-    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerHousehold, rowLimit),
+    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerChannel, rowLimit),
     db.prepare(`DELETE FROM movie_rotation WHERE rowid IN (
       SELECT rotation.rowid FROM movie_rotation rotation
       JOIN movie_channel_state state ON state.channel_id = rotation.channel_id

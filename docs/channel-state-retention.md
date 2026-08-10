@@ -6,6 +6,10 @@ cursor walks the Household primary key, wraps after the final Household, and cap
 500 deleted rows per sweep. Cleanup therefore does not scan every Household during a request and
 large backlogs drain over repeated scheduled events.
 
+Retention bounds are stated per Channel where the state itself is per Channel. A Household holding
+the maximum five TV and five Movie Channels therefore retains ten times the per-Channel history of a
+Household with one of each.
+
 | State | Retention rule | Safety reason |
 | --- | --- | --- |
 | TV advancement claims | 24 hours; always keep the claim for the latest undoable advancement | Protects in-flight/stale requests and the supported undo action |

@@ -2222,9 +2222,9 @@ describe("scheduled Channel state retention", () => {
       results: [{ owner_token: "active-tv-claim" }, { owner_token: "undo-history" }],
     });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_advancement_history").first())
-      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold + 1 });
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerChannel + 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_playback_history").first())
-      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold });
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerChannel });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_preparation_runs").first())
       .toMatchObject({ count: CHANNEL_RETENTION.preparationRunsPerHousehold + 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation").first()).toMatchObject({ count: 1 });
