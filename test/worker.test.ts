@@ -12,6 +12,7 @@ import {
   tvPreparationRun,
 } from "../src/tv-preparation";
 import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
+import { APPROVED_LIBRARY_SQL } from "../src/approved-library";
 
 const SELF = {
   fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
@@ -679,6 +680,16 @@ describe("Cinemeta Approved Library", () => {
     });
     return sessionHeaders(response);
   }
+
+  it("looks up Show Progress without materializing every Household's episodes", async () => {
+    const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${APPROVED_LIBRARY_SQL}`)
+      .bind("query-plan-household").all<{ detail: string }>();
+
+    expect(plan.results.map((row) => row.detail)).not.toContain("MATERIALIZE show_episodes");
+    expect(plan.results.some((row) => row.detail.includes(
+      "sqlite_autoindex_canonical_show_episodes_1 (show_imdb_id=? AND video_id=?)",
+    ))).toBe(true);
+  });
 
   it("searches shows and movies with distinguishing metadata and artwork", async () => {
     const created = await create();
