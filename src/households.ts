@@ -69,13 +69,23 @@ export async function createHousehold(db: D1Database, pin: string): Promise<Hous
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const pinHash = await derivePin(pin, salt);
   const createdAt = new Date().toISOString();
+  const tvChannelId = crypto.randomUUID();
+  const movieChannelId = crypto.randomUUID();
 
-  await db
-    .prepare(
+  await db.batch([
+    db.prepare(
       "INSERT INTO households (id, secret, pin_salt, pin_hash, created_at, auth_version) VALUES (?, ?, ?, ?, ?, 1)",
     )
-    .bind(id, secret, bytesToBase64(salt), pinHash, createdAt)
-    .run();
+      .bind(id, secret, bytesToBase64(salt), pinHash, createdAt),
+    db.prepare(`INSERT INTO channels
+      (id, household_id, channel_type, name, legacy_key, created_at)
+      VALUES (?, ?, 'tv', 'TV Channel', 'tv', ?)`)
+      .bind(tvChannelId, id, createdAt),
+    db.prepare(`INSERT INTO channels
+      (id, household_id, channel_type, name, legacy_key, created_at)
+      VALUES (?, ?, 'movie', 'Movie Channel', 'movie', ?)`)
+      .bind(movieChannelId, id, createdAt),
+  ]);
 
   return { id, secret, created_at: createdAt, auth_version: 1 };
 }
@@ -155,7 +165,6 @@ export async function rotatePin(db: D1Database, householdId: string, newPin: str
 }
 
 export async function deleteHousehold(db: D1Database, householdId: string): Promise<void> {
-  const approved = "SELECT id FROM approved_programmes WHERE household_id = ?";
   await db.batch([
     db.prepare("DELETE FROM unavailable_episodes WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM movie_playback_history WHERE household_id = ?").bind(householdId),
@@ -168,8 +177,10 @@ export async function deleteHousehold(db: D1Database, householdId: string): Prom
     db.prepare("DELETE FROM channel_schedule WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM channel_state WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM current_programmes WHERE household_id = ?").bind(householdId),
-    db.prepare(`DELETE FROM show_progress WHERE programme_id IN (${approved})`).bind(householdId),
+    db.prepare("DELETE FROM channel_assignments WHERE programme_id IN (SELECT id FROM approved_programmes WHERE household_id = ?)")
+      .bind(householdId),
     db.prepare("DELETE FROM approved_programmes WHERE household_id = ?").bind(householdId),
+    db.prepare("DELETE FROM channels WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM pin_attempts WHERE household_id = ?").bind(householdId),
     db.prepare("DELETE FROM households WHERE id = ?").bind(householdId),
   ]);

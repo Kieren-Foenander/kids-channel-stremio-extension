@@ -65,8 +65,10 @@ export const parentKeys = {
   session: (secret: string) => ["household", secret, "session"] as const,
   overview: (secret: string) => ["household", secret, "overview"] as const,
   library: (secret: string) => ["household", secret, "approved-library"] as const,
-  tv: (secret: string) => ["household", secret, "tv-channel"] as const,
-  tvPreparation: (secret: string) => ["household", secret, "tv-preparation"] as const,
-  movie: (secret: string) => ["household", secret, "movie-channel"] as const,
+  channels: (secret: string, type?: "tv" | "movie") => ["household", secret, "channels", type ?? "all"] as const,
+  channel: (secret: string, channelId: string) => ["household", secret, "channel", channelId] as const,
+  tv: (secret: string, channelId?: string) => ["household", secret, "tv-channel", channelId ?? "default"] as const,
+  tvPreparation: (secret: string, channelId?: string) => ["household", secret, "tv-preparation", channelId ?? "default"] as const,
+  movie: (secret: string, channelId?: string) => ["household", secret, "movie-channel", channelId ?? "default"] as const,
   torBox: (secret: string) => ["household", secret, "torbox"] as const,
 };

@@ -11,11 +11,9 @@ import {
 } from "./households";
 import {
   movieChannelProgramme,
-  MOVIE_CHANNEL_ID,
   parentMovieChannelState,
   parseSignOffId,
   reconcileMovieChannel,
-  removeApprovedMovie,
   requestMovieSignOff,
   resetMovieRotation,
 } from "./movie-channel";
@@ -36,7 +34,7 @@ import {
   verifyStreamToken,
 } from "./secrets";
 import { movieSignOff, programmeUnavailable } from "./sign-off-media";
-import { catalogFor, manifestFor, movieChannelMetadata, TV_CHANNEL_ID, tvChannelMetadata } from "./stremio";
+import { catalogFor, manifestFor, movieChannelMetadata, tvChannelMetadata } from "./stremio";
 import {
   discardStreamSelection,
   invalidateStreamSelection,
@@ -67,6 +65,18 @@ import {
   undoLatestTvAdvancement,
 } from "./tv-channel";
 import { pruneObsoleteChannelState } from "./channel-retention";
+import {
+  channelTypeForContent,
+  channelsForHousehold,
+  createChannel,
+  findChannel,
+  legacyChannel,
+  renameChannel,
+  validChannelName,
+  type Channel,
+  type ChannelType,
+} from "./channels";
+import { channelIdFromStremioId } from "./stremio";
 
 export interface Env {
   DB: D1Database;
@@ -109,6 +119,86 @@ function queueAutomaticTvPreparation(env: Env, ctx: ExecutionContext, householdI
       reason: error instanceof Error ? error.message : "unknown error",
     }));
   }));
+}
+
+async function reconcileHouseholdChannels(env: Env, householdId: string): Promise<void> {
+  const channels = await channelsForHousehold(env.DB, householdId);
+  for (const channel of channels) {
+    if (channel.type === "tv") {
+      await refreshTvChannelSchedule(env.DB, householdId, channel.id, false, env.TV_SCHEDULE_SEED);
+    } else {
+      await reconcileMovieChannel(env.DB, householdId, channel.id, env.MOVIE_ROTATION_SEED);
+    }
+  }
+}
+
+async function legacyChannelOrNull(env: Env, householdId: string, type: ChannelType): Promise<Channel | null> {
+  return legacyChannel(env.DB, householdId, type);
+}
+
+async function playChannelProgramme(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  household: Household,
+  channel: Channel,
+  contentType: StreamContentType,
+  videoId: string,
+): Promise<Response> {
+  if (!env.CONFIG_SECRET) return new Response("Playback is temporarily unavailable.", { status: 503 });
+  try {
+    const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
+    if (!torBoxToken) {
+      if (contentType === "series") {
+        await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
+        queueAutomaticTvPreparation(env, ctx, household.id);
+        return programmeUnavailable(request);
+      }
+      return new Response("TorBox is not configured for this Household.", { status: 503 });
+    }
+    const selection = await selectCachedStream(
+      env.DB,
+      household.id,
+      contentType,
+      videoId,
+      torBoxToken,
+      env,
+    );
+    if (!selection) {
+      if (contentType !== "series") return new Response("Movie stream is unavailable.", { status: 404 });
+      await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
+      queueAutomaticTvPreparation(env, ctx, household.id);
+      await deferUnavailableTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
+      return programmeUnavailable(request);
+    }
+    if (contentType === "series") {
+      await clearUnavailableTvProgramme(env.DB, household.id, videoId);
+      await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
+      queueAutomaticTvPreparation(env, ctx, household.id);
+    }
+    const resolveToken = await issueStreamToken(
+      household.id,
+      selection.torrentId,
+      selection.fileId,
+      Date.parse(selection.staleAt),
+      env.CONFIG_SECRET,
+    );
+    return Response.redirect(
+      `${new URL(request.url).origin}/addons/${household.secret}/resolve/${resolveToken}`,
+      302,
+    );
+  } catch (error) {
+    console.error(JSON.stringify({
+      message: "Channel playback failed",
+      householdId: household.id,
+      channelId: channel.id,
+      contentType,
+      reason: error instanceof Error ? error.message : "unknown error",
+    }));
+    return contentType === "series"
+      ? programmeUnavailable(request)
+      : new Response("Movie playback is temporarily unavailable.", { status: 502 });
+  }
 }
 
 async function householdNotFoundResponse(request: Request, assets?: Fetcher): Promise<Response> {
@@ -413,6 +503,65 @@ export default {
       );
     }
 
+    const channelsMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/channels$/);
+    if (channelsMatch && (request.method === "GET" || request.method === "POST")) {
+      const household = await findHousehold(env.DB, channelsMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      if (request.method === "GET") {
+        return json({ channels: await channelsForHousehold(env.DB, household.id) }, 200, { "cache-control": "no-store" });
+      }
+      let input: { type?: unknown; name?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if ((input.type !== "tv" && input.type !== "movie") || !validChannelName(input.name)) {
+        return json({ error: "Choose TV or Movie and enter a name between 1 and 40 characters." }, 400);
+      }
+      try {
+        const channel = await createChannel(env.DB, household.id, input.type, input.name);
+        return json({ channel }, 201);
+      } catch (error) {
+        if (error instanceof Error && error.message === "channel type limit reached") {
+          return json({ error: `This Household already has five ${input.type === "tv" ? "TV" : "Movie"} Channels.` }, 409);
+        }
+        throw error;
+      }
+    }
+
+    const channelMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/channels\/([A-Za-z0-9-]+)$/);
+    if (channelMatch && (request.method === "GET" || request.method === "PATCH" || request.method === "DELETE")) {
+      const household = await findHousehold(env.DB, channelMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      const channel = await findChannel(env.DB, household.id, channelMatch[2]);
+      if (!channel) return json({ error: "Channel was not found." }, 404);
+      if (request.method === "GET") return json({ channel }, 200, { "cache-control": "no-store" });
+      if (request.method === "PATCH") {
+        let input: { name?: unknown } = {};
+        try { input = await request.json() as typeof input; } catch { /* handled below */ }
+        if (!validChannelName(input.name)) return json({ error: "Enter a name between 1 and 40 characters." }, 400);
+        const renamed = await renameChannel(env.DB, household.id, channel.id, input.name);
+        return json({ channel: renamed, message: "Channel renamed. Restart Stremio to refresh its tile." });
+      }
+      const orphanRows = await env.DB.prepare(`SELECT assignment.programme_id FROM channel_assignments assignment
+        WHERE assignment.channel_id = ? AND NOT EXISTS (
+          SELECT 1 FROM channel_assignments other
+          WHERE other.programme_id = assignment.programme_id AND other.channel_id != assignment.channel_id
+        )`).bind(channel.id).all<{ programme_id: string }>();
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM channels WHERE id = ? AND household_id = ?").bind(channel.id, household.id),
+        ...orphanRows.results.map((row) => env.DB.prepare(
+          "DELETE FROM approved_programmes WHERE id = ? AND household_id = ?",
+        ).bind(row.programme_id, household.id)),
+      ]);
+      queueAutomaticTvPreparation(env, ctx, household.id);
+      return json({
+        message: "Channel deleted. Restart Stremio to refresh the Channel rows.",
+        removedProgrammes: orphanRows.results.length,
+      });
+    }
+
     const searchMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/cinemeta\/search$/);
     if (request.method === "GET" && searchMatch) {
       const household = await findHousehold(env.DB, searchMatch[1]);
@@ -450,7 +599,7 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       if (request.method === "GET") return json({ programmes: await approvedLibrary(env.DB, household.id) });
-      let input: { type?: unknown; imdbId?: unknown; startingEpisodeId?: unknown } = {};
+      let input: { type?: unknown; imdbId?: unknown; startingEpisodeId?: unknown; channelIds?: unknown } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
       if ((input.type !== "show" && input.type !== "movie") || typeof input.imdbId !== "string" || !/^tt\d+$/.test(input.imdbId)) {
         return json({ error: "Choose a valid Cinemeta show or movie." }, 400);
@@ -458,21 +607,45 @@ export default {
       if (input.startingEpisodeId !== undefined && (typeof input.startingEpisodeId !== "string" || input.startingEpisodeId.length === 0)) {
         return json({ error: "Choose a valid regular released starting episode." }, 400);
       }
+      if (input.channelIds !== undefined && (!Array.isArray(input.channelIds)
+        || input.channelIds.some((channelId) => typeof channelId !== "string"))) {
+        return json({ error: "Choose one or more compatible Channels." }, 400);
+      }
       if (await hasApprovedProgramme(env.DB, household.id, input.type, input.imdbId)) {
         return json({ error: "This programme is already in the Approved Library." }, 409);
       }
       try {
         const title = await new CinemetaClient(env.CINEMETA_ORIGIN).title(input.type, input.imdbId);
         if (!title) return json({ error: "Programme was not found in Cinemeta." }, 404);
-        const programme = await approveProgramme(env.DB, household.id, title, input.startingEpisodeId);
-        if (programme.type === "movie") await reconcileMovieChannel(env.DB, household.id, env.MOVIE_ROTATION_SEED);
-        else queueAutomaticTvPreparation(env, ctx, household.id);
+        const programme = await approveProgramme(
+          env.DB,
+          household.id,
+          title,
+          input.startingEpisodeId,
+          input.channelIds as string[] | undefined,
+        );
+        for (const assignment of programme.assignments) {
+          if (assignment.channelType === "movie") {
+            await reconcileMovieChannel(env.DB, household.id, assignment.channelId, env.MOVIE_ROTATION_SEED);
+          } else {
+            await refreshTvChannelSchedule(env.DB, household.id, assignment.channelId, false, env.TV_SCHEDULE_SEED);
+          }
+        }
+        if (programme.type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ programme }, 201);
       } catch (error) {
         const message = error instanceof Error ? error.message : "";
         if (message === "starting episode is invalid") return json({ error: "Choose a valid regular released starting episode." }, 400);
         if (message === "show has no regular released episodes") return json({ error: "This show has no regular released episodes to approve." }, 400);
+        if (message === "compatible channel is required") return json({ error: "Create a compatible Channel before approving this programme." }, 409);
+        if (message === "channel selection is required") return json({ error: "Choose at least one compatible Channel." }, 400);
+        if (message === "channel selection is invalid") return json({ error: "Choose only compatible Channels from this Household." }, 400);
         if (message.includes("UNIQUE")) return json({ error: "This programme is already in the Approved Library." }, 409);
+        console.error(JSON.stringify({
+          message: "programme approval failed",
+          householdId: household.id,
+          reason: message || "unknown error",
+        }));
         return json({ error: "Cinemeta metadata is temporarily unavailable." }, 502);
       }
     }
@@ -488,6 +661,97 @@ export default {
       return json({ programme }, 200, { "cache-control": "no-store" });
     }
 
+    const assignmentsMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/library\/([A-Za-z0-9-]+)\/assignments$/);
+    if (assignmentsMatch && request.method === "PUT") {
+      const household = await findHousehold(env.DB, assignmentsMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      const programme = await env.DB.prepare(`SELECT id, content_type FROM approved_programmes
+        WHERE id = ? AND household_id = ?`).bind(assignmentsMatch[2], household.id)
+        .first<{ id: string; content_type: ContentType }>();
+      if (!programme) return json({ error: "Programme was not found in the Approved Library." }, 404);
+      let input: { channelIds?: unknown; startingEpisodeId?: unknown } = {};
+      try { input = await request.json() as typeof input; } catch { /* handled below */ }
+      if (!Array.isArray(input.channelIds)
+        || input.channelIds.some((channelId) => typeof channelId !== "string")) {
+        return json({ error: "Choose compatible Channels for this programme." }, 400);
+      }
+      const desiredIds = [...new Set(input.channelIds as string[])];
+      const compatible = await channelsForHousehold(env.DB, household.id, channelTypeForContent(programme.content_type));
+      const compatibleIds = new Set(compatible.map((channel) => channel.id));
+      if (desiredIds.some((channelId) => !compatibleIds.has(channelId))) {
+        return json({ error: "Choose only compatible Channels from this Household." }, 400);
+      }
+      const existingRows = await env.DB.prepare(`SELECT channel_id FROM channel_assignments
+        WHERE programme_id = ?`).bind(programme.id).all<{ channel_id: string }>();
+      const existingIds = new Set(existingRows.results.map((row) => row.channel_id));
+      if (desiredIds.length === 0) {
+        await env.DB.batch([
+          env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?")
+            .bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND programme_id = ?")
+            .bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ?")
+            .bind(household.id, programme.id),
+          env.DB.prepare("DELETE FROM channel_assignments WHERE programme_id = ?").bind(programme.id),
+          env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?")
+            .bind(programme.id, household.id),
+        ]);
+        await reconcileHouseholdChannels(env, household.id);
+        if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
+        return json({ programme: null, message: "Final Channel Assignment removed; the programme left the Approved Library. Restart Stremio to refresh the Channels." });
+      }
+      const additions = desiredIds.filter((channelId) => !existingIds.has(channelId));
+      const removals = [...existingIds].filter((channelId) => !desiredIds.includes(channelId));
+      let startingEpisodeId: string | null = null;
+      if (programme.content_type === "show" && additions.length > 0) {
+        if (typeof input.startingEpisodeId === "string") {
+          const episode = await env.DB.prepare(`SELECT 1 FROM show_episodes
+            WHERE programme_id = ? AND video_id = ?`).bind(programme.id, input.startingEpisodeId).first();
+          if (!episode) return json({ error: "Choose a valid regular released starting episode." }, 400);
+          startingEpisodeId = input.startingEpisodeId;
+        } else {
+          startingEpisodeId = await env.DB.prepare(`SELECT video_id FROM show_episodes
+            WHERE programme_id = ? ORDER BY CASE WHEN season = 1 AND episode = 1 THEN 0 ELSE 1 END,
+              season, episode LIMIT 1`).bind(programme.id).first<string>("video_id");
+          if (!startingEpisodeId) return json({ error: "This show has no regular released episodes." }, 400);
+        }
+      }
+      const now = new Date().toISOString();
+      const statements: D1PreparedStatement[] = [];
+      for (const channelId of removals) {
+        statements.push(
+          env.DB.prepare("DELETE FROM current_programmes WHERE channel_id = ? AND programme_id = ?")
+            .bind(channelId, programme.id),
+          env.DB.prepare("DELETE FROM channel_schedule WHERE channel_id = ? AND programme_id = ?")
+            .bind(channelId, programme.id),
+          env.DB.prepare("DELETE FROM movie_rotation WHERE channel_id = ? AND programme_id = ?")
+            .bind(channelId, programme.id),
+          env.DB.prepare("DELETE FROM channel_assignments WHERE channel_id = ? AND programme_id = ?")
+            .bind(channelId, programme.id),
+        );
+      }
+      for (const channelId of additions) {
+        statements.push(env.DB.prepare(`INSERT INTO channel_assignments
+          (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
+          .bind(channelId, programme.id, startingEpisodeId, now));
+      }
+      if (statements.length > 0) await env.DB.batch(statements);
+      for (const channelId of new Set([...additions, ...removals])) {
+        if (programme.content_type === "show") {
+          await refreshTvChannelSchedule(env.DB, household.id, channelId, false, env.TV_SCHEDULE_SEED);
+        } else {
+          await reconcileMovieChannel(env.DB, household.id, channelId, env.MOVIE_ROTATION_SEED);
+        }
+      }
+      if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
+      return json({
+        programme: await approvedProgrammeDetail(env.DB, household.id, programme.id),
+        message: "Channel Assignments updated. Restart Stremio to refresh the Channels.",
+      });
+    }
+
     if (libraryProgrammeMatch && (request.method === "PATCH" || request.method === "DELETE")) {
       const household = await findHousehold(env.DB, libraryProgrammeMatch[1]);
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
@@ -499,31 +763,38 @@ export default {
       if (!programme) return json({ error: "Programme was not found in the Approved Library." }, 404);
 
       if (request.method === "PATCH") {
-        let input: { paused?: unknown } = {};
+        let input: { paused?: unknown; channelId?: unknown } = {};
         try { input = await request.json() as typeof input; } catch { /* handled below */ }
         if (programme.content_type !== "show" || typeof input.paused !== "boolean") {
           return json({ error: "Choose whether to pause or resume an approved show." }, 400);
         }
+        const channel = typeof input.channelId === "string"
+          ? await findChannel(env.DB, household.id, input.channelId, "tv")
+          : await legacyChannelOrNull(env, household.id, "tv");
+        if (!channel) return json({ error: "TV Channel was not found." }, 404);
         const pausedAt = input.paused ? new Date().toISOString() : null;
-        await env.DB.prepare("UPDATE approved_programmes SET paused_at = ? WHERE id = ? AND household_id = ?")
-          .bind(pausedAt, programme.id, household.id).run();
-        await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
+        const updated = await env.DB.prepare(`UPDATE channel_assignments SET paused_at = ?
+          WHERE channel_id = ? AND programme_id = ?`).bind(pausedAt, channel.id, programme.id).run();
+        if (updated.meta.changes === 0) return json({ error: "Show is not assigned to this TV Channel." }, 404);
+        await refreshTvChannelSchedule(env.DB, household.id, channel.id, false, env.TV_SCHEDULE_SEED);
         queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ message: `${input.paused ? "Show paused without changing Show Progress." : "Show resumed."} Restart Stremio to refresh the Channel.` });
       }
 
-      if (programme.content_type === "show") {
-        await env.DB.batch([
-          env.DB.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
-          env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?").bind(household.id, programme.id),
-          env.DB.prepare("DELETE FROM show_progress WHERE programme_id = ?").bind(programme.id),
-          env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?").bind(programme.id, household.id),
-        ]);
-        await refreshTvChannelSchedule(env.DB, household.id, false, env.TV_SCHEDULE_SEED);
-        queueAutomaticTvPreparation(env, ctx, household.id);
-      } else {
-        await removeApprovedMovie(env.DB, household.id, programme.id, env.MOVIE_ROTATION_SEED);
-      }
+      await env.DB.batch([
+        env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?")
+          .bind(household.id, programme.id),
+        env.DB.prepare("DELETE FROM channel_schedule WHERE household_id = ? AND programme_id = ?")
+          .bind(household.id, programme.id),
+        env.DB.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ?")
+          .bind(household.id, programme.id),
+        env.DB.prepare("DELETE FROM channel_assignments WHERE programme_id = ?")
+          .bind(programme.id),
+        env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?")
+          .bind(programme.id, household.id),
+      ]);
+      await reconcileHouseholdChannels(env, household.id);
+      if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
     }
 
@@ -540,13 +811,68 @@ export default {
       );
     }
 
+    const channelStateMatch = path.match(
+      /^\/api\/households\/([A-Za-z0-9_-]+)\/channels\/([A-Za-z0-9-]+)\/(tv-state|movie-state|tv-preparation)$/,
+    );
+    if (request.method === "GET" && channelStateMatch) {
+      const household = await findHousehold(env.DB, channelStateMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401, { "cache-control": "no-store" });
+      }
+      const channel = await findChannel(env.DB, household.id, channelStateMatch[2]);
+      if (!channel) return json({ error: "Channel was not found." }, 404);
+      if (channelStateMatch[3] === "tv-state") {
+        if (channel.type !== "tv") return json({ error: "Choose a TV Channel." }, 400);
+        return json(await parentTvChannelState(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED));
+      }
+      if (channelStateMatch[3] === "movie-state") {
+        if (channel.type !== "movie") return json({ error: "Choose a Movie Channel." }, 400);
+        return json(await parentMovieChannelState(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED));
+      }
+      if (channel.type !== "tv") return json({ error: "Choose a TV Channel." }, 400);
+      const run = await tvPreparationRun(env.DB, household.id);
+      return json({
+        run: run ? { ...run, items: run.items.filter((item) => item.channelId === channel.id) } : null,
+      }, 200, { "cache-control": "no-store" });
+    }
+
+    const channelActionMatch = path.match(
+      /^\/api\/households\/([A-Za-z0-9_-]+)\/channels\/([A-Za-z0-9-]+)\/(movie-rotation\/reset|tv-schedule\/undo|tv-schedule\/regenerate)$/,
+    );
+    if (request.method === "POST" && channelActionMatch) {
+      const household = await findHousehold(env.DB, channelActionMatch[1]);
+      if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
+        return json({ error: "Parent authentication is required." }, 401);
+      }
+      const channel = await findChannel(env.DB, household.id, channelActionMatch[2]);
+      if (!channel) return json({ error: "Channel was not found." }, 404);
+      const action = channelActionMatch[3];
+      if (action === "movie-rotation/reset") {
+        if (channel.type !== "movie") return json({ error: "Choose a Movie Channel." }, 400);
+        await resetMovieRotation(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED);
+        return json({ message: "Movie rotation reset without interrupting the Current Programme. Restart Stremio to refresh the Channel." });
+      }
+      if (channel.type !== "tv") return json({ error: "Choose a TV Channel." }, 400);
+      if (action === "tv-schedule/undo") {
+        const undone = await undoLatestTvAdvancement(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED);
+        if (!undone) return json({ error: "There is no latest TV advancement to undo." }, 409);
+        queueAutomaticTvPreparation(env, ctx, household.id);
+        return json({ message: "Most recent advancement undone. Restart Stremio to refresh the Channel." });
+      }
+      await refreshTvChannelSchedule(env.DB, household.id, channel.id, true, env.TV_SCHEDULE_SEED);
+      queueAutomaticTvPreparation(env, ctx, household.id);
+      return json({ message: "Upcoming TV selections regenerated. Restart Stremio to refresh the Channel." });
+    }
+
     const tvStateMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-state$/);
     if (request.method === "GET" && tvStateMatch) {
       const household = await findHousehold(env.DB, tvStateMatch[1]);
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      return json(await parentTvChannelState(env.DB, household.id, env.TV_SCHEDULE_SEED));
+      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
+      return json(await parentTvChannelState(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED));
     }
 
     const preparationMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/tv-preparation$/);
@@ -564,7 +890,9 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      return json(await parentMovieChannelState(env.DB, household.id, env.MOVIE_ROTATION_SEED));
+      const channel = await legacyChannelOrNull(env, household.id, "movie");
+      if (!channel) return json({ error: "Default Movie Channel was deleted." }, 404);
+      return json(await parentMovieChannelState(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED));
     }
 
     const resetMoviesMatch = path.match(/^\/api\/households\/([A-Za-z0-9_-]+)\/movie-rotation\/reset$/);
@@ -573,7 +901,9 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      await resetMovieRotation(env.DB, household.id, env.MOVIE_ROTATION_SEED);
+      const channel = await legacyChannelOrNull(env, household.id, "movie");
+      if (!channel) return json({ error: "Default Movie Channel was deleted." }, 404);
+      await resetMovieRotation(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED);
       return json({ message: "Movie rotation reset without interrupting the Current Programme. Restart Stremio to refresh the Channel." });
     }
 
@@ -583,11 +913,15 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      let input: { videoId?: unknown } = {};
+      let input: { videoId?: unknown; channelId?: unknown } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
       if (typeof input.videoId !== "string") return json({ error: "Choose a valid regular released episode." }, 400);
+      const channel = typeof input.channelId === "string"
+        ? await findChannel(env.DB, household.id, input.channelId, "tv")
+        : await legacyChannelOrNull(env, household.id, "tv");
+      if (!channel) return json({ error: "TV Channel was not found." }, 404);
       try {
-        await setShowProgress(env.DB, household.id, progressMatch[2], input.videoId, env.TV_SCHEDULE_SEED);
+        await setShowProgress(env.DB, household.id, channel.id, progressMatch[2], input.videoId, env.TV_SCHEDULE_SEED);
       } catch (error) {
         if (error instanceof Error && error.message === "episode is invalid") {
           return json({ error: "Choose a valid regular released episode for this show." }, 400);
@@ -604,7 +938,9 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const undone = await undoLatestTvAdvancement(env.DB, household.id, env.TV_SCHEDULE_SEED);
+      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
+      const undone = await undoLatestTvAdvancement(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED);
       if (!undone) return json({ error: "There is no latest TV advancement to undo." }, 409);
       queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: "Most recent advancement undone without changing later corrections to other shows. The active stream was not interrupted. Restart Stremio to refresh the Channel." });
@@ -616,7 +952,9 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      await refreshTvChannelSchedule(env.DB, household.id, true, env.TV_SCHEDULE_SEED);
+      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
+      await refreshTvChannelSchedule(env.DB, household.id, channel.id, true, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: "Upcoming TV selections regenerated without changing the Current Programme or Show Progress. Restart Stremio to refresh the Channel." });
     }
@@ -636,8 +974,14 @@ export default {
 
     const catalogMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/catalog\/([^/]+)\/([^/]+)\.json$/);
     if (request.method === "GET" && catalogMatch) {
-      if (!(await findHousehold(env.DB, catalogMatch[1]))) return addonJson({ error: "Household not found." }, 404);
-      const catalog = catalogFor(catalogMatch[2], catalogMatch[3], url.origin);
+      const household = await findHousehold(env.DB, catalogMatch[1]);
+      if (!household) return addonJson({ error: "Household not found." }, 404);
+      const catalog = catalogFor(
+        catalogMatch[2],
+        catalogMatch[3],
+        url.origin,
+        await channelsForHousehold(env.DB, household.id),
+      );
       return catalog ? addonJson(catalog) : addonJson({ metas: [] });
     }
 
@@ -645,26 +989,64 @@ export default {
     if (request.method === "GET" && metaMatch) {
       const household = await findHousehold(env.DB, metaMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
-      if (decodedPathSegment(metaMatch[2]) !== TV_CHANNEL_ID) return addonJson({ meta: null });
-      const schedule = await tvChannelSchedule(env.DB, household.id, env.TV_SCHEDULE_SEED);
-      return addonJson(tvChannelMetadata(schedule, url.origin), 200, { "cache-control": "no-store" });
+      const channels = await channelsForHousehold(env.DB, household.id, "tv");
+      const channelId = channelIdFromStremioId(channels, decodedPathSegment(metaMatch[2]) ?? "");
+      const channel = channelId ? channels.find((candidate) => candidate.id === channelId) : undefined;
+      if (!channel) return addonJson({ meta: null });
+      const schedule = await tvChannelSchedule(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED);
+      return addonJson(
+        tvChannelMetadata(channel, schedule, url.origin, household.secret),
+        200,
+        { "cache-control": "no-store" },
+      );
     }
 
     const movieMetaMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/meta\/movie\/([^/]+)\.json$/);
     if (request.method === "GET" && movieMetaMatch) {
       const household = await findHousehold(env.DB, movieMetaMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
-      if (decodedPathSegment(movieMetaMatch[2]) !== MOVIE_CHANNEL_ID) return addonJson({ meta: null });
-      const programme = await movieChannelProgramme(env.DB, household.id, env.MOVIE_ROTATION_SEED);
-      return addonJson(movieChannelMetadata(programme, url.origin, household.secret), 200, { "cache-control": "no-store" });
+      const channels = await channelsForHousehold(env.DB, household.id, "movie");
+      const channelId = channelIdFromStremioId(channels, decodedPathSegment(movieMetaMatch[2]) ?? "");
+      const channel = channelId ? channels.find((candidate) => candidate.id === channelId) : undefined;
+      if (!channel) return addonJson({ meta: null });
+      const programme = await movieChannelProgramme(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED);
+      return addonJson(
+        movieChannelMetadata(channel, programme, url.origin, household.secret),
+        200,
+        { "cache-control": "no-store" },
+      );
     }
 
-    const movieSignOffMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/media\/movie-sign-off\/(\d+)\/(\d+)\.mp4$/);
+    const movieSignOffMatch = path.match(
+      /^\/addons\/([A-Za-z0-9_-]+)\/media\/movie-sign-off\/([A-Za-z0-9-]+)\/(\d+)\/(\d+)\.mp4$/,
+    );
     if ((request.method === "GET" || request.method === "HEAD") && movieSignOffMatch) {
       const household = await findHousehold(env.DB, movieSignOffMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
-      await requestMovieSignOff(env.DB, household.id, Number(movieSignOffMatch[2]), Number(movieSignOffMatch[3]));
+      const channel = await findChannel(env.DB, household.id, movieSignOffMatch[2], "movie");
+      if (!channel) return addonJson({ error: "Movie Channel not found." }, 404);
+      await requestMovieSignOff(
+        env.DB,
+        household.id,
+        channel.id,
+        Number(movieSignOffMatch[3]),
+        Number(movieSignOffMatch[4]),
+      );
       return movieSignOff(request);
+    }
+
+    const playMatch = path.match(
+      /^\/addons\/([A-Za-z0-9_-]+)\/play\/(series|movie)\/([A-Za-z0-9-]+)\/([^/]+)$/,
+    );
+    if ((request.method === "GET" || request.method === "HEAD") && playMatch) {
+      const household = await findHousehold(env.DB, playMatch[1]);
+      if (!household) return new Response("Household not found.", { status: 404 });
+      const channelType = playMatch[2] === "series" ? "tv" : "movie";
+      const channel = await findChannel(env.DB, household.id, playMatch[3], channelType);
+      if (!channel) return new Response("Channel not found.", { status: 404 });
+      const videoId = decodedPathSegment(playMatch[4]);
+      if (!videoId) return new Response("Programme not found.", { status: 404 });
+      return playChannelProgramme(request, env, ctx, household, channel, playMatch[2] as StreamContentType, videoId);
     }
 
     const resolveMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/resolve\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
@@ -768,10 +1150,17 @@ export default {
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
+      const streamChannel = streamMatch[2] === "series"
+        ? await legacyChannelOrNull(env, household.id, "tv")
+        : null;
       if (streamMatch[2] === "movie") {
         const signOff = videoId ? parseSignOffId(videoId) : null;
         if (signOff) {
-          await requestMovieSignOff(env.DB, household.id, signOff.cycle, signOff.position);
+          const signOffChannel = signOff.channelId
+            ? await findChannel(env.DB, household.id, signOff.channelId, "movie")
+            : await legacyChannelOrNull(env, household.id, "movie");
+          if (!signOffChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+          await requestMovieSignOff(env.DB, household.id, signOffChannel.id, signOff.cycle, signOff.position);
           return addonJson({ streams: [{
             name: "Kids Channels",
             description: "Five-second sign-off",
@@ -790,8 +1179,8 @@ export default {
       try {
         const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
         if (!torBoxToken) {
-          if (streamMatch[2] === "series") {
-            await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          if (streamMatch[2] === "series" && streamChannel) {
+            await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
             queueAutomaticTvPreparation(env, ctx, household.id);
           }
           return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
@@ -808,11 +1197,13 @@ export default {
           if (streamMatch[2] !== "series") {
             return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
           }
-          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          if (!streamChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+          await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
           queueAutomaticTvPreparation(env, ctx, household.id);
           const deferred = await deferUnavailableTvProgramme(
             env.DB,
             household.id,
+            streamChannel.id,
             videoId,
             env.TV_SCHEDULE_SEED,
           );
@@ -829,8 +1220,9 @@ export default {
           }] }, 200, { "cache-control": "no-store" });
         }
         if (streamMatch[2] === "series") {
+          if (!streamChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
           await clearUnavailableTvProgramme(env.DB, household.id, videoId);
-          await requestTvProgramme(env.DB, household.id, videoId, env.TV_SCHEDULE_SEED);
+          await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
           queueAutomaticTvPreparation(env, ctx, household.id);
         }
         const resolveToken = await issueStreamToken(

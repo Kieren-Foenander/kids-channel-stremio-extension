@@ -89,6 +89,27 @@ test("a movie can be approved in one click from the search results", async ({ pa
   expect(libraryReads).toBe(readsBeforeApproval);
 });
 
+test("multiple Movie Channels require an explicit assignment while browsing", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/movie-channel`);
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create Movie Channel" });
+  await createDialog.getByLabel("Channel name").fill("Comedy");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=1`);
+  const movie = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Example: The Movie" }) });
+  await movie.getByRole("button", { name: "Approve Example: The Movie" }).click();
+  const approvalDialog = page.getByRole("dialog", { name: "Example: The Movie" });
+  await expect(approvalDialog.getByLabel("Movie Channel")).not.toBeChecked();
+  await expect(approvalDialog.getByLabel("Comedy")).not.toBeChecked();
+  await expect(approvalDialog.getByRole("button", { name: "Approve movie" })).toBeDisabled();
+  await approvalDialog.getByLabel("Comedy").check();
+  await approvalDialog.getByRole("button", { name: "Approve movie" }).click();
+  await expect(approvalDialog).toBeHidden();
+  await expect(page.getByText("added to the Approved Library.")).toBeVisible();
+});
+
 test("a show can be approved from a non-default released episode without losing search context", async ({ page }) => {
   await page.route("https://placehold.co/**", (route) => route.abort());
   const parentUrl = await createHousehold(page);

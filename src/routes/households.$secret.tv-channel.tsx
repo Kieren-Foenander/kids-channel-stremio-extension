@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { ChannelCollectionControl } from "../components/ChannelCollectionControl";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
 import { StateBadge } from "../components/StateBadge";
@@ -10,7 +11,12 @@ import { Skeleton } from "../components/ui/skeleton";
 import { useTvChannel, useTvPreparation } from "../lib/channel-queries";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
-export const Route = createFileRoute("/households/$secret/tv-channel")({ component: TvChannelPage });
+export const Route = createFileRoute("/households/$secret/tv-channel")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    channel: typeof search.channel === "string" ? search.channel : undefined,
+  }),
+  component: TvChannelPage,
+});
 
 type Episode = {
   id: string;
@@ -70,10 +76,15 @@ function episodeLabel(episode: Episode) {
 
 function TvChannelPage() {
   const { secret } = Route.useParams();
+  const { channel } = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const chooseChannel = useCallback((channelId: string) => {
+    void navigate({ search: { channel: channelId }, replace: true });
+  }, [navigate]);
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
-  const channelQuery = useTvChannel<TvState>(secret);
-  const preparationQuery = useTvPreparation<{ run: PreparationRun | null }>(secret);
+  const channelQuery = useTvChannel<TvState>(secret, channel);
+  const preparationQuery = useTvPreparation<{ run: PreparationRun | null }>(secret, channel);
   const state = channelQuery.data;
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const [mutationStatus, setMutationStatus] = useState("");
@@ -82,7 +93,9 @@ function TvChannelPage() {
   const actionMutation = useMutation({
     mutationFn: async (kind: "undo" | "regenerate") => {
       const path = kind === "undo" ? "/tv-schedule/undo" : "/tv-schedule/regenerate";
-      return parentApi<{ message?: string }>(`${base}${path}`, { method: "POST" });
+      return parentApi<{ message?: string }>(channel
+        ? `${base}/channels/${channel}${path}`
+        : `${base}${path}`, { method: "POST" });
     },
   });
   async function performAction(kind: "undo" | "regenerate") {
@@ -91,7 +104,7 @@ function TvChannelPage() {
     setMutationFailed(false);
     try {
       const result = await actionMutation.mutateAsync(kind);
-      await queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) });
+      await queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret, channel) });
       setMutationStatus(result.message || (kind === "undo" ? "Most recent advancement undone." : "Upcoming TV selections regenerated."));
       window.dispatchEvent(new Event("stremio-restart-required"));
     } catch (error) {
@@ -109,7 +122,8 @@ function TvChannelPage() {
 
   return (
     <section className="grid gap-10" aria-labelledby="page-heading">
-      <PageHeader ident="Channel" title="TV Channel" description="Inspect what will resume, review upcoming selections, and correct the latest advancement." />
+      <PageHeader ident="Channels" title="TV Channels" description="Create named TV Channels, then inspect the schedule and playback state for each one." />
+      <ChannelCollectionControl secret={secret} type="tv" selectedId={channel} onSelect={chooseChannel} />
 
       {!state ? (
         channelQuery.isError ? (
@@ -140,7 +154,7 @@ function TvChannelPage() {
             <div className="max-w-2xl">
               <Ident className="mb-2">TorBox</Ident>
               <h2 id="preparation-heading" className="text-xl font-semibold tracking-[-0.01em]">Automatic Channel warm-up</h2>
-              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Kids Channels automatically keeps the next 20 scheduled episodes ready in TorBox. When the Channel advances or its schedule changes, the new final episode is queued for preparation in the background.</p>
+              <p className="mt-2 text-sm leading-relaxed text-muted-foreground">Kids Channels automatically keeps the next five scheduled episodes for this Channel ready in TorBox. Preparation is shared fairly across all TV Channels.</p>
               <p className="mt-3 text-sm leading-relaxed text-muted-foreground">Cached matches become ready immediately. When none are cached, TorBox downloads one exact-match source and Kids Channels keeps checking it.</p>
             </div>
 

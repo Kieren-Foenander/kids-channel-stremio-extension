@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useCallback, useState } from "react";
+import { ChannelCollectionControl } from "../components/ChannelCollectionControl";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
 import { Button } from "../components/ui/button";
@@ -9,7 +10,12 @@ import { Skeleton } from "../components/ui/skeleton";
 import { useMovieChannel } from "../lib/channel-queries";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 
-export const Route = createFileRoute("/households/$secret/movie-channel")({ component: MovieChannelPage });
+export const Route = createFileRoute("/households/$secret/movie-channel")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    channel: typeof search.channel === "string" ? search.channel : undefined,
+  }),
+  component: MovieChannelPage,
+});
 
 type MovieProgramme = {
   programmeId: string;
@@ -38,9 +44,14 @@ const HISTORY_PREVIEW_SIZE = 5;
 
 function MovieChannelPage() {
   const { secret } = Route.useParams();
+  const { channel } = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const chooseChannel = useCallback((channelId: string) => {
+    void navigate({ search: { channel: channelId }, replace: true });
+  }, [navigate]);
   const base = `/api/households/${secret}`;
   const queryClient = useQueryClient();
-  const channelQuery = useMovieChannel<MovieState>(secret);
+  const channelQuery = useMovieChannel<MovieState>(secret, channel);
   const state = channelQuery.data;
   const [rotationExpanded, setRotationExpanded] = useState(false);
   const [historyExpanded, setHistoryExpanded] = useState(false);
@@ -48,7 +59,9 @@ function MovieChannelPage() {
   const [mutationFailed, setMutationFailed] = useState(false);
   const [confirmingReset, setConfirmingReset] = useState(false);
   const resetMutation = useMutation({
-    mutationFn: () => parentApi<{ message?: string }>(`${base}/movie-rotation/reset`, { method: "POST" }),
+    mutationFn: () => parentApi<{ message?: string }>(channel
+      ? `${base}/channels/${channel}/movie-rotation/reset`
+      : `${base}/movie-rotation/reset`, { method: "POST" }),
   });
 
   async function resetRotation() {
@@ -57,7 +70,7 @@ function MovieChannelPage() {
     setMutationFailed(false);
     try {
       const result = await resetMutation.mutateAsync();
-      await queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret) });
+      await queryClient.invalidateQueries({ queryKey: parentKeys.movie(secret, channel) });
       setMutationStatus(result.message || "Movie rotation reset without interrupting the Current Programme.");
       window.dispatchEvent(new Event("stremio-restart-required"));
     } catch (error) {
@@ -75,7 +88,8 @@ function MovieChannelPage() {
 
   return (
     <section className="grid gap-10" aria-labelledby="page-heading">
-      <PageHeader ident="Channel" title="Movie Channel" description="Inspect the movie that will resume and review what remains in this rotation." />
+      <PageHeader ident="Channels" title="Movie Channels" description="Create named Movie Channels, then inspect the current movie and remaining rotation for each one." />
+      <ChannelCollectionControl secret={secret} type="movie" selectedId={channel} onSelect={chooseChannel} />
 
       {!state ? (
         channelQuery.isError ? (

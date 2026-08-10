@@ -5,8 +5,16 @@ A parent-curated viewing experience that recreates the limited choice and contin
 ## Language
 
 **Channel**:
-A persistent household playback experience that chooses from approved content and continues without requiring a child to make further viewing choices.
+A playback experience within a Household that chooses assigned content and continues without requiring further viewing choices. Its Parent-chosen name is a display label rather than its identity, so names may be changed or duplicated; each Channel has independent programme selection, Show Progress, and history.
 _Avoid_: Extension, mode, playlist
+
+**Default Channel**:
+The TV Channel and Movie Channel automatically provisioned for every Household. After provisioning they have no special status and may be renamed or deleted like any other Channel; additional Channels are created and named deliberately by a Parent.
+_Avoid_: Primary channel, system channel
+
+**Channel Type**:
+The permanent classification of a Channel as either TV or Movie, determining its programme selection and playback behaviour.
+_Avoid_: Channel mode, content filter
 
 **TV Channel**:
 A Channel that randomly selects an approved show other than the show just played while preserving each show's episode order.
@@ -17,15 +25,19 @@ A Channel that chooses from approved movies without repeating one until every ap
 _Avoid_: Movie mode
 
 **Approved Library**:
-The parent-selected set of shows and movies from which the Channels may choose.
+The Household-wide set of shows and movies that a Parent has approved and assigned to at least one compatible Channel. A programme leaves the Approved Library when its final Channel Assignment is removed.
 _Avoid_: Whitelist, collection, list
 
+**Channel Assignment**:
+The Parent's explicit inclusion of an approved programme in a compatible Channel, made during approval or changed later. Every Approved Library programme has at least one assignment; assignments are never inferred from programme metadata, a programme may belong to more than one Channel without sharing playback state, and a removed assignment starts fresh if later recreated. Show Progress, pause, and Finished state belong to the assignment rather than the Household-wide programme.
+_Avoid_: Channel library, copy
+
 **Show Progress**:
-The next regular released episode of an approved show that the TV Channel will schedule. It advances when the Channel moves to a later scheduled programme and can be corrected or reset by a Parent.
+The next regular released episode of an assigned show that a particular TV Channel will schedule. It begins independently for each Channel Assignment, advances when that Channel moves to a later scheduled programme, and can be corrected or reset by a Parent.
 _Avoid_: Viewing Progress, watch history
 
 **Viewing Progress**:
-The playback position Stremio associates with a movie or episode, allowing an interrupted programme to resume from where it stopped.
+The playback position Stremio associates with a canonical movie or episode, allowing an interrupted programme to resume from where it stopped. It may carry across Channels that reach the same programme.
 _Avoid_: Show Progress
 
 **Current Programme**:
@@ -37,7 +49,7 @@ The Current Programme followed by the upcoming programmes selected for continuou
 _Avoid_: Queue, playlist
 
 **Preparation Run**:
-An automatically triggered, time-bounded background attempt to keep the next twenty programmes in the current Channel Schedule ready in TorBox. It checks cached candidates first and may start one matching download per programme. It does not advance the Channel Schedule or Show Progress.
+An automatically triggered, time-bounded background attempt to keep the next five programmes in a TV Channel's current Channel Schedule ready in TorBox. It checks cached candidates first and may start one matching download per programme. It does not advance the Channel Schedule or Show Progress.
 _Avoid_: Seeder, download queue, preload
 
 **Unavailable Episode**:

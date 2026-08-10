@@ -2,12 +2,14 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloud
 import { loadTorBoxCredential, torBoxCredentialStatus } from "./torbox-credentials";
 import { selectCachedStream, type StreamSelectionEnv, type StreamSelectionOutcome } from "./stream-selection";
 import { tvChannelSchedule, type TvScheduledProgramme } from "./tv-channel";
+import { channelsForHousehold } from "./channels";
 
 const ROUND_INTERVAL = "5 minutes";
 const MAX_ROUNDS = 96;
 const ITEMS_PER_STEP = 5;
-const MAX_ITEM_BATCHES = 4;
-const AUTOMATIC_PREPARATION_COUNT = 20;
+const MAX_ITEM_BATCHES = 5;
+const AUTOMATIC_PREPARATION_COUNT = 5;
+const MAX_AUTOMATIC_PREPARATION_ITEMS = 25;
 const AUTOMATIC_PREPARATION_WINDOW_HOURS = 8;
 const AUTOMATIC_HOUSEHOLD_LIMIT = 100;
 
@@ -15,6 +17,7 @@ export type TvPreparationRunStatus = "queued" | "running" | "completed" | "cance
 export type TvPreparationItemStatus = "queued" | "trying" | "downloading" | "ready" | "unavailable" | "cancelled";
 
 export interface TvPreparationItem {
+  channelId: string;
   position: number;
   programmeId: string;
   videoId: string;
@@ -58,6 +61,7 @@ interface RunRow {
 }
 
 interface ItemRow {
+  channel_id: string;
   position: number;
   programme_id: string;
   video_id: string;
@@ -134,9 +138,10 @@ export async function createTvPreparationRun(
   }
   try {
     await db.batch(selected.map((programme) => db.prepare(`INSERT INTO tv_preparation_items
-      (run_id, position, programme_id, video_id, show_title, season, episode, episode_title, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
+      (run_id, channel_id, position, programme_id, video_id, show_title, season, episode, episode_title, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
       id,
+      programme.channelId,
       programme.position,
       programme.programmeId,
       programme.episode.id,
@@ -164,7 +169,9 @@ export async function tvPreparationRun(
     : await db.prepare("SELECT * FROM tv_preparation_runs WHERE household_id = ? ORDER BY created_at DESC LIMIT 1")
       .bind(householdId).first<RunRow>();
   if (!row) return null;
-  const { results } = await db.prepare("SELECT * FROM tv_preparation_items WHERE run_id = ? ORDER BY position")
+  const { results } = await db.prepare(`SELECT item.* FROM tv_preparation_items item
+      JOIN channels channel ON channel.id = item.channel_id
+      WHERE item.run_id = ? ORDER BY item.position, channel.created_at, channel.id`)
     .bind(row.id).all<ItemRow>();
   const counts: Record<TvPreparationItemStatus, number> = {
     queued: 0, trying: 0, downloading: 0, ready: 0, unavailable: 0, cancelled: 0,
@@ -172,6 +179,7 @@ export async function tvPreparationRun(
   const items = results.map((item): TvPreparationItem => {
     counts[item.status] += 1;
     return {
+      channelId: item.channel_id,
       position: item.position,
       programmeId: item.programme_id,
       videoId: item.video_id,
@@ -232,7 +240,8 @@ async function activeTvPreparationRun(db: D1Database, householdId: string): Prom
 
 function snapshotMatches(run: TvPreparationRun, schedule: TvScheduledProgramme[]): boolean {
   return run.items.length === schedule.length
-    && run.items.every((item, index) => item.videoId === schedule[index]?.episode.id);
+    && run.items.every((item, index) => item.channelId === schedule[index]?.channelId
+      && item.videoId === schedule[index]?.episode.id);
 }
 
 async function scheduleIsHot(
@@ -242,13 +251,33 @@ async function scheduleIsHot(
   now: Date,
 ): Promise<boolean> {
   if (!schedule.length) return true;
-  const placeholders = schedule.map(() => "?").join(", ");
+  const videoIds = [...new Set(schedule.map((item) => item.episode.id))];
+  const placeholders = videoIds.map(() => "?").join(", ");
   const row = await db.prepare(`SELECT COUNT(DISTINCT video_id) AS count FROM stream_selections
     WHERE household_id = ? AND content_type = 'series' AND download_pending = 0 AND stale_at > ?
       AND video_id IN (${placeholders})`)
-    .bind(householdId, now.toISOString(), ...schedule.map((item) => item.episode.id))
+    .bind(householdId, now.toISOString(), ...videoIds)
     .first<{ count: number }>();
-  return (row?.count ?? 0) === schedule.length;
+  return (row?.count ?? 0) === videoIds.length;
+}
+
+async function householdPreparationSchedule(
+  db: D1Database,
+  householdId: string,
+  configuredSeed?: string,
+): Promise<TvScheduledProgramme[]> {
+  const channels = await channelsForHousehold(db, householdId, "tv");
+  const schedules = await Promise.all(channels.map((channel) =>
+    tvChannelSchedule(db, householdId, channel.id, configuredSeed).then((schedule) =>
+      schedule.slice(0, AUTOMATIC_PREPARATION_COUNT))));
+  const flattened: TvScheduledProgramme[] = [];
+  for (let position = 0; position < AUTOMATIC_PREPARATION_COUNT; position += 1) {
+    for (const schedule of schedules) {
+      const programme = schedule[position];
+      if (programme) flattened.push(programme);
+    }
+  }
+  return flattened;
 }
 
 async function terminateRun(env: AutomaticTvPreparationEnv, runId: string): Promise<void> {
@@ -291,8 +320,10 @@ export async function ensureAutomaticTvPreparation(
   now = new Date(),
 ): Promise<TvPreparationRun | null> {
   if (!(await torBoxCredentialStatus(env.DB, householdId)).configured) return null;
-  const schedule = (suppliedSchedule ?? await tvChannelSchedule(env.DB, householdId, env.TV_SCHEDULE_SEED))
-    .slice(0, AUTOMATIC_PREPARATION_COUNT);
+  const schedule = (suppliedSchedule
+    ? suppliedSchedule.slice(0, AUTOMATIC_PREPARATION_COUNT)
+    : await householdPreparationSchedule(env.DB, householdId, env.TV_SCHEDULE_SEED))
+    .slice(0, MAX_AUTOMATIC_PREPARATION_ITEMS);
   const active = await activeTvPreparationRun(env.DB, householdId);
   if (active && snapshotMatches(active, schedule)) return active;
   if (active) {
@@ -307,7 +338,7 @@ export async function ensureAutomaticTvPreparation(
       env.DB,
       householdId,
       schedule,
-      AUTOMATIC_PREPARATION_COUNT,
+      schedule.length,
       AUTOMATIC_PREPARATION_WINDOW_HOURS,
       now,
     );
@@ -341,7 +372,7 @@ export async function ensureAutomaticTvPreparationForAll(env: AutomaticTvPrepara
       )
       AND EXISTS (
         SELECT 1 FROM channel_schedule schedule
-        WHERE schedule.household_id = household.id AND schedule.channel = 'tv'
+        WHERE schedule.household_id = household.id
           AND NOT EXISTS (
             SELECT 1 FROM stream_selections selection
             WHERE selection.household_id = household.id AND selection.content_type = 'series'
@@ -399,7 +430,7 @@ async function processBatch(
     const message = tvPreparationOutcomeMessage(outcome);
     await env.DB.prepare(`UPDATE tv_preparation_items SET status = ?, attempts = attempts + 1,
       quality = ?, filename = ?, info_hash = ?, message = ?, updated_at = ?
-      WHERE run_id = ? AND position = ? AND EXISTS (
+      WHERE run_id = ? AND channel_id = ? AND position = ? AND EXISTS (
         SELECT 1 FROM tv_preparation_runs run
         WHERE run.id = tv_preparation_items.run_id AND run.status IN ('queued', 'running')
       )`)
@@ -411,6 +442,7 @@ async function processBatch(
         message,
         now.toISOString(),
         runId,
+        item.channelId,
         item.position,
       ).run();
   }

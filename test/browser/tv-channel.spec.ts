@@ -37,6 +37,37 @@ function channelState(canUndo = true) {
   };
 }
 
+test("a Parent deliberately creates, renames, selects, and deletes a TV Channel", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  const channelSelect = page.getByLabel("TV Channel", { exact: true });
+  await expect(channelSelect).toHaveValue(/.+/);
+  await expect(page.getByText("1/5 TV Channels configured.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create TV Channel" });
+  await createDialog.getByLabel("Channel name").fill("Dinner");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+  await expect(createDialog).toBeHidden();
+  await expect(channelSelect).toHaveValue(/.+/);
+  await expect(channelSelect.locator("option:checked")).toHaveText("Dinner");
+  await expect(page).toHaveURL(/tv-channel\?channel=[0-9a-f-]+$/);
+  await expect(page.getByText("2/5 TV Channels configured.")).toBeVisible();
+
+  await page.getByRole("button", { name: "Rename" }).click();
+  const renameDialog = page.getByRole("dialog", { name: "Rename Dinner" });
+  await renameDialog.getByLabel("Channel name").fill("Dinner Time");
+  await renameDialog.getByRole("button", { name: "Save Channel" }).click();
+  await expect(channelSelect.locator("option:checked")).toHaveText("Dinner Time");
+
+  await page.getByRole("button", { name: "Delete" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "Delete Dinner Time?" });
+  await deleteDialog.getByRole("button", { name: "Delete Channel" }).click();
+  await expect(deleteDialog).toBeHidden();
+  await expect(channelSelect.locator("option:checked")).toHaveText("TV Channel");
+  await expect(page.getByText("1/5 TV Channels configured.")).toBeVisible();
+});
+
 test("a Parent inspects and controls the TV Channel with progressive disclosure", async ({ page }) => {
   let state = channelState();
   let stateRequests = 0;
@@ -62,7 +93,7 @@ test("a Parent inspects and controls the TV Channel with progressive disclosure"
 
   await expect(page.getByRole("heading", { name: "TV Channel" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Automatic Channel warm-up" })).toBeVisible();
-  await expect(page.getByText("automatically keeps the next 20 scheduled episodes ready")).toBeVisible();
+  await expect(page.getByText("automatically keeps the next five scheduled episodes for this Channel ready")).toBeVisible();
   await expect(page.getByRole("button", { name: "Prepare schedule" })).toBeHidden();
   const current = page.getByRole("heading", { name: "Current Programme" }).locator("..");
   await expect(current).toContainText("Green Adventures");

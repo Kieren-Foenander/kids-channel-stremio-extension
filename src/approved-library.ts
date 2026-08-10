@@ -1,4 +1,16 @@
 import type { CinemetaEpisode, CinemetaShow, CinemetaTitle, ContentType } from "./cinemeta";
+import { channelTypeForContent, channelsForHousehold, type ChannelType } from "./channels";
+
+export interface ProgrammeAssignment {
+  channelId: string;
+  channelName: string;
+  channelType: ChannelType;
+  createdAt: string;
+  pausedAt?: string;
+  current: boolean;
+  finished: boolean;
+  showProgress?: CinemetaEpisode;
+}
 
 export interface ApprovedProgramme {
   id: string;
@@ -15,6 +27,7 @@ export interface ApprovedProgramme {
   pausedAt?: string;
   episodes?: CinemetaEpisode[];
   showProgress?: CinemetaEpisode;
+  assignments: ProgrammeAssignment[];
 }
 
 export interface ApprovedProgrammeSummary {
@@ -31,6 +44,7 @@ export interface ApprovedProgrammeSummary {
   current: boolean;
   finished: boolean;
   showProgress?: CinemetaEpisode;
+  assignments: ProgrammeAssignment[];
 }
 
 interface StoredProgramme {
@@ -47,6 +61,20 @@ interface StoredProgramme {
   approved_at: string;
   paused_at: string | null;
   next_video_id: string | null;
+}
+
+interface AssignmentRow {
+  channel_id: string;
+  channel_name: string;
+  channel_type: ChannelType;
+  created_at: string;
+  paused_at: string | null;
+  next_video_id: string | null;
+  is_current: number;
+  progress_season: number | null;
+  progress_episode: number | null;
+  progress_title: string | null;
+  progress_released_at: string | null;
 }
 
 function episodeFromRow(row: Record<string, unknown>): CinemetaEpisode {
@@ -74,7 +102,58 @@ function programmeFromRow(row: StoredProgramme): ApprovedProgramme {
     imdbRating: row.imdb_rating ?? undefined,
     approvedAt: row.approved_at,
     pausedAt: row.paused_at ?? undefined,
+    assignments: [],
   };
+}
+
+function assignmentFromRow(row: AssignmentRow): ProgrammeAssignment {
+  const showProgress = row.next_video_id && row.progress_season !== null && row.progress_episode !== null
+    ? {
+        id: row.next_video_id,
+        season: row.progress_season,
+        episode: row.progress_episode,
+        title: row.progress_title ?? "Untitled episode",
+        released: row.progress_released_at ?? "",
+      }
+    : undefined;
+  return {
+    channelId: row.channel_id,
+    channelName: row.channel_name,
+    channelType: row.channel_type,
+    createdAt: row.created_at,
+    pausedAt: row.paused_at ?? undefined,
+    current: Boolean(row.is_current),
+    finished: row.channel_type === "tv" && !row.next_video_id,
+    showProgress,
+  };
+}
+
+async function assignmentRows(
+  db: D1Database,
+  householdId: string,
+  programmeId?: string,
+): Promise<Array<AssignmentRow & { programme_id: string }>> {
+  const condition = programmeId ? "AND assignment.programme_id = ?" : "";
+  const query = db.prepare(`SELECT assignment.programme_id, assignment.channel_id,
+      channel.name AS channel_name, channel.channel_type, assignment.created_at,
+      assignment.paused_at, assignment.next_video_id,
+      CASE WHEN current.programme_id IS NULL THEN 0 ELSE 1 END AS is_current,
+      episode.season AS progress_season, episode.episode AS progress_episode,
+      episode.title AS progress_title, episode.released_at AS progress_released_at
+    FROM channel_assignments assignment
+    JOIN channels channel ON channel.id = assignment.channel_id
+    JOIN approved_programmes programme ON programme.id = assignment.programme_id
+    LEFT JOIN current_programmes current
+      ON current.channel_id = assignment.channel_id AND current.programme_id = assignment.programme_id
+    LEFT JOIN canonical_show_episodes episode
+      ON programme.content_type = 'show' AND episode.show_imdb_id = programme.imdb_id
+        AND episode.video_id = assignment.next_video_id
+    WHERE channel.household_id = ? ${condition}
+    ORDER BY channel.channel_type, channel.created_at, channel.id`);
+  const rows = programmeId
+    ? await query.bind(householdId, programmeId).all<AssignmentRow & { programme_id: string }>()
+    : await query.bind(householdId).all<AssignmentRow & { programme_id: string }>();
+  return rows.results;
 }
 
 export async function approvedProgrammeDetail(
@@ -90,25 +169,26 @@ export async function approvedProgrammeDetail(
       CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
       CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
       CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
-      p.approved_at, p.paused_at, progress.next_video_id
+      p.approved_at, NULL AS paused_at, NULL AS next_video_id
     FROM approved_programmes p
     LEFT JOIN canonical_shows canonical
       ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
-    LEFT JOIN show_progress progress ON progress.programme_id = p.id
     WHERE p.id = ? AND p.household_id = ?`).bind(programmeId, householdId)
     .first<StoredProgramme & { next_video_id: string | null }>();
   if (!row) return null;
 
   const programme = programmeFromRow(row);
+  const assignments = await assignmentRows(db, householdId, programmeId);
+  programme.assignments = assignments.map(assignmentFromRow);
+  const primary = programme.assignments[0];
+  programme.pausedAt = primary?.pausedAt;
+  programme.showProgress = primary?.showProgress;
   if (programme.type !== "show") return programme;
 
   const episodes = await db.prepare(`SELECT video_id, season, episode, title, released_at, overview
     FROM show_episodes WHERE programme_id = ? ORDER BY season, episode`).bind(programme.id)
     .all<Record<string, unknown>>();
   programme.episodes = episodes.results.map(episodeFromRow);
-  programme.showProgress = row.next_video_id
-    ? programme.episodes.find((episode) => episode.id === row.next_video_id)
-    : undefined;
   return programme;
 }
 
@@ -128,9 +208,22 @@ export async function approveProgramme(
   householdId: string,
   title: CinemetaTitle | CinemetaShow,
   startingEpisodeId?: string,
+  requestedChannelIds?: string[],
 ): Promise<ApprovedProgramme> {
   const id = crypto.randomUUID();
   const approvedAt = new Date().toISOString();
+  const compatibleType = channelTypeForContent(title.type);
+  const compatibleChannels = await channelsForHousehold(db, householdId, compatibleType);
+  const requested = requestedChannelIds?.length
+    ? [...new Set(requestedChannelIds)]
+    : compatibleChannels.length === 1
+      ? [compatibleChannels[0].id]
+      : [];
+  if (requested.length === 0) {
+    throw new Error(compatibleChannels.length === 0 ? "compatible channel is required" : "channel selection is required");
+  }
+  const channelById = new Map(compatibleChannels.map((channel) => [channel.id, channel]));
+  if (requested.some((channelId) => !channelById.has(channelId))) throw new Error("channel selection is invalid");
   const statements = [db.prepare(`INSERT INTO approved_programmes
     (id, household_id, imdb_id, content_type, title, description, poster, background, release_info, genres_json, imdb_rating, approved_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -150,12 +243,31 @@ export async function approveProgramme(
         (programme_id, video_id, season, episode, title, released_at, overview) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .bind(id, episode.id, episode.season, episode.episode, episode.title, episode.released, episode.overview ?? null));
     }
-    statements.push(db.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)")
-      .bind(id, startingEpisode.id));
+  }
+
+  for (const channelId of requested) {
+    statements.push(db.prepare(`INSERT INTO channel_assignments
+      (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
+      .bind(channelId, id, startingEpisode?.id ?? null, approvedAt));
   }
 
   await db.batch(statements);
-  return { ...title, id, imdbId: title.id, approvedAt, showProgress: startingEpisode };
+  return {
+    ...title,
+    id,
+    imdbId: title.id,
+    approvedAt,
+    showProgress: startingEpisode,
+    assignments: requested.map((channelId) => ({
+      channelId,
+      channelName: channelById.get(channelId)!.name,
+      channelType: compatibleType,
+      createdAt: approvedAt,
+      current: false,
+      finished: false,
+      showProgress: startingEpisode,
+    })),
+  };
 }
 
 type SummaryRow = StoredProgramme & {
@@ -175,39 +287,34 @@ export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
       CASE WHEN p.content_type = 'show' THEN canonical.release_info ELSE p.release_info END AS release_info,
       CASE WHEN p.content_type = 'show' THEN canonical.genres_json ELSE p.genres_json END AS genres_json,
       CASE WHEN p.content_type = 'show' THEN canonical.imdb_rating ELSE p.imdb_rating END AS imdb_rating,
-      p.approved_at, p.paused_at,
-      CASE WHEN current.programme_id IS NULL THEN 0 ELSE 1 END AS is_current,
-      progress.next_video_id AS progress_video_id,
-      episode.season AS progress_season, episode.episode AS progress_episode,
-      episode.title AS progress_title, episode.released_at AS progress_released_at
+      p.approved_at, NULL AS paused_at,
+      0 AS is_current, NULL AS progress_video_id,
+      NULL AS progress_season, NULL AS progress_episode,
+      NULL AS progress_title, NULL AS progress_released_at
     FROM approved_programmes p
     LEFT JOIN canonical_shows canonical
       ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
-    LEFT JOIN current_programmes current
-      ON current.household_id = p.household_id AND current.programme_id = p.id
-    LEFT JOIN show_progress progress ON progress.programme_id = p.id
-    LEFT JOIN canonical_show_episodes episode
-      ON p.content_type = 'show' AND episode.show_imdb_id = p.imdb_id
-        AND episode.video_id = progress.next_video_id
     WHERE p.household_id = ?
     ORDER BY p.approved_at, title`;
 
 /** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
  * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
 export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
-  const rows = await db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<SummaryRow>();
+  const [rows, assignments] = await Promise.all([
+    db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<SummaryRow>(),
+    assignmentRows(db, householdId),
+  ]);
+  const assignmentsByProgramme = new Map<string, ProgrammeAssignment[]>();
+  for (const row of assignments) {
+    const values = assignmentsByProgramme.get(row.programme_id) ?? [];
+    values.push(assignmentFromRow(row));
+    assignmentsByProgramme.set(row.programme_id, values);
+  }
 
   return rows.results.map((row) => {
     const programme = programmeFromRow(row);
-    const showProgress = row.progress_video_id && row.progress_season !== null && row.progress_episode !== null
-      ? {
-          id: row.progress_video_id,
-          season: row.progress_season,
-          episode: row.progress_episode,
-          title: row.progress_title ?? "Untitled episode",
-          released: row.progress_released_at ?? "",
-        }
-      : undefined;
+    const programmeAssignments = assignmentsByProgramme.get(programme.id) ?? [];
+    const primary = programmeAssignments[0];
     return {
       id: programme.id,
       imdbId: programme.imdbId,
@@ -218,10 +325,11 @@ export async function approvedLibrary(db: D1Database, householdId: string): Prom
       genres: programme.genres,
       imdbRating: programme.imdbRating,
       approvedAt: programme.approvedAt,
-      pausedAt: programme.pausedAt,
-      current: Boolean(row.is_current),
-      finished: programme.type === "show" && !row.progress_video_id,
-      showProgress,
+      pausedAt: primary?.pausedAt,
+      current: programmeAssignments.some((assignment) => assignment.current),
+      finished: programme.type === "show" && programmeAssignments.every((assignment) => assignment.finished),
+      showProgress: primary?.showProgress,
+      assignments: programmeAssignments,
     };
   });
 }
