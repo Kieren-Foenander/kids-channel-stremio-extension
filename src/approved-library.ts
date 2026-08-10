@@ -295,10 +295,13 @@ export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
     LEFT JOIN canonical_shows canonical
       ON p.content_type = 'show' AND canonical.imdb_id = p.imdb_id
     WHERE p.household_id = ?
+      AND EXISTS (SELECT 1 FROM channel_assignments assignment WHERE assignment.programme_id = p.id)
     ORDER BY p.approved_at, title`;
 
 /** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
- * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
+ * the programme-detail endpoint; this list includes at most the single Show Progress episode.
+ * A programme enters the Approved Library through Channel Assignments and leaves it with
+ * the last one, so an unassigned programme is not part of the library. */
 export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
   const [rows, assignments] = await Promise.all([
     db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<SummaryRow>(),
@@ -327,7 +330,8 @@ export async function approvedLibrary(db: D1Database, householdId: string): Prom
       approvedAt: programme.approvedAt,
       pausedAt: primary?.pausedAt,
       current: programmeAssignments.some((assignment) => assignment.current),
-      finished: programme.type === "show" && programmeAssignments.every((assignment) => assignment.finished),
+      finished: programme.type === "show" && programmeAssignments.length > 0
+        && programmeAssignments.every((assignment) => assignment.finished),
       showProgress: primary?.showProgress,
       assignments: programmeAssignments,
     };

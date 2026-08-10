@@ -709,6 +709,21 @@ describe("Cinemeta Approved Library", () => {
     return sessionHeaders(response);
   }
 
+  it("omits a programme that no longer holds a Channel Assignment", async () => {
+    const created = await create();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+      VALUES ('unassigned-show', ?, 'tt1111111', 'show', 'Unassigned Show', '[]', ?)`)
+      .bind(created.householdId, new Date().toISOString()).run();
+
+    const headers = await parentAccess(created);
+    const secret = secretFrom(created);
+    const library = await (await SELF.fetch(`https://kids.test/api/households/${secret}/library`, { headers })).json<any>();
+    expect(library.programmes).toEqual([]);
+    const summary = await (await SELF.fetch(`https://kids.test/api/households/${secret}/overview`, { headers })).json<any>();
+    expect(summary.approved).toEqual({ shows: 0, movies: 0 });
+  });
+
   it("looks up Show Progress without materializing every Household's episodes", async () => {
     const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${APPROVED_LIBRARY_SQL}`)
       .bind("query-plan-household").all<{ detail: string }>();

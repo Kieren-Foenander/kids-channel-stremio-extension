@@ -59,7 +59,9 @@ export async function householdOverview(
     db.prepare(`SELECT
       SUM(CASE WHEN content_type = 'show' THEN 1 ELSE 0 END) AS shows,
       SUM(CASE WHEN content_type = 'movie' THEN 1 ELSE 0 END) AS movies
-      FROM approved_programmes WHERE household_id = ?`).bind(householdId).first<CountRow>(),
+      FROM approved_programmes programme WHERE household_id = ?
+        AND EXISTS (SELECT 1 FROM channel_assignments assignment
+          WHERE assignment.programme_id = programme.id)`).bind(householdId).first<CountRow>(),
     channelsForHousehold(db, householdId),
   ]);
 
