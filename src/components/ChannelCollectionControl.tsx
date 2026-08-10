@@ -34,7 +34,6 @@ export function ChannelCollectionControl({
 
   const refresh = async () => {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: parentKeys.channels(secret, type) }),
       queryClient.invalidateQueries({ queryKey: parentKeys.channels(secret) }),
       queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
     ]);

@@ -14,12 +14,12 @@ export interface ParentChannel {
   createdAt: string;
 }
 
+/** The Household's Channels are one list. Narrowing by type happens after the fetch so a
+ * page showing both a Channel picker and its own Channel view shares a single request. */
 export function useChannels(secret: string, type?: ChannelType) {
   return useQuery({
-    queryKey: parentKeys.channels(secret, type),
-    queryFn: async () => {
-      const response = await parentApi<{ channels: ParentChannel[] }>(`/api/households/${secret}/channels`);
-      return type ? response.channels.filter((channel) => channel.type === type) : response.channels;
-    },
+    queryKey: parentKeys.channels(secret),
+    queryFn: () => parentApi<{ channels: ParentChannel[] }>(`/api/households/${secret}/channels`),
+    select: ({ channels }) => type ? channels.filter((channel) => channel.type === type) : channels,
   });
 }
