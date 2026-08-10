@@ -51,6 +51,7 @@ import {
   restartAutomaticTvPreparation,
   stopAutomaticTvPreparation,
   tvPreparationRun,
+  tvPreparationRunForChannel,
   TvSchedulePreparationWorkflow,
   type TvPreparationWorkflowParams,
 } from "./tv-preparation";
@@ -852,7 +853,7 @@ export default {
       if (channel.type !== "tv") return json({ error: "Choose a TV Channel." }, 400);
       const run = await tvPreparationRun(env.DB, household.id);
       return json({
-        run: run ? { ...run, items: run.items.filter((item) => item.channelId === channel.id) } : null,
+        run: run ? tvPreparationRunForChannel(run, channel.id) : null,
       }, 200, { "cache-control": "no-store" });
     }
 

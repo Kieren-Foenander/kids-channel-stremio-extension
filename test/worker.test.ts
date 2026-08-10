@@ -1333,6 +1333,15 @@ describe("rolling TV Channel Schedule", () => {
 
     const second = await ensureAutomaticTvPreparation(env, created.householdId, undefined, new Date("2026-08-01T10:01:00.000Z"));
     expect(second?.id).toBe(first?.id);
+
+    const headers = await parentHeaders(created);
+    const scoped = await (await SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(created)}/channels/${secondChannel.id}/tv-preparation`,
+      { headers },
+    )).json<any>();
+    expect(scoped.run.items).toHaveLength(5);
+    expect(scoped.run.requestedCount).toBe(5);
+    expect(scoped.run.counts.queued).toBe(5);
   });
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {

@@ -173,11 +173,7 @@ export async function tvPreparationRun(
   const { results } = await db.prepare(`SELECT * FROM tv_preparation_items
       WHERE run_id = ? ORDER BY sequence`)
     .bind(row.id).all<ItemRow>();
-  const counts: Record<TvPreparationItemStatus, number> = {
-    queued: 0, trying: 0, downloading: 0, ready: 0, unavailable: 0, cancelled: 0,
-  };
   const items = results.map((item): TvPreparationItem => {
-    counts[item.status] += 1;
     return {
       channelId: item.channel_id,
       position: item.position,
@@ -206,9 +202,24 @@ export async function tvPreparationRun(
     failureReason: row.failure_reason ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    counts,
+    counts: itemCounts(items),
     items,
   };
+}
+
+function itemCounts(items: TvPreparationItem[]): Record<TvPreparationItemStatus, number> {
+  const counts: Record<TvPreparationItemStatus, number> = {
+    queued: 0, trying: 0, downloading: 0, ready: 0, unavailable: 0, cancelled: 0,
+  };
+  for (const item of items) counts[item.status] += 1;
+  return counts;
+}
+
+/** One Preparation Run covers the whole Household, so a Channel's view of it must
+ * count only its own positions rather than every Channel's. */
+export function tvPreparationRunForChannel(run: TvPreparationRun, channelId: string): TvPreparationRun {
+  const items = run.items.filter((item) => item.channelId === channelId);
+  return { ...run, requestedCount: items.length, counts: itemCounts(items), items };
 }
 
 export async function cancelTvPreparationRun(
