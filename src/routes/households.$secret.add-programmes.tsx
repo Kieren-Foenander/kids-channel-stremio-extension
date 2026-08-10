@@ -89,7 +89,7 @@ function AddProgrammesPage() {
   useEffect(() => setInput(searchState.q ?? ""), [searchState.q]);
 
   const results = useQuery({
-    queryKey: ["household", secret, "cinemeta-search", query],
+    queryKey: parentKeys.search(secret, query),
     queryFn: () => parentApi<SearchResponse>(`/api/households/${secret}/cinemeta/search?q=${encodeURIComponent(query)}`),
     enabled: query.length >= 2 && query.length <= 100,
     retry: false,
@@ -108,7 +108,7 @@ function AddProgrammesPage() {
   const visible = typedResults.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const approved = useMemo(() => new Set((library.data?.programmes ?? []).map((programme) => `${programme.type}:${programme.imdbId}`)), [library.data]);
   const showDetail = useQuery({
-    queryKey: ["household", secret, "cinemeta-title", "show", detail?.type === "show" ? detail.id : ""],
+    queryKey: parentKeys.title(secret, "show", detail?.type === "show" ? detail.id : ""),
     queryFn: () => parentApi<ShowDetailResponse>(`/api/households/${secret}/cinemeta/title/show/${detail!.id}`),
     enabled: detail?.type === "show" && !approved.has(`show:${detail.id}`),
     retry: false,

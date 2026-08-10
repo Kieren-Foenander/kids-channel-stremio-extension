@@ -142,7 +142,7 @@ export function ParentShell({ secret }: { secret: string }) {
     try {
       await lockMutation.mutateAsync();
       wasAuthenticated.current = false;
-      queryClient.removeQueries({ queryKey: ["household", secret] });
+      queryClient.removeQueries({ queryKey: parentKeys.household(secret) });
       setSession("locked");
     } catch {
       setLockError("The Parent Page could not be locked. Try again.");

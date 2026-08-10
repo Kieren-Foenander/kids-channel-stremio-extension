@@ -73,7 +73,7 @@ function ApprovedLibraryPage() {
     queryFn: () => parentApi<LibraryResponse>(`/api/households/${secret}/library`),
   });
   const detail = useQuery({
-    queryKey: ["household", secret, "approved-library", "programme", progressTarget?.id],
+    queryKey: parentKeys.libraryProgramme(secret, progressTarget?.id),
     queryFn: () => parentApi<ProgrammeDetailResponse>(`/api/households/${secret}/library/${encodeURIComponent(progressTarget!.id)}`),
     enabled: Boolean(progressTarget),
   });
@@ -95,8 +95,9 @@ function ApprovedLibraryPage() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
       queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-      queryClient.invalidateQueries({ queryKey: ["household", secret, "tv-channel"] }),
-      queryClient.invalidateQueries({ queryKey: ["household", secret, "movie-channel"] }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.tvChannels(secret) }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.tvPreparations(secret) }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.movieChannels(secret) }),
     ]);
   }
 
@@ -141,7 +142,9 @@ function ApprovedLibraryPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
         queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-        queryClient.invalidateQueries({ queryKey: programme.type === "show" ? parentKeys.tv(secret) : parentKeys.movie(secret) }),
+        queryClient.invalidateQueries({
+          queryKey: programme.type === "show" ? parentKeys.tvChannels(secret) : parentKeys.movieChannels(secret),
+        }),
       ]);
     },
   });
