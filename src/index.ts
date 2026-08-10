@@ -143,15 +143,27 @@ function queueAutomaticTvPreparation(env: Env, ctx: ExecutionContext, householdI
   }));
 }
 
-async function reconcileHouseholdChannels(env: Env, householdId: string): Promise<void> {
-  const channels = await channelsForHousehold(env.DB, householdId);
-  for (const channel of channels) {
-    if (channel.type === "tv") {
-      await refreshTvChannelSchedule(env.DB, householdId, channel.id, false, env.TV_SCHEDULE_SEED);
+/** A programme only ever belongs to Channels compatible with its type, so an assignment
+ * change can leave every other Channel in the Household untouched. */
+async function reconcileAssignedChannels(
+  env: Env,
+  householdId: string,
+  channelIds: Iterable<string>,
+  type: ContentType,
+): Promise<void> {
+  for (const channelId of new Set(channelIds)) {
+    if (channelTypeForContent(type) === "tv") {
+      await refreshTvChannelSchedule(env.DB, householdId, channelId, false, env.TV_SCHEDULE_SEED);
     } else {
-      await reconcileMovieChannel(env.DB, householdId, channel.id, env.MOVIE_ROTATION_SEED);
+      await reconcileMovieChannel(env.DB, householdId, channelId, env.MOVIE_ROTATION_SEED);
     }
   }
+}
+
+async function assignedChannelIds(env: Env, programmeId: string): Promise<string[]> {
+  const rows = await env.DB.prepare("SELECT channel_id FROM channel_assignments WHERE programme_id = ?")
+    .bind(programmeId).all<{ channel_id: string }>();
+  return rows.results.map((row) => row.channel_id);
 }
 
 async function legacyChannelOrNull(env: Env, householdId: string, type: ChannelType): Promise<Channel | null> {
@@ -645,13 +657,12 @@ export default {
           input.startingEpisodeId,
           input.channelIds as string[] | undefined,
         );
-        for (const assignment of programme.assignments) {
-          if (assignment.channelType === "movie") {
-            await reconcileMovieChannel(env.DB, household.id, assignment.channelId, env.MOVIE_ROTATION_SEED);
-          } else {
-            await refreshTvChannelSchedule(env.DB, household.id, assignment.channelId, false, env.TV_SCHEDULE_SEED);
-          }
-        }
+        await reconcileAssignedChannels(
+          env,
+          household.id,
+          programme.assignments.map((assignment) => assignment.channelId),
+          programme.type,
+        );
         if (programme.type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ programme }, 201);
       } catch (error) {
@@ -704,9 +715,7 @@ export default {
       if (desiredIds.some((channelId) => !compatibleIds.has(channelId))) {
         return json({ error: "Choose only compatible Channels from this Household." }, 400);
       }
-      const existingRows = await env.DB.prepare(`SELECT channel_id FROM channel_assignments
-        WHERE programme_id = ?`).bind(programme.id).all<{ channel_id: string }>();
-      const existingIds = new Set(existingRows.results.map((row) => row.channel_id));
+      const existingIds = new Set(await assignedChannelIds(env, programme.id));
       if (desiredIds.length === 0) {
         await env.DB.batch([
           env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?")
@@ -719,7 +728,7 @@ export default {
           env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?")
             .bind(programme.id, household.id),
         ]);
-        await reconcileHouseholdChannels(env, household.id);
+        await reconcileAssignedChannels(env, household.id, existingIds, programme.content_type);
         if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
         return json({ programme: null, message: "Final Channel Assignment removed; the programme left the Approved Library. Restart Stremio to refresh the Channels." });
       }
@@ -759,13 +768,7 @@ export default {
           .bind(channelId, programme.id, startingEpisodeId, now));
       }
       if (statements.length > 0) await env.DB.batch(statements);
-      for (const channelId of new Set([...additions, ...removals])) {
-        if (programme.content_type === "show") {
-          await refreshTvChannelSchedule(env.DB, household.id, channelId, false, env.TV_SCHEDULE_SEED);
-        } else {
-          await reconcileMovieChannel(env.DB, household.id, channelId, env.MOVIE_ROTATION_SEED);
-        }
-      }
+      await reconcileAssignedChannels(env, household.id, [...additions, ...removals], programme.content_type);
       if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
       return json({
         programme: await approvedProgrammeDetail(env.DB, household.id, programme.id),
@@ -802,6 +805,7 @@ export default {
         return json({ message: `${input.paused ? "Show paused without changing Show Progress." : "Show resumed."} Restart Stremio to refresh the Channel.` });
       }
 
+      const affectedChannelIds = await assignedChannelIds(env, programme.id);
       await env.DB.batch([
         env.DB.prepare("DELETE FROM current_programmes WHERE household_id = ? AND programme_id = ?")
           .bind(household.id, programme.id),
@@ -814,7 +818,7 @@ export default {
         env.DB.prepare("DELETE FROM approved_programmes WHERE id = ? AND household_id = ?")
           .bind(programme.id, household.id),
       ]);
-      await reconcileHouseholdChannels(env, household.id);
+      await reconcileAssignedChannels(env, household.id, affectedChannelIds, programme.content_type);
       if (programme.content_type === "show") queueAutomaticTvPreparation(env, ctx, household.id);
       return json({ message: `${programme.content_type === "show" ? "Show" : "Movie"} removed from future Channel selections. Restart Stremio to refresh the Channel.` });
     }
