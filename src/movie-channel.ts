@@ -401,46 +401,6 @@ export async function resetMovieRotation(
   return current(db, householdId, channelId);
 }
 
-export async function removeApprovedMovie(
-  db: D1Database,
-  householdId: string,
-  channelId: string,
-  programmeId: string,
-  configuredSeed?: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentState = await state(db, householdId, channelId);
-    if (!currentState) {
-      await db.batch([
-        db.prepare("DELETE FROM current_programmes WHERE household_id = ? AND channel_id = ? AND programme_id = ?")
-          .bind(householdId, channelId, programmeId),
-        db.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND channel_id = ? AND programme_id = ?")
-          .bind(householdId, channelId, programmeId),
-        db.prepare("DELETE FROM channel_assignments WHERE channel_id = ? AND programme_id = ?")
-          .bind(channelId, programmeId),
-      ]);
-      return;
-    }
-    const owner = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
-    await db.batch([
-      claimMutation(db, householdId, channelId, currentState.revision, owner, now),
-      db.prepare(`DELETE FROM current_programmes WHERE household_id = ? AND channel_id = ?
-        AND programme_id = ? AND ${owns.sql}`).bind(householdId, channelId, programmeId, ...owns.values),
-      db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND channel_id = ?
-        AND programme_id = ? AND ${owns.sql}`).bind(householdId, channelId, programmeId, ...owns.values),
-      db.prepare(`DELETE FROM channel_assignments WHERE channel_id = ? AND programme_id = ? AND ${owns.sql}`)
-        .bind(channelId, programmeId, ...owns.values),
-      db.prepare(`UPDATE movie_channel_state SET revision = revision + 1
-        WHERE household_id = ? AND channel_id = ? AND revision = ? AND ${owns.sql}`)
-        .bind(householdId, channelId, currentState.revision, ...owns.values),
-    ]);
-    if (await ownsMutation(db, householdId, channelId, currentState.revision, owner)) break;
-  }
-  await reconcileMovieChannel(db, householdId, channelId, configuredSeed);
-}
-
 export function parseSignOffId(videoId: string): { channelId?: string; cycle: number; position: number } | null {
   const escapedPrefix = SIGN_OFF_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const scoped = videoId.match(new RegExp(`^${escapedPrefix}:([^:]+):(\\d+):(\\d+)$`));

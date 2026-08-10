@@ -20,6 +20,8 @@ interface ChannelRow {
   created_at: string;
 }
 
+/** Enforced authoritatively by the channels_limit_insert trigger; this mirrors it so the
+ * Parent Page can stop offering a Channel it cannot create. */
 export const CHANNEL_LIMIT_PER_TYPE = 5;
 
 function fromRow(row: ChannelRow): Channel {
@@ -79,15 +81,6 @@ export async function legacyChannel(
   return row ? fromRow(row) : null;
 }
 
-export async function soleChannel(
-  db: D1Database,
-  householdId: string,
-  type: ChannelType,
-): Promise<Channel | null> {
-  const channels = await channelsForHousehold(db, householdId, type);
-  return channels.length === 1 ? channels[0] : null;
-}
-
 export async function createChannel(
   db: D1Database,
   householdId: string,
@@ -122,16 +115,4 @@ export async function renameChannel(
     .bind(name.trim(), channelId, householdId).run();
   if (result.meta.changes === 0) return null;
   return findChannel(db, householdId, channelId);
-}
-
-export async function channelIdsForProgramme(
-  db: D1Database,
-  householdId: string,
-  programmeId: string,
-): Promise<string[]> {
-  const rows = await db.prepare(`SELECT assignment.channel_id FROM channel_assignments assignment
-    JOIN channels channel ON channel.id = assignment.channel_id
-    WHERE assignment.programme_id = ? AND channel.household_id = ?
-    ORDER BY channel.created_at, channel.id`).bind(programmeId, householdId).all<{ channel_id: string }>();
-  return rows.results.map((row) => row.channel_id);
 }

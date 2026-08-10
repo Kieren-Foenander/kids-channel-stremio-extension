@@ -75,7 +75,6 @@ import {
   renameChannel,
   validChannelName,
   type Channel,
-  type ChannelType,
 } from "./channels";
 import { channelIdFromStremioId } from "./stremio";
 
@@ -164,10 +163,6 @@ async function assignedChannelIds(env: Env, programmeId: string): Promise<string
   const rows = await env.DB.prepare("SELECT channel_id FROM channel_assignments WHERE programme_id = ?")
     .bind(programmeId).all<{ channel_id: string }>();
   return rows.results.map((row) => row.channel_id);
-}
-
-async function legacyChannelOrNull(env: Env, householdId: string, type: ChannelType): Promise<Channel | null> {
-  return legacyChannel(env.DB, householdId, type);
 }
 
 async function playChannelProgramme(
@@ -794,7 +789,7 @@ export default {
         }
         const channel = typeof input.channelId === "string"
           ? await findChannel(env.DB, household.id, input.channelId, "tv")
-          : await legacyChannelOrNull(env, household.id, "tv");
+          : await legacyChannel(env.DB, household.id, "tv");
         if (!channel) return json({ error: "TV Channel was not found." }, 404);
         const pausedAt = input.paused ? new Date().toISOString() : null;
         const updated = await env.DB.prepare(`UPDATE channel_assignments SET paused_at = ?
@@ -895,7 +890,7 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      const channel = await legacyChannel(env.DB, household.id, "tv");
       if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
       return json(await parentTvChannelState(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED));
     }
@@ -915,7 +910,7 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const channel = await legacyChannelOrNull(env, household.id, "movie");
+      const channel = await legacyChannel(env.DB, household.id, "movie");
       if (!channel) return json({ error: "Default Movie Channel was deleted." }, 404);
       return json(await parentMovieChannelState(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED));
     }
@@ -926,7 +921,7 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const channel = await legacyChannelOrNull(env, household.id, "movie");
+      const channel = await legacyChannel(env.DB, household.id, "movie");
       if (!channel) return json({ error: "Default Movie Channel was deleted." }, 404);
       await resetMovieRotation(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED);
       return json({ message: "Movie rotation reset without interrupting the Current Programme. Restart Stremio to refresh the Channel." });
@@ -943,7 +938,7 @@ export default {
       if (typeof input.videoId !== "string") return json({ error: "Choose a valid regular released episode." }, 400);
       const channel = typeof input.channelId === "string"
         ? await findChannel(env.DB, household.id, input.channelId, "tv")
-        : await legacyChannelOrNull(env, household.id, "tv");
+        : await legacyChannel(env.DB, household.id, "tv");
       if (!channel) return json({ error: "TV Channel was not found." }, 404);
       try {
         await setShowProgress(env.DB, household.id, channel.id, progressMatch[2], input.videoId, env.TV_SCHEDULE_SEED);
@@ -963,7 +958,7 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      const channel = await legacyChannel(env.DB, household.id, "tv");
       if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
       const undone = await undoLatestTvAdvancement(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED);
       if (!undone) return json({ error: "There is no latest TV advancement to undo." }, 409);
@@ -977,7 +972,7 @@ export default {
       if (!household || !env.CONFIG_SECRET || !(await authorizedParent(request, household, env.CONFIG_SECRET))) {
         return json({ error: "Parent authentication is required." }, 401);
       }
-      const channel = await legacyChannelOrNull(env, household.id, "tv");
+      const channel = await legacyChannel(env.DB, household.id, "tv");
       if (!channel) return json({ error: "Default TV Channel was deleted." }, 404);
       await refreshTvChannelSchedule(env.DB, household.id, channel.id, true, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
@@ -1176,14 +1171,14 @@ export default {
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
       const streamChannel = streamMatch[2] === "series"
-        ? await legacyChannelOrNull(env, household.id, "tv")
+        ? await legacyChannel(env.DB, household.id, "tv")
         : null;
       if (streamMatch[2] === "movie") {
         const signOff = videoId ? parseSignOffId(videoId) : null;
         if (signOff) {
           const signOffChannel = signOff.channelId
             ? await findChannel(env.DB, household.id, signOff.channelId, "movie")
-            : await legacyChannelOrNull(env, household.id, "movie");
+            : await legacyChannel(env.DB, household.id, "movie");
           if (!signOffChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
           await requestMovieSignOff(env.DB, household.id, signOffChannel.id, signOff.cycle, signOff.position);
           return addonJson({ streams: [{

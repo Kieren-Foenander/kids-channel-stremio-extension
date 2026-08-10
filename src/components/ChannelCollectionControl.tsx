@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
-import { useChannels, type ChannelType, type ParentChannel } from "../lib/channels";
+import { CHANNEL_LIMIT_PER_TYPE, useChannels, type ChannelType, type ParentChannel } from "../lib/channels";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
 import { Button } from "./ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -99,12 +99,12 @@ export function ChannelCollectionControl({
           </NativeSelect>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" disabled={channels.length >= 5} onClick={() => { setName(""); setMode("create"); }}>Create Channel</Button>
+          <Button type="button" variant="outline" disabled={channels.length >= CHANNEL_LIMIT_PER_TYPE} onClick={() => { setName(""); setMode("create"); }}>Create Channel</Button>
           <Button type="button" variant="outline" disabled={!selected} onClick={() => { setName(selected?.name ?? ""); setMode("rename"); }}>Rename</Button>
           <Button type="button" variant="outline" disabled={!selected} onClick={() => setMode("delete")}>Delete</Button>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">{channels.length}/5 {type === "tv" ? "TV" : "Movie"} Channels configured. Channels stay in creation order.</p>
+      <p className="text-xs text-muted-foreground">{channels.length}/{CHANNEL_LIMIT_PER_TYPE} {type === "tv" ? "TV" : "Movie"} Channels configured. Channels stay in creation order.</p>
       {channelsQuery.isError && <p className="text-sm text-destructive" role="alert">{apiErrorMessage(channelsQuery.error, "Channels could not be loaded.")}</p>}
       {status && <p className="text-sm font-medium text-accent" role="status">{status}</p>}
 

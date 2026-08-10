@@ -1,6 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { parentApi, parentKeys } from "./parent-api";
 
+export { CHANNEL_LIMIT_PER_TYPE } from "../channels";
+
 export type ChannelType = "tv" | "movie";
 
 export interface ParentChannel {
