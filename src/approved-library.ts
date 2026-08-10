@@ -167,10 +167,7 @@ type SummaryRow = StoredProgramme & {
   progress_released_at: string | null;
 };
 
-/** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
- * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
-export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
-  const rows = await db.prepare(`SELECT p.id, p.imdb_id, p.content_type,
+export const APPROVED_LIBRARY_SQL = `SELECT p.id, p.imdb_id, p.content_type,
       CASE WHEN p.content_type = 'show' THEN canonical.title ELSE p.title END AS title,
       CASE WHEN p.content_type = 'show' THEN canonical.description ELSE p.description END AS description,
       CASE WHEN p.content_type = 'show' THEN canonical.poster ELSE p.poster END AS poster,
@@ -189,10 +186,16 @@ export async function approvedLibrary(db: D1Database, householdId: string): Prom
     LEFT JOIN current_programmes current
       ON current.household_id = p.household_id AND current.programme_id = p.id
     LEFT JOIN show_progress progress ON progress.programme_id = p.id
-    LEFT JOIN show_episodes episode
-      ON episode.programme_id = p.id AND episode.video_id = progress.next_video_id
+    LEFT JOIN canonical_show_episodes episode
+      ON p.content_type = 'show' AND episode.show_imdb_id = p.imdb_id
+        AND episode.video_id = progress.next_video_id
     WHERE p.household_id = ?
-    ORDER BY p.approved_at, title`).bind(householdId).all<SummaryRow>();
+    ORDER BY p.approved_at, title`;
+
+/** A compact Parent Page projection. Episode catalogues are deliberately loaded only by
+ * the programme-detail endpoint; this list includes at most the single Show Progress episode. */
+export async function approvedLibrary(db: D1Database, householdId: string): Promise<ApprovedProgrammeSummary[]> {
+  const rows = await db.prepare(APPROVED_LIBRARY_SQL).bind(householdId).all<SummaryRow>();
 
   return rows.results.map((row) => {
     const programme = programmeFromRow(row);
