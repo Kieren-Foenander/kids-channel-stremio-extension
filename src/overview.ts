@@ -1,6 +1,6 @@
 import { channelsForHousehold } from "./channels";
-import { parentMovieChannelState } from "./movie-channel";
-import { parentTvChannelState } from "./tv-channel";
+import { movieChannelProgramme } from "./movie-channel";
+import { tvChannelSchedule } from "./tv-channel";
 
 export interface OverviewEpisode {
   id: string;
@@ -44,7 +44,11 @@ export interface HouseholdOverview {
 
 interface CountRow { shows: number; movies: number }
 
-/** Builds the Parent Page summary for every configured Channel. */
+const OVERVIEW_SCHEDULE_LENGTH = 3;
+
+/** Builds the Parent Page summary for every configured Channel. This runs for up to ten
+ * Channels on a polled endpoint, so it reads the shortest window each card renders rather
+ * than the full Channel Schedule, remaining rotation, and playback history. */
 export async function householdOverview(
   db: D1Database,
   householdId: string,
@@ -60,8 +64,8 @@ export async function householdOverview(
   ]);
 
   const tvChannels = await Promise.all(channels.filter((channel) => channel.type === "tv").map(async (channel) => {
-    const state = await parentTvChannelState(db, householdId, channel.id, tvSeed);
-    const programmes = state.schedule.map((programme) => ({
+    const schedule = await tvChannelSchedule(db, householdId, channel.id, tvSeed, OVERVIEW_SCHEDULE_LENGTH);
+    const programmes = schedule.map((programme) => ({
       programmeId: programme.programmeId,
       title: programme.showTitle,
       poster: programme.poster,
@@ -71,20 +75,20 @@ export async function householdOverview(
       id: channel.id,
       name: channel.name,
       current: programmes[0] ?? null,
-      next: programmes.slice(1, 3),
+      next: programmes.slice(1),
     };
   }));
 
   const movieChannels = await Promise.all(channels.filter((channel) => channel.type === "movie").map(async (channel) => {
-    const state = await parentMovieChannelState(db, householdId, channel.id, movieSeed);
+    const current = await movieChannelProgramme(db, householdId, channel.id, movieSeed);
     return {
       id: channel.id,
       name: channel.name,
-      current: state.current ? {
-        programmeId: state.current.programmeId,
-        title: state.current.title,
-        poster: state.current.poster,
-        releaseInfo: state.current.releaseInfo,
+      current: current ? {
+        programmeId: current.programmeId,
+        title: current.title,
+        poster: current.poster,
+        releaseInfo: current.releaseInfo,
       } : null,
     };
   }));

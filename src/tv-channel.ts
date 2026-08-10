@@ -242,7 +242,12 @@ async function releaseExpiredUnavailableEpisodes(
   return true;
 }
 
-async function scheduleRows(db: D1Database, householdId: string, channelId: string): Promise<TvScheduledProgramme[]> {
+async function scheduleRows(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  limit = TV_SCHEDULE_LENGTH,
+): Promise<TvScheduledProgramme[]> {
   const rows = await db.prepare(`SELECT schedule.channel_id, schedule.position, schedule.programme_id, programme.imdb_id,
       canonical.title AS show_title, canonical.description, canonical.poster, canonical.background,
       episode.video_id, episode.season, episode.episode, episode.title AS episode_title,
@@ -254,7 +259,7 @@ async function scheduleRows(db: D1Database, householdId: string, channelId: stri
     JOIN channel_state state ON state.channel_id = schedule.channel_id
     WHERE schedule.household_id = ? AND schedule.channel_id = ? AND schedule.position >= state.current_position
     ORDER BY schedule.position
-    LIMIT ?`).bind(householdId, channelId, TV_SCHEDULE_LENGTH).all<ScheduleRow>();
+    LIMIT ?`).bind(householdId, channelId, limit).all<ScheduleRow>();
   return rows.results.map(programmeFromRow);
 }
 
@@ -319,9 +324,10 @@ export async function tvChannelSchedule(
   householdId: string,
   channelId: string,
   configuredSeed?: string,
+  limit = TV_SCHEDULE_LENGTH,
 ): Promise<TvScheduledProgramme[]> {
   await initializeSchedule(db, householdId, channelId, configuredSeed);
-  return scheduleRows(db, householdId, channelId);
+  return scheduleRows(db, householdId, channelId, limit);
 }
 
 async function state(db: D1Database, householdId: string, channelId: string): Promise<StateRow | null> {
