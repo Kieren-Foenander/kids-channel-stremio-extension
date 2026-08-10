@@ -74,6 +74,11 @@ test("populated Overview shows compact Current Programmes and immediate TV sched
   await expect(currents).toContainText("S01E01 — First");
   await expect(currents).toContainText("Example: The Movie");
   await expect(page.locator('section[aria-labelledby="next-tv-heading"]')).toContainText("S01E02 — Second");
+
+  await currents.getByRole("link", { name: "View Channel" }).first().click();
+  await expect(page).toHaveURL(/\/tv-channel\?channel=[0-9a-f-]+$/);
+  await expect(page.getByRole("heading", { name: "TV Channels" })).toBeVisible();
+  await page.goBack();
   await expect(page.getByText("Shows").locator("..")).toContainText("1");
   await expect(page.getByText("Movies").locator("..")).toContainText("1");
   await expect(page.getByRole("heading", { name: "Build your Approved Library" })).toBeHidden();

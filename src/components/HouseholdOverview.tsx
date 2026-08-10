@@ -59,7 +59,9 @@ export function HouseholdOverview({ secret }: { secret: string }) {
               empty={overview.approved.shows === 0
                 ? "Approve a show to start the TV Channel."
                 : "No eligible assigned show is available."}
-              href={`/households/${secret}/tv-channel?channel=${encodeURIComponent(channel.id)}`}
+              secret={secret}
+              linkTo="tv-channel"
+              channelId={channel.id}
             />
           ))}
           {overview.movieChannels.map((channel) => (
@@ -75,7 +77,9 @@ export function HouseholdOverview({ secret }: { secret: string }) {
               empty={overview.approved.movies === 0
                 ? "Approve a movie to start the Movie Channel."
                 : "No assigned movie is currently available."}
-              href={`/households/${secret}/movie-channel?channel=${encodeURIComponent(channel.id)}`}
+              secret={secret}
+              linkTo="movie-channel"
+              channelId={channel.id}
             />
           ))}
         </div>
@@ -137,12 +141,14 @@ export function HouseholdOverview({ secret }: { secret: string }) {
   );
 }
 
-function ChannelCurrent({ kind, name, programme, empty, href }: {
+function ChannelCurrent({ kind, name, programme, empty, secret, linkTo, channelId }: {
   kind: "TV" | "Movie";
   name: string;
   programme: { title: string; detail?: string; poster?: string } | null;
   empty: string;
-  href: string;
+  secret: string;
+  linkTo: "tv-channel" | "movie-channel";
+  channelId: string;
 }) {
   return (
     <article className="flex min-h-40 gap-4 rounded-[4px] border bg-card p-5">
@@ -160,7 +166,14 @@ function ChannelCurrent({ kind, name, programme, empty, href }: {
             <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{empty}</p>
           </>
         )}
-        <a className="mt-2 inline-block text-sm font-medium text-accent underline-offset-4 hover:underline" href={href}>View Channel</a>
+        <Link
+          className="mt-2 inline-block text-sm font-medium text-accent underline-offset-4 hover:underline"
+          to={`/households/$secret/${linkTo}`}
+          params={{ secret }}
+          search={{ channel: channelId }}
+        >
+          View Channel
+        </Link>
       </div>
       {programme?.poster && <img src={programme.poster} alt={`${programme.title} poster`} className="h-27 w-18 shrink-0 self-center rounded-[3px] object-cover" />}
     </article>
