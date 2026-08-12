@@ -2309,6 +2309,11 @@ describe("Stremio protocol", () => {
     expect(reassigned.status).toBe(200);
     expect((await reassigned.json<any>()).programme.assignments.map((assignment: any) => assignment.channelId))
       .toEqual([defaultMovieId, comedy.id]);
+    const removedFromComedy = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [defaultMovieId] }),
+    });
+    expect(removedFromComedy.status).toBe(200);
+    expect((await SELF.fetch(`${base}/play/movie/${comedy.id}/tt5555555`)).status).toBe(404);
     const finalRemoval = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
       method: "PUT", headers, body: JSON.stringify({ channelIds: [] }),
     });
@@ -2342,6 +2347,11 @@ describe("Stremio protocol", () => {
     expect(new Map(progress.results.map((row) => [row.channel_id, row.next_video_id]))).toEqual(new Map([
       [tvChannels[0].id, "tt6666666:1:1"], [tvChannels[1].id, "tt6666666:1:2"],
     ]));
+    const removedFromSecondTv = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${show.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [tvChannels[0].id] }),
+    });
+    expect(removedFromSecondTv.status).toBe(200);
+    expect((await SELF.fetch(secondTvMeta.meta.videos[1].streams[0].url)).status).toBe(404);
   });
 
   it("serves a configurable household-specific manifest", async () => {

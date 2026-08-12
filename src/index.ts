@@ -174,6 +174,11 @@ async function playChannelProgramme(
   contentType: StreamContentType,
   videoId: string,
 ): Promise<Response> {
+  const belongsToChannel = contentType === "series"
+    ? (await tvChannelSchedule(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED))
+      .some((programme) => programme.episode.id === videoId)
+    : (await movieChannelProgramme(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED))?.imdbId === videoId;
+  if (!belongsToChannel) return playbackResponse("Programme not found in this Channel.", 404);
   if (!env.CONFIG_SECRET) return playbackResponse("Playback is temporarily unavailable.", 503);
   try {
     const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
