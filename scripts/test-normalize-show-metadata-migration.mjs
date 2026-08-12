@@ -140,7 +140,57 @@ try {
   }
   execute(["--file", join(root, "migrations/0022_audit_household_indexes.sql")]);
 
-  console.log("D1 migrations preserved Household state and replaced the 641-row automatic preparation scan with partial-index access.");
+  execute(["--file", join(root, "migrations/0023_add_multiple_channels.sql")]);
+  const channelCounts = query(`SELECT
+    (SELECT COUNT(*) FROM channels) AS channels,
+    (SELECT COUNT(*) FROM channel_assignments) AS assignments,
+    (SELECT COUNT(*) FROM channels WHERE legacy_key = 'tv') AS tv_defaults,
+    (SELECT COUNT(*) FROM channels WHERE legacy_key = 'movie') AS movie_defaults`)[0];
+  if (channelCounts?.channels !== 1282 || channelCounts.assignments !== 2
+    || channelCounts.tv_defaults !== 641 || channelCounts.movie_defaults !== 641) {
+    throw new Error(`multiple Channel defaults or assignments were not migrated: ${JSON.stringify(channelCounts)}`);
+  }
+  const migratedState = query(`SELECT assignment.programme_id, assignment.next_video_id,
+      current.video_id AS current_video_id, schedule.video_id AS scheduled_video_id,
+      channel.legacy_key
+    FROM channel_assignments assignment
+    JOIN channels channel ON channel.id = assignment.channel_id
+    JOIN current_programmes current ON current.programme_id = assignment.programme_id
+      AND current.channel_id = assignment.channel_id
+    JOIN channel_schedule schedule ON schedule.programme_id = assignment.programme_id
+      AND schedule.channel_id = assignment.channel_id
+    ORDER BY assignment.programme_id`);
+  const expectedMigratedState = expected.map((row) => ({
+    programme_id: row.programme_id,
+    next_video_id: row.next_video_id,
+    current_video_id: row.current_video_id,
+    scheduled_video_id: row.scheduled_video_id,
+    legacy_key: "tv",
+  }));
+  if (JSON.stringify(migratedState) !== JSON.stringify(expectedMigratedState)) {
+    throw new Error(`multiple Channel state was not preserved: ${JSON.stringify(migratedState)}`);
+  }
+  if (query("SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'show_progress'").length !== 0) {
+    throw new Error("legacy show_progress table remains after multiple Channel migration");
+  }
+  const foreignKeyFailures = query("PRAGMA foreign_key_check");
+  if (foreignKeyFailures.length !== 0) {
+    throw new Error(`multiple Channel migration left invalid foreign keys: ${JSON.stringify(foreignKeyFailures)}`);
+  }
+  let channelLimitRejected = false;
+  try {
+    execute(["--command", `INSERT INTO channels (id, household_id, channel_type, name, created_at) VALUES
+      ('extra-tv-1', 'household-a', 'tv', 'Same', '2026-08-10T00:00:00.000Z'),
+      ('extra-tv-2', 'household-a', 'tv', 'Same', '2026-08-10T00:00:01.000Z'),
+      ('extra-tv-3', 'household-a', 'tv', 'Same', '2026-08-10T00:00:02.000Z'),
+      ('extra-tv-4', 'household-a', 'tv', 'Same', '2026-08-10T00:00:03.000Z'),
+      ('extra-tv-5', 'household-a', 'tv', 'Same', '2026-08-10T00:00:04.000Z')`]);
+  } catch {
+    channelLimitRejected = true;
+  }
+  if (!channelLimitRejected) throw new Error("five Channel limit was not enforced");
+
+  console.log("D1 migrations preserved Household state, added default named Channels, and retained indexed automatic preparation scans.");
 } finally {
   rmSync(persistence, { recursive: true, force: true });
 }

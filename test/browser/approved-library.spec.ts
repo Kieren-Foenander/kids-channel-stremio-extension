@@ -56,6 +56,47 @@ test("an empty Approved Library links directly to Add Programmes", async ({ page
   await expect(page.getByLabel("Search Cinemeta for shows and movies")).toBeVisible();
 });
 
+test("a new TV Channel Assignment chooses its own starting Show Progress", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create TV Channel" });
+  await createDialog.getByLabel("Channel name").fill("Weekend");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+
+  const apiBase = new URL(parentUrl, "http://local.test").pathname.replace(/^\/households/, "/api/households");
+  await page.evaluate(async ({ apiBase }) => {
+    const channels = await fetch(`${apiBase}/channels`).then((response) => response.json()) as {
+      channels: Array<{ id: string; type: string; legacyKey?: string }>;
+    };
+    const defaultTv = channels.channels.find((channel) => channel.type === "tv" && channel.legacyKey === "tv")!;
+    const response = await fetch(`${apiBase}/library`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "show",
+        imdbId: "tt1234567",
+        channelIds: [defaultTv.id],
+        startingEpisodeIds: { [defaultTv.id]: "tt1234567:1:1" },
+      }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+  }, { apiBase });
+
+  await page.goto(`${parentUrl}/approved-library`);
+  const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "The Example", exact: true }) });
+  await show.getByRole("button", { name: "Manage Channels" }).click();
+  const dialog = page.getByRole("dialog", { name: "Assign The Example to Channels" });
+  await dialog.getByLabel("Weekend", { exact: true }).check();
+  const weekendProgress = dialog.getByRole("group", { name: "Starting Show Progress for Weekend" });
+  await expect(weekendProgress.getByLabel("Episode")).toHaveValue("tt1234567:1:1");
+  await weekendProgress.getByLabel("Episode").selectOption("tt1234567:1:2");
+  await dialog.getByRole("button", { name: "Save Assignments" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(show).toContainText("Weekend");
+  await expect(show).toContainText("Show Progress: S01E02");
+});
+
 test("a Parent manages approved shows and deliberately removes programmes", async ({ page }) => {
   await page.route("https://placehold.co/**", (route) => route.abort());
   const parentUrl = await createHousehold(page);

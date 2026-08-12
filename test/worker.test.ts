@@ -12,6 +12,7 @@ import {
   tvPreparationRun,
 } from "../src/tv-preparation";
 import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
+import { createChannel } from "../src/channels";
 import { APPROVED_LIBRARY_SQL } from "../src/approved-library";
 
 const SELF = {
@@ -58,7 +59,21 @@ beforeEach(async () => {
     id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, imdb_id TEXT NOT NULL,
     content_type TEXT NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT, background TEXT,
     release_info TEXT, genres_json TEXT NOT NULL DEFAULT '[]', imdb_rating TEXT, approved_at TEXT NOT NULL,
-    paused_at TEXT, UNIQUE (household_id, content_type, imdb_id)
+    UNIQUE (household_id, content_type, imdb_id)
+  )`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channels (
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, channel_type TEXT NOT NULL,
+    name TEXT NOT NULL, legacy_key TEXT, created_at TEXT NOT NULL,
+    UNIQUE (household_id, legacy_key)
+  )`).run();
+  await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS channels_limit_insert
+    BEFORE INSERT ON channels
+    WHEN (SELECT COUNT(*) FROM channels WHERE household_id = NEW.household_id
+      AND channel_type = NEW.channel_type) >= 5
+    BEGIN SELECT RAISE(ABORT, 'channel type limit reached'); END`).run();
+  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_assignments (
+    channel_id TEXT NOT NULL, programme_id TEXT NOT NULL, next_video_id TEXT,
+    paused_at TEXT, created_at TEXT NOT NULL, PRIMARY KEY (channel_id, programme_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS canonical_shows (
     imdb_id TEXT PRIMARY KEY NOT NULL, title TEXT NOT NULL, description TEXT, poster TEXT,
@@ -107,55 +122,52 @@ beforeEach(async () => {
     END`).run();
   await env.DB.prepare(`CREATE TRIGGER IF NOT EXISTS show_episodes_delete
     INSTEAD OF DELETE ON show_episodes BEGIN SELECT 1; END`).run();
-  await env.DB.prepare(`CREATE TABLE IF NOT EXISTS show_progress (
-    programme_id TEXT PRIMARY KEY NOT NULL, next_video_id TEXT NOT NULL
-  )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS current_programmes (
-    household_id TEXT NOT NULL, channel TEXT NOT NULL, programme_id TEXT NOT NULL,
-    video_id TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY (household_id, channel)
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, programme_id TEXT NOT NULL,
+    video_id TEXT NOT NULL, selected_at TEXT NOT NULL, PRIMARY KEY (channel_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_state (
-    household_id TEXT NOT NULL, channel TEXT NOT NULL, current_position INTEGER NOT NULL,
-    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL, PRIMARY KEY (household_id, channel)
+    household_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY NOT NULL, current_position INTEGER NOT NULL,
+    selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_schedule (
-    household_id TEXT NOT NULL, channel TEXT NOT NULL, position INTEGER NOT NULL,
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, position INTEGER NOT NULL,
     programme_id TEXT NOT NULL, video_id TEXT NOT NULL, scheduled_at TEXT NOT NULL,
-    PRIMARY KEY (household_id, channel, position)
+    PRIMARY KEY (channel_id, position)
   )`).run();
   await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS channel_schedule_video_idx
-    ON channel_schedule (household_id, channel, video_id)`).run();
+    ON channel_schedule (channel_id, video_id)`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS channel_advancements (
-    household_id TEXT NOT NULL, channel TEXT NOT NULL, from_position INTEGER NOT NULL,
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, from_position INTEGER NOT NULL,
     target_position INTEGER NOT NULL, owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
-    PRIMARY KEY (household_id, channel, from_position)
+    PRIMARY KEY (channel_id, from_position)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_advancement_history (
-    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, from_position INTEGER NOT NULL,
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, channel_id TEXT NOT NULL, from_position INTEGER NOT NULL,
     target_position INTEGER NOT NULL, previous_programme_id TEXT NOT NULL, previous_video_id TEXT NOT NULL,
     target_programme_id TEXT NOT NULL, target_video_id TEXT NOT NULL, progress_before_json TEXT NOT NULL,
     progress_after_json TEXT NOT NULL, advanced_at TEXT NOT NULL, undone_at TEXT, undo_owner_token TEXT
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_state (
-    household_id TEXT PRIMARY KEY NOT NULL, cycle INTEGER NOT NULL, current_position INTEGER NOT NULL,
+    household_id TEXT NOT NULL, channel_id TEXT PRIMARY KEY NOT NULL, cycle INTEGER NOT NULL, current_position INTEGER NOT NULL,
     selection_seed TEXT NOT NULL, initialized_at TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_rotation (
-    household_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
     programme_id TEXT NOT NULL, consumed_at TEXT,
-    PRIMARY KEY (household_id, cycle, position), UNIQUE (household_id, cycle, programme_id)
+    PRIMARY KEY (channel_id, cycle, position), UNIQUE (channel_id, cycle, programme_id)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_advancements (
-    household_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
     owner_token TEXT NOT NULL, advanced_at TEXT NOT NULL,
-    PRIMARY KEY (household_id, cycle, position)
+    PRIMARY KEY (channel_id, cycle, position)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_channel_mutations (
-    household_id TEXT NOT NULL, revision INTEGER NOT NULL, owner_token TEXT NOT NULL, claimed_at TEXT NOT NULL,
-    PRIMARY KEY (household_id, revision)
+    household_id TEXT NOT NULL, channel_id TEXT NOT NULL, revision INTEGER NOT NULL,
+    owner_token TEXT NOT NULL, claimed_at TEXT NOT NULL, PRIMARY KEY (channel_id, revision)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS movie_playback_history (
-    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, programme_id TEXT NOT NULL,
+    id TEXT PRIMARY KEY NOT NULL, household_id TEXT NOT NULL, channel_id TEXT NOT NULL, programme_id TEXT NOT NULL,
     imdb_id TEXT NOT NULL, title TEXT NOT NULL, cycle INTEGER NOT NULL, position INTEGER NOT NULL,
     played_at TEXT NOT NULL
   )`).run();
@@ -186,10 +198,11 @@ beforeEach(async () => {
   await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS tv_preparation_runs_active_household_idx
     ON tv_preparation_runs (household_id) WHERE status IN ('queued', 'running')`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_preparation_items (
-    run_id TEXT NOT NULL, position INTEGER NOT NULL, programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    run_id TEXT NOT NULL, channel_id TEXT NOT NULL, position INTEGER NOT NULL, sequence INTEGER NOT NULL,
+    programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
     show_title TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, episode_title TEXT NOT NULL,
     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, quality TEXT, filename TEXT, info_hash TEXT,
-    message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, position)
+    message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, channel_id, position)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS maintenance_cursors (
     name TEXT PRIMARY KEY NOT NULL, last_household_id TEXT, updated_at TEXT NOT NULL
@@ -212,10 +225,11 @@ beforeEach(async () => {
   await env.DB.prepare("DELETE FROM channel_schedule").run();
   await env.DB.prepare("DELETE FROM channel_state").run();
   await env.DB.prepare("DELETE FROM current_programmes").run();
-  await env.DB.prepare("DELETE FROM show_progress").run();
+  await env.DB.prepare("DELETE FROM channel_assignments").run();
   await env.DB.prepare("DELETE FROM approved_programmes").run();
   await env.DB.prepare("DELETE FROM canonical_show_episodes").run();
   await env.DB.prepare("DELETE FROM canonical_shows").run();
+  await env.DB.prepare("DELETE FROM channels").run();
   await env.DB.prepare("DELETE FROM households").run();
   vi.restoreAllMocks();
 });
@@ -228,6 +242,13 @@ async function create(pin = "123456"): Promise<CreatedHousehold> {
   });
   expect(response.status).toBe(201);
   return response.json<CreatedHousehold>();
+}
+
+async function defaultChannelId(created: CreatedHousehold, type: "tv" | "movie"): Promise<string> {
+  const row = await env.DB.prepare("SELECT id FROM channels WHERE household_id = ? AND legacy_key = ?")
+    .bind(created.householdId, type).first<{ id: string }>();
+  if (!row) throw new Error(`default ${type} channel was not provisioned`);
+  return row.id;
 }
 
 function secretFrom(created: CreatedHousehold): string {
@@ -584,6 +605,8 @@ describe("Household Overview summary", () => {
   it("returns compact counts, both Current Programmes, and no more than two upcoming TV programmes", async () => {
     const populated = await create();
     const isolated = await create();
+    const tvChannelId = await defaultChannelId(populated, "tv");
+    const movieChannelId = await defaultChannelId(populated, "movie");
     const approvedAt = "2024-01-01T00:00:00.000Z";
     await env.DB.batch([
       env.DB.prepare(`INSERT INTO approved_programmes
@@ -598,7 +621,12 @@ describe("Household Overview summary", () => {
         (programme_id, video_id, season, episode, title, released_at)
         VALUES ('overview-show', ?, 1, ?, ?, '2024-01-01T00:00:00.000Z')`)
         .bind(`tt1000001:1:${episode}`, episode, `Episode ${episode}`)),
-      env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES ('overview-show', 'tt1000001:1:1')"),
+      env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, next_video_id, created_at)
+        VALUES (?, 'overview-show', 'tt1000001:1:1', ?)`).bind(tvChannelId, approvedAt),
+      env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, created_at) VALUES (?, 'overview-movie', ?)`)
+        .bind(movieChannelId, approvedAt),
     ]);
 
     const denied = await SELF.fetch(`https://kids.test/api/households/${secretFrom(populated)}/overview`);
@@ -609,30 +637,30 @@ describe("Household Overview summary", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     const summary = await response.json<any>();
     expect(summary.approved).toEqual({ shows: 1, movies: 1 });
-    expect(summary.tv.current).toMatchObject({ title: "Overview Show", episode: { id: "tt1000001:1:1", title: "Episode 1" } });
-    expect(summary.tv.next.map((item: any) => item.episode.id)).toEqual(["tt1000001:1:2", "tt1000001:1:3"]);
-    expect(summary.tv.next).toHaveLength(2);
-    expect(summary.movie.current).toMatchObject({ title: "Overview Movie", releaseInfo: "2023" });
-    expect(summary.tv.current).not.toHaveProperty("description");
-    expect(summary.movie.current).not.toHaveProperty("signOffId");
+    expect(summary.tvChannels[0].current).toMatchObject({ title: "Overview Show", episode: { id: "tt1000001:1:1", title: "Episode 1" } });
+    expect(summary.tvChannels[0].next.map((item: any) => item.episode.id)).toEqual(["tt1000001:1:2", "tt1000001:1:3"]);
+    expect(summary.tvChannels[0].next).toHaveLength(2);
+    expect(summary.movieChannels[0].current).toMatchObject({ title: "Overview Movie", releaseInfo: "2023" });
+    expect(summary.tvChannels[0].current).not.toHaveProperty("description");
+    expect(summary.movieChannels[0].current).not.toHaveProperty("signOffId");
 
     const scheduleBefore = await env.DB.prepare(`SELECT position, programme_id, video_id, scheduled_at
-      FROM channel_schedule WHERE household_id = ? AND channel = 'tv' ORDER BY position`)
-      .bind(populated.householdId).all();
+      FROM channel_schedule WHERE household_id = ? AND channel_id = ? ORDER BY position`)
+      .bind(populated.householdId, tvChannelId).all();
     const currentBefore = await env.DB.prepare(`SELECT programme_id, video_id, selected_at
-      FROM current_programmes WHERE household_id = ? AND channel = 'tv'`)
-      .bind(populated.householdId).first();
+      FROM current_programmes WHERE household_id = ? AND channel_id = ?`)
+      .bind(populated.householdId, tvChannelId).first();
     await new Promise((resolve) => setTimeout(resolve, 5));
     const repeated = await SELF.fetch(`https://kids.test/api/households/${secretFrom(populated)}/overview`, {
       headers: await access(populated),
     });
     expect(repeated.status).toBe(200);
     expect((await env.DB.prepare(`SELECT position, programme_id, video_id, scheduled_at
-      FROM channel_schedule WHERE household_id = ? AND channel = 'tv' ORDER BY position`)
-      .bind(populated.householdId).all()).results).toEqual(scheduleBefore.results);
+      FROM channel_schedule WHERE household_id = ? AND channel_id = ? ORDER BY position`)
+      .bind(populated.householdId, tvChannelId).all()).results).toEqual(scheduleBefore.results);
     expect(await env.DB.prepare(`SELECT programme_id, video_id, selected_at
-      FROM current_programmes WHERE household_id = ? AND channel = 'tv'`)
-      .bind(populated.householdId).first()).toEqual(currentBefore);
+      FROM current_programmes WHERE household_id = ? AND channel_id = ?`)
+      .bind(populated.householdId, tvChannelId).first()).toEqual(currentBefore);
 
     const isolatedSummary = await (await SELF.fetch(
       `https://kids.test/api/households/${secretFrom(isolated)}/overview`,
@@ -640,8 +668,8 @@ describe("Household Overview summary", () => {
     )).json<any>();
     expect(isolatedSummary).toEqual({
       approved: { shows: 0, movies: 0 },
-      tv: { current: null, next: [] },
-      movie: { current: null },
+      tvChannels: [{ id: expect.any(String), name: "TV Channel", current: null, next: [] }],
+      movieChannels: [{ id: expect.any(String), name: "Movie Channel", current: null }],
     });
   });
 });
@@ -681,14 +709,27 @@ describe("Cinemeta Approved Library", () => {
     return sessionHeaders(response);
   }
 
+  it("omits a programme that no longer holds a Channel Assignment", async () => {
+    const created = await create();
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
+      VALUES ('unassigned-show', ?, 'tt1111111', 'show', 'Unassigned Show', '[]', ?)`)
+      .bind(created.householdId, new Date().toISOString()).run();
+
+    const headers = await parentAccess(created);
+    const secret = secretFrom(created);
+    const library = await (await SELF.fetch(`https://kids.test/api/households/${secret}/library`, { headers })).json<any>();
+    expect(library.programmes).toEqual([]);
+    const summary = await (await SELF.fetch(`https://kids.test/api/households/${secret}/overview`, { headers })).json<any>();
+    expect(summary.approved).toEqual({ shows: 0, movies: 0 });
+  });
+
   it("looks up Show Progress without materializing every Household's episodes", async () => {
     const plan = await env.DB.prepare(`EXPLAIN QUERY PLAN ${APPROVED_LIBRARY_SQL}`)
       .bind("query-plan-household").all<{ detail: string }>();
 
     expect(plan.results.map((row) => row.detail)).not.toContain("MATERIALIZE show_episodes");
-    expect(plan.results.some((row) => row.detail.includes(
-      "sqlite_autoindex_canonical_show_episodes_1 (show_imdb_id=? AND video_id=?)",
-    ))).toBe(true);
+    expect(plan.results.every((row) => !row.detail.includes("canonical_show_episodes"))).toBe(true);
   });
 
   it("searches shows and movies with distinguishing metadata and artwork", async () => {
@@ -735,13 +776,14 @@ describe("Cinemeta Approved Library", () => {
     });
     const approved = await response.json<any>();
     expect(response.status).toBe(201);
-    expect(approved.programme).toMatchObject({ imdbId: "tt1234567", type: "show", showProgress: { id: "tt1234567:1:1", season: 1, episode: 1 } });
+    expect(approved.programme).toMatchObject({ imdbId: "tt1234567", type: "show",
+      assignments: [{ showProgress: { id: "tt1234567:1:1", season: 1, episode: 1 } }] });
 
     const library = await (await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/library`, { headers })).json<any>();
     expect(library.programmes).toHaveLength(1);
     expect(library.programmes[0]).toMatchObject({
-      imdbId: "tt1234567", type: "show", current: false, finished: false,
-      showProgress: { id: "tt1234567:1:1", season: 1, episode: 1, title: "First" },
+      imdbId: "tt1234567", type: "show", current: true, finished: false,
+      assignments: [{ showProgress: { id: "tt1234567:1:1", season: 1, episode: 1, title: "First" } }],
     });
     expect(library.programmes[0]).not.toHaveProperty("episodes");
     expect(library.programmes[0]).not.toHaveProperty("description");
@@ -775,8 +817,10 @@ describe("Cinemeta Approved Library", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM approved_programmes").first()).toMatchObject({ count: 2 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM show_episodes").first()).toMatchObject({ count: 4 });
 
-    await tvChannelSchedule(env.DB, first.householdId, "first-household-seed");
-    const secondSchedule = await tvChannelSchedule(env.DB, second.householdId, "second-household-seed");
+    const firstTvChannelId = await defaultChannelId(first, "tv");
+    const secondTvChannelId = await defaultChannelId(second, "tv");
+    await tvChannelSchedule(env.DB, first.householdId, firstTvChannelId, "first-household-seed");
+    const secondSchedule = await tvChannelSchedule(env.DB, second.householdId, secondTvChannelId, "second-household-seed");
     expect(secondSchedule[0]).toMatchObject({
       programmeId: secondProgrammeId,
       showTitle: "The Example",
@@ -797,14 +841,14 @@ describe("Cinemeta Approved Library", () => {
       programme: {
         id: secondProgrammeId,
         title: "The Example",
-        showProgress: { id: "tt1234567:1:2" },
+        assignments: [{ showProgress: { id: "tt1234567:1:2" } }],
         episodes: [
           { id: "tt1234567:1:1", title: "First" },
           { id: "tt1234567:1:2", title: "Second" },
         ],
       },
     });
-    expect(await tvChannelSchedule(env.DB, second.householdId, "second-household-seed"))
+    expect(await tvChannelSchedule(env.DB, second.householdId, secondTvChannelId, "second-household-seed"))
       .toEqual(secondSchedule);
   });
 
@@ -859,7 +903,7 @@ describe("Cinemeta Approved Library", () => {
       method: "POST", headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ type: "show", imdbId: "tt1234567", startingEpisodeId: "tt1234567:1:2" }),
     });
-    expect(await accepted.json<any>()).toMatchObject({ programme: { showProgress: { id: "tt1234567:1:2" } } });
+    expect(await accepted.json<any>()).toMatchObject({ programme: { assignments: [{ showProgress: { id: "tt1234567:1:2" } }] } });
   });
 
   it("approves a movie once and reports a duplicate without another Cinemeta request", async () => {
@@ -930,8 +974,8 @@ describe("TV Channel client-side stream resolution", () => {
     expect(stream.status).toBe(200);
     expect(stream.headers.get("cache-control")).toBe("no-store");
     expect(await stream.json()).toEqual({ streams: [] });
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
-    expect(await env.DB.prepare("SELECT video_id FROM current_programmes WHERE channel = 'tv'").first()).toMatchObject({ video_id: canonicalEpisodeId });
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments").first()).toMatchObject({ next_video_id: canonicalEpisodeId });
+    expect(await env.DB.prepare("SELECT video_id FROM current_programmes").first()).toMatchObject({ video_id: canonicalEpisodeId });
   });
 
   it("returns exactly one cached first-party stream and reuses its D1 selection", async () => {
@@ -1198,6 +1242,7 @@ describe("TV Channel client-side stream resolution", () => {
 describe("rolling TV Channel Schedule", () => {
   async function arrangeShows(showCount: number, episodeCount = 30) {
     const created = await create();
+    const channelId = await defaultChannelId(created, "tv");
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     for (let show = 1; show <= showCount; show += 1) {
@@ -1212,11 +1257,12 @@ describe("rolling TV Channel Schedule", () => {
           VALUES (?, ?, 1, ?, ?, ?)`)
           .bind(programmeId, `tt900000${show}:1:${episode}`, episode, `Episode ${episode}`, now));
       }
-      statements.push(env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)")
-        .bind(programmeId, `tt900000${show}:1:1`));
+      statements.push(env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(channelId, programmeId, `tt900000${show}:1:1`, `${now}-${show}`));
     }
     await env.DB.batch(statements);
-    return { created, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
+    return { created, channelId, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
   }
 
   async function metadata(base: string) {
@@ -1231,8 +1277,8 @@ describe("rolling TV Channel Schedule", () => {
   }
 
   it("snapshots a configurable Preparation Run, prevents overlap, and stops unfinished work", async () => {
-    const { created } = await arrangeShows(2);
-    const schedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const { created, channelId } = await arrangeShows(2);
+    const schedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
     const now = new Date("2026-08-01T10:00:00.000Z");
     const run = await createTvPreparationRun(env.DB, created.householdId, schedule, 3, 8, now);
 
@@ -1265,22 +1311,53 @@ describe("rolling TV Channel Schedule", () => {
     expect(manualStart.status).toBe(404);
   });
 
-  it("automatically snapshots twenty programmes and replaces the run after the schedule advances", async () => {
-    const { created } = await arrangeShows(2);
+  it("automatically snapshots five programmes and replaces the run after the schedule advances", async () => {
+    const { created, channelId } = await arrangeShows(2);
     await storeTorBoxCredential(env.DB, created.householdId, "household-torbox-token", env.CONFIG_SECRET);
-    const firstSchedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const firstSchedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
     const firstRun = await ensureAutomaticTvPreparation(env, created.householdId, firstSchedule, new Date("2026-08-01T10:00:00.000Z"));
 
-    expect(firstRun).toMatchObject({ status: "queued", requestedCount: 20 });
-    expect(firstRun?.items.map((item) => item.videoId)).toEqual(firstSchedule.map((item) => item.episode.id));
+    expect(firstRun).toMatchObject({ status: "queued", requestedCount: 5 });
+    expect(firstRun?.items.map((item) => item.videoId)).toEqual(firstSchedule.slice(0, 5).map((item) => item.episode.id));
 
-    await requestTvProgramme(env.DB, created.householdId, firstSchedule[1].episode.id, "deterministic-test-seed");
-    const secondSchedule = await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    await requestTvProgramme(env.DB, created.householdId, channelId, firstSchedule[1].episode.id, "deterministic-test-seed");
+    const secondSchedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
     const secondRun = await ensureAutomaticTvPreparation(env, created.householdId, secondSchedule, new Date("2026-08-01T10:01:00.000Z"));
 
     expect(secondRun?.id).not.toBe(firstRun?.id);
-    expect(secondRun?.items.map((item) => item.videoId)).toEqual(secondSchedule.map((item) => item.episode.id));
+    expect(secondRun?.items.map((item) => item.videoId)).toEqual(secondSchedule.slice(0, 5).map((item) => item.episode.id));
     expect(await tvPreparationRun(env.DB, created.householdId, firstRun!.id)).toMatchObject({ status: "cancelled" });
+  });
+
+  it("keeps one breadth-first run while TV Channels sit at different schedule positions", async () => {
+    const { created, channelId } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-torbox-token", env.CONFIG_SECRET);
+    const secondChannel = await createChannel(env.DB, created.householdId, "tv", "Second");
+    await env.DB.prepare(`INSERT INTO channel_assignments (channel_id, programme_id, next_video_id, created_at)
+      SELECT ?, programme_id, next_video_id, created_at FROM channel_assignments WHERE channel_id = ?`)
+      .bind(secondChannel.id, channelId).run();
+
+    const schedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
+    await requestTvProgramme(env.DB, created.householdId, channelId, schedule[3].episode.id, "deterministic-test-seed");
+
+    const first = await ensureAutomaticTvPreparation(env, created.householdId, undefined, new Date("2026-08-01T10:00:00.000Z"));
+    expect(first?.items).toHaveLength(10);
+    // Every Channel's Current Programme is prepared before any Channel's second programme.
+    expect(first?.items.map((item) => item.channelId))
+      .toEqual([channelId, secondChannel.id, channelId, secondChannel.id, channelId,
+        secondChannel.id, channelId, secondChannel.id, channelId, secondChannel.id]);
+
+    const second = await ensureAutomaticTvPreparation(env, created.householdId, undefined, new Date("2026-08-01T10:01:00.000Z"));
+    expect(second?.id).toBe(first?.id);
+
+    const headers = await parentHeaders(created);
+    const scoped = await (await SELF.fetch(
+      `https://kids.test/api/households/${secretFrom(created)}/channels/${secondChannel.id}/tv-preparation`,
+      { headers },
+    )).json<any>();
+    expect(scoped.run.items).toHaveLength(5);
+    expect(scoped.run.requestedCount).toBe(5);
+    expect(scoped.run.counts.queued).toBe(5);
   });
 
   it("alternates eligible shows deterministically and inspects twenty programmes without advancing Show Progress", async () => {
@@ -1295,7 +1372,7 @@ describe("rolling TV Channel Schedule", () => {
 
     const showIds = first.meta.videos.map((video: any) => video.id.split(":")[0]);
     for (let index = 1; index < showIds.length; index += 1) expect(showIds[index]).not.toBe(showIds[index - 1]);
-    const progress = await env.DB.prepare("SELECT next_video_id FROM show_progress ORDER BY programme_id").all<{ next_video_id: string }>();
+    const progress = await env.DB.prepare("SELECT next_video_id FROM channel_assignments ORDER BY programme_id").all<{ next_video_id: string }>();
     expect(progress.results.map((row) => row.next_video_id)).toEqual([
       "tt9000001:1:1", "tt9000002:1:1", "tt9000003:1:1",
     ]);
@@ -1310,8 +1387,8 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("bounds episode catalogue queries to the persisted schedule length", async () => {
-    const { created } = await arrangeShows(1, 250);
-    await tvChannelSchedule(env.DB, created.householdId, "deterministic-test-seed");
+    const { created, channelId } = await arrangeShows(1, 250);
+    await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
     const prepared: string[] = [];
     const instrumented = new Proxy(env.DB, {
       get(target, property) {
@@ -1329,6 +1406,7 @@ describe("rolling TV Channel Schedule", () => {
     const schedule = await refreshTvChannelSchedule(
       instrumented,
       created.householdId,
+      channelId,
       false,
       "deterministic-test-seed",
     );
@@ -1396,7 +1474,7 @@ describe("rolling TV Channel Schedule", () => {
 
     const after = await metadata(base);
     expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?")
       .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
     const unavailable = await env.DB.prepare(`SELECT video_id, unavailable_at, retry_at
       FROM unavailable_episodes WHERE household_id = ?`)
@@ -1429,7 +1507,7 @@ describe("rolling TV Channel Schedule", () => {
       }],
     });
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(unavailableId);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress").first())
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments").first())
       .toMatchObject({ next_video_id: unavailableId });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
       .toMatchObject({ count: 0 });
@@ -1454,9 +1532,9 @@ describe("rolling TV Channel Schedule", () => {
     await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
 
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(`${currentImdb}:1:2`);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?")
       .bind(currentProgramme).first()).toMatchObject({ next_video_id: `${currentImdb}:1:2` });
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?")
       .bind(unavailableProgramme).first()).toMatchObject({ next_video_id: unavailableId });
   });
 
@@ -1492,7 +1570,7 @@ describe("rolling TV Channel Schedule", () => {
     const futureShowOne = after.meta.videos.slice(1).filter((video: any) => video.id.startsWith("tt9000001:"));
     expect(futureShowOne.length).toBeGreaterThan(0);
     expect(futureShowOne.every((video: any) => Number(video.id.split(":")[2]) >= 5)).toBe(true);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = 'programme-1'").first())
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = 'programme-1'").first())
       .toMatchObject({ next_video_id: "tt9000001:1:5" });
   });
 
@@ -1511,7 +1589,7 @@ describe("rolling TV Channel Schedule", () => {
     const undo = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-schedule/undo`, { method: "POST", headers });
     expect(undo.status).toBe(200);
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(before.meta.videos[0].id);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?").bind(otherShow).first())
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?").bind(otherShow).first())
       .toMatchObject({ next_video_id: `${otherImdb}:1:6` });
     expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-schedule/undo`, { method: "POST", headers })).status).toBe(409);
   });
@@ -1524,7 +1602,8 @@ describe("rolling TV Channel Schedule", () => {
     const target = before.meta.videos[lastShowOne + 1];
     expect(target).toBeTruthy();
     await SELF.fetch(`${base}/stream/series/${encodeURIComponent(target.id)}.json`);
-    expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = 'programme-1'").first()).toBeNull();
+    expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = 'programme-1'").first())
+      .toMatchObject({ next_video_id: null });
     const exhausted = await metadata(base);
     expect(exhausted.meta.videos.slice(1).every((video: any) => !video.id.startsWith("tt9000001:"))).toBe(true);
 
@@ -1553,7 +1632,7 @@ describe("rolling TV Channel Schedule", () => {
         .filter((id: string) => id.startsWith(`tt900000${show}:`))
         .map((id: string) => Number(id.split(":")[2]));
       const expected = skippedEpisodes.length === 0 ? 1 : Math.max(...skippedEpisodes) + 1;
-      expect(await env.DB.prepare("SELECT next_video_id FROM show_progress WHERE programme_id = ?")
+      expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?")
         .bind(`programme-${show}`).first()).toMatchObject({ next_video_id: `tt900000${show}:1:${expected}` });
     }
   });
@@ -1562,6 +1641,8 @@ describe("rolling TV Channel Schedule", () => {
 describe("Approved Library changes while Channels are active", () => {
   async function arrangeActiveChannels() {
     const created = await create();
+    const tvChannelId = await defaultChannelId(created, "tv");
+    const movieChannelId = await defaultChannelId(created, "movie");
     const now = new Date().toISOString();
     const statements: D1PreparedStatement[] = [];
     for (let show = 1; show <= 2; show += 1) {
@@ -1574,14 +1655,18 @@ describe("Approved Library changes while Channels are active", () => {
           (programme_id, video_id, season, episode, title, released_at) VALUES (?, ?, 1, ?, ?, ?)`)
           .bind(`active-show-${show}`, `tt700000${show}:1:${episode}`, episode, `Episode ${episode}`, now));
       }
-      statements.push(env.DB.prepare("INSERT INTO show_progress (programme_id, next_video_id) VALUES (?, ?)")
-        .bind(`active-show-${show}`, `tt700000${show}:1:1`));
+      statements.push(env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
+        .bind(tvChannelId, `active-show-${show}`, `tt700000${show}:1:1`, `${now}-${show}`));
     }
     for (let movie = 1; movie <= 3; movie += 1) {
       statements.push(env.DB.prepare(`INSERT INTO approved_programmes
         (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
         VALUES (?, ?, ?, 'movie', ?, '[]', ?)`)
         .bind(`active-movie-${movie}`, created.householdId, `tt600000${movie}`, `Active Movie ${movie}`, `${now}-${movie}`));
+      statements.push(env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, created_at) VALUES (?, ?, ?)`)
+        .bind(movieChannelId, `active-movie-${movie}`, `${now}-${movie}`));
     }
     await env.DB.batch(statements);
 
@@ -1595,17 +1680,18 @@ describe("Approved Library changes while Channels are active", () => {
     const movieUrl = `${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`;
     expect((await (await SELF.fetch(tvUrl)).json<any>()).meta).not.toBeNull();
     expect((await (await SELF.fetch(movieUrl)).json<any>()).meta).not.toBeNull();
-    return { created, secret, headers, base, tvUrl, movieUrl };
+    return { created, tvChannelId, movieChannelId, secret, headers, base, tvUrl, movieUrl };
   }
 
   it("pauses, resumes, regenerates, and removes shows without falsely advancing Show Progress", async () => {
-    const { created, secret, headers, base, tvUrl } = await arrangeActiveChannels();
+    const { created, tvChannelId, secret, headers, base, tvUrl } = await arrangeActiveChannels();
     const initial = await (await SELF.fetch(tvUrl)).json<any>();
     const initialVideoId = initial.meta.behaviorHints.defaultVideoId as string;
-    const current = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'tv'")
-      .bind(created.householdId).first<{ programme_id: string }>();
+    const current = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel_id = ?")
+      .bind(created.householdId, tvChannelId).first<{ programme_id: string }>();
     expect(current).toBeTruthy();
-    const progressBefore = await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
+    const progressBefore = await env.DB.prepare("SELECT programme_id, next_video_id FROM channel_assignments WHERE channel_id = ? ORDER BY programme_id")
+      .bind(tvChannelId)
       .all<{ programme_id: string; next_video_id: string }>();
 
     const pause = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${current!.programme_id}`, {
@@ -1616,32 +1702,34 @@ describe("Approved Library changes while Channels are active", () => {
     const whilePaused = await (await SELF.fetch(tvUrl)).json<any>();
     expect(whilePaused.meta.behaviorHints.defaultVideoId).not.toBe(initialVideoId);
     expect(whilePaused.meta.videos.every((video: any) => !video.id.startsWith(initialVideoId.split(":")[0]))).toBe(true);
-    expect(await env.DB.prepare("SELECT paused_at FROM approved_programmes WHERE id = ?").bind(current!.programme_id).first<string>("paused_at"))
+    expect(await env.DB.prepare("SELECT paused_at FROM channel_assignments WHERE channel_id = ? AND programme_id = ?")
+      .bind(tvChannelId, current!.programme_id).first<string>("paused_at"))
       .toBeTruthy();
 
     const resume = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${current!.programme_id}`, {
       method: "PATCH", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ paused: false }),
     });
     expect(resume.status).toBe(200);
-    expect(await env.DB.prepare("SELECT paused_at FROM approved_programmes WHERE id = ?").bind(current!.programme_id).first<string>("paused_at"))
+    expect(await env.DB.prepare("SELECT paused_at FROM channel_assignments WHERE channel_id = ? AND programme_id = ?")
+      .bind(tvChannelId, current!.programme_id).first<string>("paused_at"))
       .toBeNull();
-    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
-      .all()).results).toEqual(progressBefore.results);
+    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM channel_assignments WHERE channel_id = ? ORDER BY programme_id")
+      .bind(tvChannelId).all()).results).toEqual(progressBefore.results);
 
     const beforeRegenerate = await (await SELF.fetch(tvUrl)).json<any>();
-    const seedBefore = await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel = 'tv'")
-      .bind(created.householdId).first<string>("selection_seed");
+    const seedBefore = await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel_id = ?")
+      .bind(created.householdId, tvChannelId).first<string>("selection_seed");
     const regenerate = await SELF.fetch(`https://kids.test/api/households/${secret}/tv-schedule/regenerate`, { method: "POST", headers });
     expect(regenerate.status).toBe(200);
     const afterRegenerate = await (await SELF.fetch(tvUrl)).json<any>();
     expect(afterRegenerate.meta.behaviorHints.defaultVideoId).toBe(beforeRegenerate.meta.behaviorHints.defaultVideoId);
-    expect(await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel = 'tv'")
-      .bind(created.householdId).first<string>("selection_seed")).not.toBe(seedBefore);
-    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM show_progress ORDER BY programme_id")
-      .all()).results).toEqual(progressBefore.results);
+    expect(await env.DB.prepare("SELECT selection_seed FROM channel_state WHERE household_id = ? AND channel_id = ?")
+      .bind(created.householdId, tvChannelId).first<string>("selection_seed")).not.toBe(seedBefore);
+    expect((await env.DB.prepare("SELECT programme_id, next_video_id FROM channel_assignments WHERE channel_id = ? ORDER BY programme_id")
+      .bind(tvChannelId).all()).results).toEqual(progressBefore.results);
 
-    const currentProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'tv'")
-      .bind(created.householdId).first<string>("programme_id");
+    const currentProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel_id = ?")
+      .bind(created.householdId, tvChannelId).first<string>("programme_id");
     const futureProgrammeId = currentProgrammeId === "active-show-1" ? "active-show-2" : "active-show-1";
     expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${futureProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
     const oneShow = await (await SELF.fetch(tvUrl)).json<any>();
@@ -1652,16 +1740,16 @@ describe("Approved Library changes while Channels are active", () => {
 
     const removedVideoId = oneShow.meta.behaviorHints.defaultVideoId;
     expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${currentProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
-    expect((await (await SELF.fetch(tvUrl)).json<any>()).meta).toBeNull();
+    expect((await (await SELF.fetch(tvUrl)).json<any>()).meta.videos).toEqual([]);
     expect((await SELF.fetch(`${base}/stream/series/${encodeURIComponent(removedVideoId)}.json`)).status).toBe(200);
   });
 
   it("removes movies from the remaining rotation and keeps one-item and empty Channel states valid", async () => {
-    const { created, secret, headers, movieUrl } = await arrangeActiveChannels();
+    const { created, movieChannelId, secret, headers, movieUrl } = await arrangeActiveChannels();
     const before = await (await SELF.fetch(movieUrl)).json<any>();
     const removedVideoId = before.meta.behaviorHints.defaultVideoId;
-    const removedProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel = 'movie'")
-      .bind(created.householdId).first<string>("programme_id");
+    const removedProgrammeId = await env.DB.prepare("SELECT programme_id FROM current_programmes WHERE household_id = ? AND channel_id = ?")
+      .bind(created.householdId, movieChannelId).first<string>("programme_id");
 
     expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${removedProgrammeId}`, { method: "DELETE", headers })).status).toBe(200);
     const after = await (await SELF.fetch(movieUrl)).json<any>();
@@ -1676,7 +1764,7 @@ describe("Approved Library changes while Channels are active", () => {
     expect(onlyMovie.meta).not.toBeNull();
 
     expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${remaining.results[1].id}`, { method: "DELETE", headers })).status).toBe(200);
-    expect((await (await SELF.fetch(movieUrl)).json<any>()).meta).toBeNull();
+    expect((await (await SELF.fetch(movieUrl)).json<any>()).meta.videos).toEqual([]);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_channel_state WHERE household_id = ?")
       .bind(created.householdId).first()).toMatchObject({ count: 0 });
   });
@@ -1685,13 +1773,22 @@ describe("Approved Library changes while Channels are active", () => {
 describe("Movie Channel rotation and sign-off", () => {
   async function arrangeMovies(count = 3) {
     const created = await create();
+    const channelId = await defaultChannelId(created, "movie");
     const now = new Date().toISOString();
-    await env.DB.batch(Array.from({ length: count }, (_, index) => env.DB.prepare(`INSERT INTO approved_programmes
-      (id, household_id, imdb_id, content_type, title, description, poster, genres_json, approved_at)
-      VALUES (?, ?, ?, 'movie', ?, ?, ?, '[]', ?)`)
-      .bind(`movie-${index + 1}`, created.householdId, `tt800000${index + 1}`, `Movie ${index + 1}`,
-        `Approved movie ${index + 1}.`, `https://images.example/movie-${index + 1}.jpg`, `${now}-${index}`)));
-    return { created, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
+    const statements: D1PreparedStatement[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const programmeId = `movie-${index + 1}`;
+      statements.push(env.DB.prepare(`INSERT INTO approved_programmes
+        (id, household_id, imdb_id, content_type, title, description, poster, genres_json, approved_at)
+        VALUES (?, ?, ?, 'movie', ?, ?, ?, '[]', ?)`)
+        .bind(programmeId, created.householdId, `tt800000${index + 1}`, `Movie ${index + 1}`,
+          `Approved movie ${index + 1}.`, `https://images.example/movie-${index + 1}.jpg`, `${now}-${index}`));
+      statements.push(env.DB.prepare(`INSERT INTO channel_assignments
+        (channel_id, programme_id, created_at) VALUES (?, ?, ?)`)
+        .bind(channelId, programmeId, `${now}-${index}`));
+    }
+    await env.DB.batch(statements);
+    return { created, channelId, base: created.manifestUrl.replace(/\/manifest\.json$/, "") };
   }
 
   async function metadata(base: string) {
@@ -1730,7 +1827,7 @@ describe("Movie Channel rotation and sign-off", () => {
         title: "Kids Channels sign-off",
         episode: 2,
         streams: [{
-          url: expect.stringMatching(/^https:\/\/kids\.test\/addons\/[^/]+\/media\/movie-sign-off\/\d+\/\d+\.mp4$/),
+          url: expect.stringMatching(/^https:\/\/kids\.test\/addons\/[^/]+\/media\/movie-sign-off\/[0-9a-f-]+\/\d+\/\d+\.mp4$/),
           behaviorHints: { filename: "kids-channels-sign-off.mp4" },
         }],
       });
@@ -1745,12 +1842,15 @@ describe("Movie Channel rotation and sign-off", () => {
   });
 
   it("adds a newly approved movie to the unplayed rotation before any movie repeats", async () => {
-    const { created, base } = await arrangeMovies(2);
+    const { created, channelId, base } = await arrangeMovies(2);
     const first = await metadata(base);
     const now = new Date().toISOString();
     await env.DB.prepare(`INSERT INTO approved_programmes
       (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
       VALUES ('movie-3', ?, 'tt8000003', 'movie', 'Movie 3', '[]', ?)`).bind(created.householdId, now).run();
+    await env.DB.prepare(`INSERT INTO channel_assignments
+      (channel_id, programme_id, created_at) VALUES (?, 'movie-3', ?)`)
+      .bind(channelId, now).run();
 
     await Promise.all(Array.from({ length: 6 }, () => metadata(base)));
     const insertedRotation = await env.DB.prepare(`SELECT COUNT(*) AS count,
@@ -1771,8 +1871,8 @@ describe("Movie Channel rotation and sign-off", () => {
   });
 
   it("adds one movie with bounded rotation mutations regardless of library size", async () => {
-    const { created } = await arrangeMovies(100);
-    await reconcileMovieChannel(env.DB, created.householdId, "bounded-rotation-seed");
+    const { created, channelId } = await arrangeMovies(100);
+    await reconcileMovieChannel(env.DB, created.householdId, channelId, "bounded-rotation-seed");
 
     const before = await env.DB.prepare(`SELECT position, programme_id FROM movie_rotation
       WHERE household_id = ? AND cycle = 0 ORDER BY position`).bind(created.householdId)
@@ -1781,6 +1881,9 @@ describe("Movie Channel rotation and sign-off", () => {
     await env.DB.prepare(`INSERT INTO approved_programmes
       (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
       VALUES ('movie-101', ?, 'tt8000101', 'movie', 'Movie 101', '[]', ?)`).bind(created.householdId, now).run();
+    await env.DB.prepare(`INSERT INTO channel_assignments
+      (channel_id, programme_id, created_at) VALUES (?, 'movie-101', ?)`)
+      .bind(channelId, now).run();
 
     const mutations: string[] = [];
     const instrumented = new Proxy(env.DB, {
@@ -1796,7 +1899,7 @@ describe("Movie Channel rotation and sign-off", () => {
       },
     });
 
-    await reconcileMovieChannel(instrumented, created.householdId, "bounded-rotation-seed");
+    await reconcileMovieChannel(instrumented, created.householdId, channelId, "bounded-rotation-seed");
 
     expect(mutations).toHaveLength(3);
     expect(mutations.some((query) => query.startsWith("DELETE FROM movie_rotation"))).toBe(false);
@@ -1947,24 +2050,28 @@ describe("Household deletion", () => {
     expect(wrongPin.status).toBe(401);
 
     const householdId = created.householdId;
+    const tvChannelId = await defaultChannelId(created, "tv");
+    const movieChannelId = await defaultChannelId(created, "movie");
     await env.DB.prepare(`INSERT INTO approved_programmes
       (id, household_id, imdb_id, content_type, title, genres_json, approved_at)
       VALUES ('programme-delete', ?, 'tt1234567', 'show', 'Delete me', '[]', 'now')`).bind(householdId).run();
     await env.DB.prepare("INSERT INTO show_episodes VALUES ('programme-delete', 'tt1234567:1:1', 1, 1, 'Pilot', 'now', NULL)").run();
-    await env.DB.prepare("INSERT INTO show_progress VALUES ('programme-delete', 'tt1234567:1:1')").run();
+    await env.DB.prepare(`INSERT INTO channel_assignments
+      VALUES (?, 'programme-delete', 'tt1234567:1:1', NULL, 'now')`).bind(tvChannelId).run();
     await env.DB.prepare(`INSERT INTO unavailable_episodes
       VALUES (?, 'programme-delete', 'tt1234567:1:1', 'now', 'later')`).bind(householdId).run();
-    await env.DB.prepare("INSERT INTO current_programmes VALUES (?, 'tv', 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO channel_state VALUES (?, 'tv', 0, 'seed', 'now')").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO channel_schedule VALUES (?, 'tv', 0, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO channel_advancements VALUES (?, 'tv', 0, 1, 'owner', 'now')").bind(householdId).run();
+    await env.DB.prepare("INSERT INTO current_programmes VALUES (?, ?, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId, tvChannelId).run();
+    await env.DB.prepare("INSERT INTO channel_state VALUES (?, ?, 0, 'seed', 'now')").bind(householdId, tvChannelId).run();
+    await env.DB.prepare("INSERT INTO channel_schedule VALUES (?, ?, 0, 'programme-delete', 'tt1234567:1:1', 'now')").bind(householdId, tvChannelId).run();
+    await env.DB.prepare("INSERT INTO channel_advancements VALUES (?, ?, 0, 1, 'owner', 'now')").bind(householdId, tvChannelId).run();
     await env.DB.prepare(`INSERT INTO tv_advancement_history VALUES
-      ('history-delete', ?, 0, 1, 'programme-delete', 'tt1234567:1:1', 'programme-delete', 'tt1234567:1:1', '{}', '{}', 'now', NULL, NULL)`).bind(householdId).run();
-    await env.DB.prepare("INSERT INTO movie_channel_state VALUES (?, 1, 0, 'seed', 'now', 0)").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO movie_rotation VALUES (?, 1, 0, 'programme-delete', NULL)").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO movie_advancements VALUES (?, 1, 0, 'owner', 'now')").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO movie_channel_mutations VALUES (?, 0, 'owner', 'now')").bind(householdId).run();
-    await env.DB.prepare("INSERT INTO movie_playback_history VALUES ('movie-history-delete', ?, 'programme-delete', 'tt1234567', 'Delete me', 1, 0, 'now')").bind(householdId).run();
+      ('history-delete', ?, ?, 0, 1, 'programme-delete', 'tt1234567:1:1', 'programme-delete', 'tt1234567:1:1', '{}', '{}', 'now', NULL, NULL)`)
+      .bind(householdId, tvChannelId).run();
+    await env.DB.prepare("INSERT INTO movie_channel_state VALUES (?, ?, 1, 0, 'seed', 'now', 0)").bind(householdId, movieChannelId).run();
+    await env.DB.prepare("INSERT INTO movie_rotation VALUES (?, ?, 1, 0, 'programme-delete', NULL)").bind(householdId, movieChannelId).run();
+    await env.DB.prepare("INSERT INTO movie_advancements VALUES (?, ?, 1, 0, 'owner', 'now')").bind(householdId, movieChannelId).run();
+    await env.DB.prepare("INSERT INTO movie_channel_mutations VALUES (?, ?, 0, 'owner', 'now')").bind(householdId, movieChannelId).run();
+    await env.DB.prepare("INSERT INTO movie_playback_history VALUES ('movie-history-delete', ?, ?, 'programme-delete', 'tt1234567', 'Delete me', 1, 0, 'now')").bind(householdId, movieChannelId).run();
 
     const deleted = await SELF.fetch(`https://kids.test/api/households/${secret}`, {
       method: "DELETE", headers, body: JSON.stringify({ currentPin: "123456", confirmation: "DELETE" }),
@@ -1978,7 +2085,7 @@ describe("Household deletion", () => {
     expect(invalidSession.status).toBe(401);
     expect(await invalidSession.json()).toEqual({ error: "Parent authentication is required." });
 
-    for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "show_progress",
+    for (const table of ["households", "pin_attempts", "approved_programmes", "show_episodes", "channels", "channel_assignments",
       "current_programmes", "channel_state", "channel_schedule", "channel_advancements", "tv_advancement_history",
       "movie_channel_state", "movie_rotation", "movie_advancements", "movie_channel_mutations", "movie_playback_history",
       "stream_selections", "stream_candidate_failures", "unavailable_episodes"]) {
@@ -2030,24 +2137,29 @@ describe("scheduled Channel state retention", () => {
       env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
         VALUES ('retention-b', 'retention-secret-b', 'salt', 'hash', ?)`),
     ].map((statement) => statement.bind(now.toISOString())));
-    await env.DB.prepare("INSERT INTO channel_state VALUES ('retention-a', 'tv', 99, 'seed', ?)")
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO channels VALUES ('retention-tv-a', 'retention-a', 'tv', 'TV', 'tv', ?)").bind(now.toISOString()),
+      env.DB.prepare("INSERT INTO channels VALUES ('retention-movie-a', 'retention-a', 'movie', 'Movies', 'movie', ?)").bind(now.toISOString()),
+      env.DB.prepare("INSERT INTO channels VALUES ('retention-movie-b', 'retention-b', 'movie', 'Movies', 'movie', ?)").bind(now.toISOString()),
+    ]);
+    await env.DB.prepare("INSERT INTO channel_state VALUES ('retention-a', 'retention-tv-a', 99, 'seed', ?)")
       .bind(expired).run();
-    await env.DB.prepare("INSERT INTO movie_channel_state VALUES ('retention-a', 2, 0, 'seed', ?, 0)")
+    await env.DB.prepare("INSERT INTO movie_channel_state VALUES ('retention-a', 'retention-movie-a', 2, 0, 'seed', ?, 0)")
       .bind(expired).run();
 
     const statements: D1PreparedStatement[] = [
-      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 1, 2, 'expired-tv-claim', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 2, 3, 'active-tv-claim', ?)").bind(active),
-      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'tv', 98, 99, 'undo-history', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 0, 0, 'expired-movie-claim', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 2, 0, 'active-movie-claim', ?)").bind(active),
-      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 0, 'expired-mutation', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 1, 'active-mutation', ?)").bind(active),
-      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-b', 0, 'other-household-expired', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO tv_advancement_history VALUES ('undo-history', 'retention-a', 98, 99, 'show', 'episode-98', 'show', 'episode-99', '{}', '{}', ?, NULL, NULL)").bind("2026-07-01T00:00:00.000Z"),
-      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 0, 0, 'movie-old-0', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 1, 0, 'movie-old-1', ?)").bind(expired),
-      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 2, 0, 'movie-current', NULL)"),
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'retention-tv-a', 1, 2, 'expired-tv-claim', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'retention-tv-a', 2, 3, 'active-tv-claim', ?)").bind(active),
+      env.DB.prepare("INSERT INTO channel_advancements VALUES ('retention-a', 'retention-tv-a', 98, 99, 'undo-history', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 'retention-movie-a', 0, 0, 'expired-movie-claim', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_advancements VALUES ('retention-a', 'retention-movie-a', 2, 0, 'active-movie-claim', ?)").bind(active),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 'retention-movie-a', 0, 'expired-mutation', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-a', 'retention-movie-a', 1, 'active-mutation', ?)").bind(active),
+      env.DB.prepare("INSERT INTO movie_channel_mutations VALUES ('retention-b', 'retention-movie-b', 0, 'other-household-expired', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO tv_advancement_history VALUES ('undo-history', 'retention-a', 'retention-tv-a', 98, 99, 'show', 'episode-98', 'show', 'episode-99', '{}', '{}', ?, NULL, NULL)").bind("2026-07-01T00:00:00.000Z"),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 'retention-movie-a', 0, 0, 'movie-old-0', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 'retention-movie-a', 1, 0, 'movie-old-1', ?)").bind(expired),
+      env.DB.prepare("INSERT INTO movie_rotation VALUES ('retention-a', 'retention-movie-a', 2, 0, 'movie-current', NULL)"),
       env.DB.prepare(`INSERT INTO stream_selections
         (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
          quality, seeders, selected_at, stale_at, download_pending, last_progress)
@@ -2072,10 +2184,10 @@ describe("scheduled Channel state retention", () => {
     for (let index = 0; index < 11; index += 1) {
       const timestamp = new Date(Date.UTC(2026, 7, 1, 0, index)).toISOString();
       statements.push(env.DB.prepare(`INSERT INTO tv_advancement_history VALUES
-        (?, 'retention-a', ?, ?, 'show', ?, 'show', ?, '{}', '{}', ?, NULL, NULL)`)
+        (?, 'retention-a', 'retention-tv-a', ?, ?, 'show', ?, 'show', ?, '{}', '{}', ?, NULL, NULL)`)
         .bind(`tv-history-${index}`, index, index + 1, `episode-${index}`, `episode-${index + 1}`, timestamp));
       statements.push(env.DB.prepare(`INSERT INTO movie_playback_history VALUES
-        (?, 'retention-a', 'movie', 'tt1234567', 'Movie', 0, ?, ?)`)
+        (?, 'retention-a', 'retention-movie-a', 'movie', 'tt1234567', 'Movie', 0, ?, ?)`)
         .bind(`movie-history-${index}`, index, timestamp));
     }
     for (let index = 0; index < 12; index += 1) {
@@ -2110,9 +2222,9 @@ describe("scheduled Channel state retention", () => {
       results: [{ owner_token: "active-tv-claim" }, { owner_token: "undo-history" }],
     });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_advancement_history").first())
-      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold + 1 });
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerChannel + 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_playback_history").first())
-      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerHousehold });
+      .toMatchObject({ count: CHANNEL_RETENTION.playbackHistoryPerChannel });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM tv_preparation_runs").first())
       .toMatchObject({ count: CHANNEL_RETENTION.preparationRunsPerHousehold + 1 });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation").first()).toMatchObject({ count: 1 });
@@ -2130,6 +2242,144 @@ describe("scheduled Channel state retention", () => {
 });
 
 describe("Stremio protocol", () => {
+  it("provisions defaults, permits duplicate names, enforces five per type, and exposes explicit assignments", async () => {
+    const created = await create();
+    const secret = secretFrom(created);
+    const unlock = await SELF.fetch(`https://kids.test/api/households/${secret}/unlock`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pin: "123456" }),
+    });
+    const headers = { ...sessionHeaders(unlock), "content-type": "application/json" };
+    const initial = await (await SELF.fetch(`https://kids.test/api/households/${secret}/channels`, { headers })).json<any>();
+    expect(initial.channels.map((channel: any) => [channel.type, channel.name])).toEqual([
+      ["tv", "TV Channel"], ["movie", "Movie Channel"],
+    ]);
+
+    for (let index = 0; index < 4; index += 1) {
+      const response = await SELF.fetch(`https://kids.test/api/households/${secret}/channels`, {
+        method: "POST", headers, body: JSON.stringify({ type: "tv", name: "Same name" }),
+      });
+      expect(response.status).toBe(201);
+    }
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/channels`, {
+      method: "POST", headers, body: JSON.stringify({ type: "tv", name: "Sixth" }),
+    })).status).toBe(409);
+
+    const createdMovieResponse = await SELF.fetch(`https://kids.test/api/households/${secret}/channels`, {
+      method: "POST", headers, body: JSON.stringify({ type: "movie", name: "Comedy" }),
+    });
+    const comedy = (await createdMovieResponse.json<any>()).channel;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const pathname = new URL(input instanceof Request ? input.url : input.toString()).pathname;
+      if (pathname.includes("/meta/series/")) return Response.json({ meta: {
+        id: "tt6666666", imdb_id: "tt6666666", name: "Shared Show", type: "series", videos: [
+          { id: "tt6666666:1:1", season: 1, episode: 1, title: "First", released: "2024-01-01T00:00:00.000Z" },
+          { id: "tt6666666:1:2", season: 1, episode: 2, title: "Second", released: "2024-01-02T00:00:00.000Z" },
+        ],
+      } });
+      return Response.json({ meta: {
+        id: "tt5555555", imdb_id: "tt5555555", name: "Funny Movie", type: "movie", genres: ["Comedy"],
+      } });
+    });
+    const approval = await SELF.fetch(`https://kids.test/api/households/${secret}/library`, {
+      method: "POST", headers, body: JSON.stringify({ type: "movie", imdbId: "tt5555555", channelIds: [comedy.id] }),
+    });
+    expect(approval.status).toBe(201);
+    const programme = (await approval.json<any>()).programme;
+    expect(programme.assignments).toMatchObject([{ channelId: comedy.id, channelName: "Comedy" }]);
+    const comedyDetail = await (await SELF.fetch(
+      `https://kids.test/api/households/${secret}/channels/${comedy.id}`,
+      { headers },
+    )).json<any>();
+    expect(comedyDetail.deletionImpact).toEqual({
+      assignments: [{ programmeId: programme.id, title: "Funny Movie", type: "movie" }],
+      programmesLeavingHousehold: [{ programmeId: programme.id, title: "Funny Movie", type: "movie" }],
+    });
+
+    const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
+    const catalog = await (await SELF.fetch(`${base}/catalog/movie/kids-movie-channel.json`)).json<any>();
+    expect(catalog.metas.map((meta: any) => meta.name)).toEqual(["Movie Channel", "Comedy"]);
+    const defaultMeta = await (await SELF.fetch(`${base}/meta/movie/${encodeURIComponent("kids-channels:movie")}.json`)).json<any>();
+    expect(defaultMeta.meta.videos).toEqual([]);
+    const comedyMeta = await (await SELF.fetch(`${base}/meta/movie/${encodeURIComponent(`kids-channels:movie:${comedy.id}`)}.json`)).json<any>();
+    expect(comedyMeta.meta.videos[0]).toMatchObject({ id: "tt5555555", streams: [{ url: expect.stringContaining(`/play/movie/${comedy.id}/tt5555555`) }] });
+
+    const playback = await SELF.fetch(`${base}/play/movie/${comedy.id}/tt5555555`, { redirect: "manual" });
+    expect(playback.status).toBe(503);
+    expect(playback.headers.get("access-control-allow-origin")).toBe("*");
+    const unknownChannel = await SELF.fetch(`${base}/play/movie/unknown-channel/tt5555555`);
+    expect(unknownChannel.status).toBe(404);
+    expect(unknownChannel.headers.get("access-control-allow-origin")).toBe("*");
+
+    const defaultMovieId = initial.channels.find((channel: any) => channel.type === "movie").id;
+    const reassigned = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [defaultMovieId, comedy.id] }),
+    });
+    expect(reassigned.status).toBe(200);
+    expect((await reassigned.json<any>()).programme.assignments.map((assignment: any) => assignment.channelId))
+      .toEqual([defaultMovieId, comedy.id]);
+    const removedFromComedy = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [defaultMovieId] }),
+    });
+    expect(removedFromComedy.status).toBe(200);
+    expect((await SELF.fetch(`${base}/play/movie/${comedy.id}/tt5555555`)).status).toBe(404);
+    const finalRemoval = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${programme.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [] }),
+    });
+    expect(finalRemoval.status).toBe(200);
+    expect(await env.DB.prepare("SELECT id FROM approved_programmes WHERE id = ?").bind(programme.id).first()).toBeNull();
+
+    const allChannels = await (await SELF.fetch(`https://kids.test/api/households/${secret}/channels`, { headers })).json<any>();
+    const tvChannels = allChannels.channels.filter((channel: any) => channel.type === "tv");
+    const showApproval = await SELF.fetch(`https://kids.test/api/households/${secret}/library`, {
+      method: "POST", headers, body: JSON.stringify({
+        type: "show", imdbId: "tt6666666", channelIds: [tvChannels[0].id, tvChannels[1].id],
+        startingEpisodeIds: {
+          [tvChannels[0].id]: "tt6666666:1:1",
+          [tvChannels[1].id]: "tt6666666:1:2",
+        },
+      }),
+    });
+    expect(showApproval.status).toBe(201);
+    const show = (await showApproval.json<any>()).programme;
+    expect(new Map(show.assignments.map((assignment: any) => [assignment.channelId, assignment.showProgress.id])))
+      .toEqual(new Map([
+        [tvChannels[0].id, "tt6666666:1:1"], [tvChannels[1].id, "tt6666666:1:2"],
+      ]));
+    const secondTvMeta = await (await SELF.fetch(`${base}/meta/series/${encodeURIComponent(`kids-channels:tv:${tvChannels[1].id}`)}.json`)).json<any>();
+    expect(secondTvMeta.meta.videos).toHaveLength(1);
+    const scopedPlayback = await SELF.fetch(secondTvMeta.meta.videos[0].streams[0].url);
+    expect(scopedPlayback.status).toBe(200);
+    const currentByChannel = await env.DB.prepare(`SELECT channel_id, video_id FROM current_programmes
+      WHERE channel_id IN (?, ?) ORDER BY channel_id`).bind(tvChannels[0].id, tvChannels[1].id)
+      .all<{ channel_id: string; video_id: string }>();
+    expect(new Map(currentByChannel.results.map((row) => [row.channel_id, row.video_id]))).toEqual(new Map([
+      [tvChannels[0].id, "tt6666666:1:1"], [tvChannels[1].id, "tt6666666:1:2"],
+    ]));
+    expect((await SELF.fetch(`https://kids.test/api/households/${secret}/library/${show.id}/progress`, {
+      method: "PATCH", headers, body: JSON.stringify({ channelId: tvChannels[1].id, videoId: "tt6666666:1:2" }),
+    })).status).toBe(200);
+    const progress = await env.DB.prepare(`SELECT channel_id, next_video_id FROM channel_assignments
+      WHERE programme_id = ? ORDER BY channel_id`).bind(show.id).all<{ channel_id: string; next_video_id: string }>();
+    expect(new Map(progress.results.map((row) => [row.channel_id, row.next_video_id]))).toEqual(new Map([
+      [tvChannels[0].id, "tt6666666:1:1"], [tvChannels[1].id, "tt6666666:1:2"],
+    ]));
+    const removedFromSecondTv = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${show.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({ channelIds: [tvChannels[0].id] }),
+    });
+    expect(removedFromSecondTv.status).toBe(200);
+    expect((await SELF.fetch(secondTvMeta.meta.videos[0].streams[0].url)).status).toBe(404);
+    const restoredToSecondTv = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${show.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({
+        channelIds: [tvChannels[0].id, tvChannels[1].id],
+        startingEpisodeIds: { [tvChannels[1].id]: "tt6666666:1:2" },
+      }),
+    });
+    expect(restoredToSecondTv.status).toBe(200);
+    expect(await env.DB.prepare(`SELECT next_video_id FROM channel_assignments
+      WHERE channel_id = ? AND programme_id = ?`).bind(tvChannels[1].id, show.id).first<string>("next_video_id"))
+      .toBe("tt6666666:1:2");
+  });
+
   it("serves a configurable household-specific manifest", async () => {
     const created = await create();
     const response = await SELF.fetch(created.manifestUrl);

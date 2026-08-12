@@ -89,6 +89,27 @@ test("a movie can be approved in one click from the search results", async ({ pa
   expect(libraryReads).toBe(readsBeforeApproval);
 });
 
+test("multiple Movie Channels require an explicit assignment while browsing", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/movie-channel`);
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create Movie Channel" });
+  await createDialog.getByLabel("Channel name").fill("Comedy");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=1`);
+  const movie = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Example: The Movie" }) });
+  await movie.getByRole("button", { name: "Approve Example: The Movie" }).click();
+  const approvalDialog = page.getByRole("dialog", { name: "Example: The Movie" });
+  await expect(approvalDialog.getByLabel("Movie Channel")).not.toBeChecked();
+  await expect(approvalDialog.getByLabel("Comedy")).not.toBeChecked();
+  await expect(approvalDialog.getByRole("button", { name: "Approve movie" })).toBeDisabled();
+  await approvalDialog.getByLabel("Comedy").check();
+  await approvalDialog.getByRole("button", { name: "Approve movie" }).click();
+  await expect(approvalDialog).toBeHidden();
+  await expect(page.getByText("added to the Approved Library.")).toBeVisible();
+});
+
 test("a show can be approved from a non-default released episode without losing search context", async ({ page }) => {
   await page.route("https://placehold.co/**", (route) => route.abort());
   const parentUrl = await createHousehold(page);
@@ -112,11 +133,47 @@ test("a show can be approved from a non-default released episode without losing 
   await dialog.getByRole("button", { name: "Approve show" }).click();
   const approval = await approvalResponse;
   expect(approval.status()).toBe(201);
-  expect((await approval.json()).programme.showProgress.id).toBe("tt1234567:1:2");
+  expect((await approval.json()).programme.assignments[0].showProgress.id).toBe("tt1234567:1:2");
   await expect(dialog).toBeHidden();
   await expect(page.getByText("added to the Approved Library.")).toBeVisible();
   await expect(page).toHaveURL(/\?q=Example&type=show&page=1$/);
   await expect(show.getByText("Already approved")).toBeVisible();
+});
+
+test("a show can start at different Show Progress on each selected TV Channel", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create TV Channel" });
+  await createDialog.getByLabel("Channel name").fill("Weekend");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=show&page=1`);
+  const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "The Example", exact: true }) });
+  await show.getByRole("button", { name: "View details for The Example" }).click();
+  const dialog = page.getByRole("dialog", { name: "The Example" });
+  await dialog.getByLabel("TV Channel", { exact: true }).check();
+  await dialog.getByLabel("Weekend", { exact: true }).check();
+
+  const defaultProgress = dialog.getByRole("group", { name: "Starting Show Progress for TV Channel" });
+  const weekendProgress = dialog.getByRole("group", { name: "Starting Show Progress for Weekend" });
+  await expect(defaultProgress.getByLabel("Episode")).toHaveValue("tt1234567:1:1");
+  await weekendProgress.getByLabel("Episode").selectOption("tt1234567:1:2");
+
+  const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
+  await dialog.getByRole("button", { name: "Approve show" }).click();
+  const approval = await approvalResponse;
+  expect(approval.status()).toBe(201);
+  const assignments = (await approval.json()).programme.assignments as Array<{
+    channelName: string;
+    showProgress: { id: string };
+  }>;
+  expect(new Map(assignments.map((assignment) => [assignment.channelName, assignment.showProgress.id])))
+    .toEqual(new Map([
+      ["TV Channel", "tt1234567:1:1"],
+      ["Weekend", "tt1234567:1:2"],
+    ]));
 });
 
 test("a restored URL reruns search and search failures are announced", async ({ page }) => {

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { ChannelStartingProgressChoices } from "../components/ChannelStartingProgressChoices";
 import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
@@ -20,12 +21,22 @@ import { Input } from "../components/ui/input";
 import { NativeSelect } from "../components/ui/native-select";
 import { Skeleton } from "../components/ui/skeleton";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
+import { useChannels } from "../lib/channels";
 
 export const Route = createFileRoute("/households/$secret/approved-library")({ component: ApprovedLibraryPage });
 
 type ProgrammeType = "show" | "movie";
 type LibraryState = "all" | "current" | "paused" | "finished";
 type EpisodeSummary = SelectableEpisode;
+type ProgrammeAssignment = {
+  channelId: string;
+  channelName: string;
+  channelType: "tv" | "movie";
+  pausedAt?: string;
+  current: boolean;
+  finished: boolean;
+  showProgress?: EpisodeSummary;
+};
 type ProgrammeSummary = {
   id: string;
   imdbId: string;
@@ -36,10 +47,9 @@ type ProgrammeSummary = {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   current: boolean;
   finished: boolean;
-  showProgress?: EpisodeSummary;
+  assignments: ProgrammeAssignment[];
 };
 type LibraryResponse = { programmes: ProgrammeSummary[] };
 type ProgrammeDetailResponse = { programme: ProgrammeSummary & { episodes: EpisodeSummary[] } };
@@ -52,17 +62,23 @@ function ApprovedLibraryPage() {
   const [state, setState] = useState<LibraryState>("all");
   const [removeTarget, setRemoveTarget] = useState<ProgrammeSummary | null>(null);
   const [progressTarget, setProgressTarget] = useState<ProgrammeSummary | null>(null);
+  const [progressChannelId, setProgressChannelId] = useState<string | null>(null);
+  const [assignmentTarget, setAssignmentTarget] = useState<ProgrammeSummary | null>(null);
+  const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
+  const [assignmentStartingEpisodeIds, setAssignmentStartingEpisodeIds] = useState<Record<string, string>>({});
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [status, setStatus] = useState("");
+  const channels = useChannels(secret);
 
   const library = useQuery({
     queryKey: parentKeys.library(secret),
     queryFn: () => parentApi<LibraryResponse>(`/api/households/${secret}/library`),
   });
+  const detailProgrammeId = progressTarget?.id ?? (assignmentTarget?.type === "show" ? assignmentTarget.id : undefined);
   const detail = useQuery({
-    queryKey: ["household", secret, "approved-library", "programme", progressTarget?.id],
-    queryFn: () => parentApi<ProgrammeDetailResponse>(`/api/households/${secret}/library/${encodeURIComponent(progressTarget!.id)}`),
-    enabled: Boolean(progressTarget),
+    queryKey: parentKeys.libraryProgramme(secret, detailProgrammeId),
+    queryFn: () => parentApi<ProgrammeDetailResponse>(`/api/households/${secret}/library/${encodeURIComponent(detailProgrammeId!)}`),
+    enabled: Boolean(detailProgrammeId),
   });
   const programmes = library.data?.programmes ?? [];
   const counts = {
@@ -74,36 +90,38 @@ function ApprovedLibraryPage() {
     return programmes.filter((programme) => programme.type === tab
       && (!query || programme.title.toLocaleLowerCase().includes(query))
       && (state === "all" || (state === "current" && programme.current)
-        || (state === "paused" && Boolean(programme.pausedAt))
-        || (state === "finished" && programme.finished)));
+        || (state === "paused" && programme.assignments.some((assignment) => Boolean(assignment.pausedAt)))
+        || (state === "finished" && programme.assignments.some((assignment) => assignment.finished))));
   }, [programmes, search, state, tab]);
 
   async function refreshShowState() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
       queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-      queryClient.invalidateQueries({ queryKey: parentKeys.tv(secret) }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.tvChannels(secret) }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.tvPreparations(secret) }),
+      queryClient.invalidateQueries({ queryKey: parentKeys.movieChannels(secret) }),
     ]);
   }
 
   const showEligibility = useMutation({
-    mutationFn: (programme: ProgrammeSummary) => parentApi<{ message: string }>(
+    mutationFn: ({ programme, assignment }: { programme: ProgrammeSummary; assignment: ProgrammeAssignment }) => parentApi<{ message: string }>(
       `/api/households/${secret}/library/${encodeURIComponent(programme.id)}`,
-      { method: "PATCH", body: { paused: !programme.pausedAt } },
+      { method: "PATCH", body: { paused: !assignment.pausedAt, channelId: assignment.channelId } },
     ),
-    onSuccess: async (_, programme) => {
-      setStatus(programme.pausedAt
-        ? `${programme.title} resumed with Show Progress unchanged.`
-        : `${programme.title} paused with Show Progress unchanged.`);
+    onSuccess: async (_, { programme, assignment }) => {
+      setStatus(assignment.pausedAt
+        ? `${programme.title} resumed on ${assignment.channelName} with Show Progress unchanged.`
+        : `${programme.title} paused on ${assignment.channelName} with Show Progress unchanged.`);
       window.dispatchEvent(new Event("stremio-restart-required"));
       await refreshShowState();
     },
   });
 
   const correction = useMutation({
-    mutationFn: ({ programme, videoId }: { programme: ProgrammeSummary; videoId: string }) => parentApi<{ message: string }>(
+    mutationFn: ({ programme, videoId, channelId }: { programme: ProgrammeSummary; videoId: string; channelId: string }) => parentApi<{ message: string }>(
       `/api/households/${secret}/library/${encodeURIComponent(programme.id)}/progress`,
-      { method: "PATCH", body: { videoId } },
+      { method: "PATCH", body: { videoId, channelId } },
     ),
     onSuccess: async (_, { programme }) => {
       setStatus(programme.finished
@@ -127,8 +145,27 @@ function ApprovedLibraryPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: parentKeys.library(secret) }),
         queryClient.invalidateQueries({ queryKey: parentKeys.overview(secret) }),
-        queryClient.invalidateQueries({ queryKey: programme.type === "show" ? parentKeys.tv(secret) : parentKeys.movie(secret) }),
+        queryClient.invalidateQueries({
+          queryKey: programme.type === "show" ? parentKeys.tvChannels(secret) : parentKeys.movieChannels(secret),
+        }),
       ]);
+    },
+  });
+
+  const assignments = useMutation({
+    mutationFn: ({ programme, channelIds, startingEpisodeIds }: {
+      programme: ProgrammeSummary;
+      channelIds: string[];
+      startingEpisodeIds?: Record<string, string>;
+    }) => parentApi<{ message: string }>(
+      `/api/households/${secret}/library/${encodeURIComponent(programme.id)}/assignments`,
+      { method: "PUT", body: { channelIds, ...(startingEpisodeIds ? { startingEpisodeIds } : {}) } },
+    ),
+    onSuccess: async (_, { programme }) => {
+      setAssignmentTarget(null);
+      setStatus(`${programme.title} Channel Assignments updated.`);
+      window.dispatchEvent(new Event("stremio-restart-required"));
+      await refreshShowState();
     },
   });
 
@@ -137,15 +174,33 @@ function ApprovedLibraryPage() {
     setState("all");
   }
 
-  function openProgress(programme: ProgrammeSummary) {
+  function openProgress(programme: ProgrammeSummary, assignment: ProgrammeAssignment) {
     correction.reset();
     setSelectedEpisodeId(null);
+    setProgressChannelId(assignment.channelId);
     setProgressTarget(programme);
   }
+
+  const selectAssignmentStartingEpisode = useCallback((channelId: string, episodeId: string | null) => {
+    setAssignmentStartingEpisodeIds((current) => {
+      if (episodeId && current[channelId] === episodeId) return current;
+      if (episodeId) return { ...current, [channelId]: episodeId };
+      if (!(channelId in current)) return current;
+      const next = { ...current };
+      delete next[channelId];
+      return next;
+    });
+  }, []);
 
   const actionError = showEligibility.isError
     ? apiErrorMessage(showEligibility.error, "The show could not be updated. Try again.")
     : "";
+  const progressAssignment = progressTarget?.assignments.find((assignment) => assignment.channelId === progressChannelId);
+  const compatibleAssignmentChannels = (channels.data ?? []).filter((channel) =>
+    channel.type === (assignmentTarget?.type === "show" ? "tv" : "movie"));
+  const existingAssignmentIds = new Set(assignmentTarget?.assignments.map((assignment) => assignment.channelId) ?? []);
+  const newAssignmentChannels = compatibleAssignmentChannels.filter((channel) =>
+    selectedChannelIds.includes(channel.id) && !existingAssignmentIds.has(channel.id));
 
   return (
     <div className="grid gap-6">
@@ -184,9 +239,15 @@ function ApprovedLibraryPage() {
             {visible.map((programme) => <ProgrammeCard
               key={programme.id}
               programme={programme}
-              pending={showEligibility.isPending && showEligibility.variables?.id === programme.id}
-              onEligibility={(target) => { showEligibility.reset(); showEligibility.mutate(target); }}
+              pending={showEligibility.isPending && showEligibility.variables?.programme.id === programme.id}
+              onEligibility={(target, assignment) => { showEligibility.reset(); showEligibility.mutate({ programme: target, assignment }); }}
               onProgress={openProgress}
+              onAssignments={(target) => {
+                assignments.reset();
+                setSelectedChannelIds(target.assignments.map((assignment) => assignment.channelId));
+                setAssignmentStartingEpisodeIds({});
+                setAssignmentTarget(target);
+              }}
               onRemove={(target) => { removal.reset(); setRemoveTarget(target); }}
             />)}
           </div>
@@ -198,7 +259,7 @@ function ApprovedLibraryPage() {
         <DialogContent className="sm:max-w-lg" showCloseButton={!correction.isPending}>
           <DialogHeader>
             <Ident>Show Progress</Ident>
-            <DialogTitle>{progressTarget?.finished ? `Restart ${progressTarget.title}` : `Correct ${progressTarget?.title}`}</DialogTitle>
+            <DialogTitle>{progressAssignment?.finished ? `Restart ${progressTarget?.title}` : `Correct ${progressTarget?.title}`}</DialogTitle>
             <DialogDescription>Choose the next episode the TV Channel should schedule. The Current Programme and active playback are not interrupted.</DialogDescription>
           </DialogHeader>
           {detail.isFetching && <p className="text-sm text-muted-foreground" role="status">Loading released episodes…</p>}
@@ -209,12 +270,12 @@ function ApprovedLibraryPage() {
             </div>
           )}
           {detail.isSuccess && detail.data.programme.episodes.length > 0 && <EpisodeSelector
-            key={`${progressTarget?.id}:${detail.data.programme.showProgress?.id ?? "restart"}`}
+            key={`${progressTarget?.id}:${progressChannelId}:${detail.data.programme.assignments.find((assignment) => assignment.channelId === progressChannelId)?.showProgress?.id ?? "restart"}`}
             episodes={detail.data.programme.episodes}
             programmeTitle={detail.data.programme.title}
-            initialEpisodeId={detail.data.programme.showProgress?.id}
-            legend={progressTarget?.finished ? "Choose restart Show Progress" : "Choose corrected Show Progress"}
-            helpText={progressTarget?.finished
+            initialEpisodeId={detail.data.programme.assignments.find((assignment) => assignment.channelId === progressChannelId)?.showProgress?.id}
+            legend={progressAssignment?.finished ? "Choose restart Show Progress" : "Choose corrected Show Progress"}
+            helpText={progressAssignment?.finished
               ? `Restart ${detail.data.programme.title} from S01E01, or choose another released episode.`
               : `The current Show Progress is selected. Choose a season, then a released episode.`}
             disabled={correction.isPending}
@@ -224,8 +285,8 @@ function ApprovedLibraryPage() {
           {correction.isError && <p className="rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">{apiErrorMessage(correction.error, "Show Progress could not be corrected. Try again.")}</p>}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline" disabled={correction.isPending}>Cancel</Button></DialogClose>
-            <Button type="button" disabled={correction.isPending || !progressTarget || !selectedEpisodeId || !detail.isSuccess} onClick={() => progressTarget && selectedEpisodeId && correction.mutate({ programme: progressTarget, videoId: selectedEpisodeId })}>
-              {correction.isPending ? "Saving…" : progressTarget?.finished ? "Restart show" : "Save Show Progress"}
+            <Button type="button" disabled={correction.isPending || !progressTarget || !progressChannelId || !selectedEpisodeId || !detail.isSuccess} onClick={() => progressTarget && progressChannelId && selectedEpisodeId && correction.mutate({ programme: progressTarget, channelId: progressChannelId, videoId: selectedEpisodeId })}>
+              {correction.isPending ? "Saving…" : progressAssignment?.finished ? "Restart show" : "Save Show Progress"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -246,6 +307,60 @@ function ApprovedLibraryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={Boolean(assignmentTarget)} onOpenChange={(open) => { if (!open && !assignments.isPending) setAssignmentTarget(null); }}>
+        <DialogContent showCloseButton={!assignments.isPending}>
+          <DialogHeader>
+            <DialogTitle>Assign {assignmentTarget?.title} to Channels</DialogTitle>
+            <DialogDescription>Each assignment keeps its own progress and playback state. Saving with none selected removes the programme from the Approved Library.</DialogDescription>
+          </DialogHeader>
+          <fieldset className="grid gap-2 rounded-[4px] border p-4">
+            <legend className="px-1 text-sm font-semibold">Channels</legend>
+            {compatibleAssignmentChannels.map((channel) => (
+              <label key={channel.id} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={selectedChannelIds.includes(channel.id)}
+                  disabled={assignments.isPending}
+                  onChange={(event) => setSelectedChannelIds(event.target.checked
+                    ? [...selectedChannelIds, channel.id]
+                    : selectedChannelIds.filter((channelId) => channelId !== channel.id))}
+                />
+                {channel.name}
+              </label>
+            ))}
+          </fieldset>
+          {assignmentTarget?.type === "show" && newAssignmentChannels.length > 0 && (detail.isFetching ? (
+            <p className="text-sm text-muted-foreground" role="status">Loading released episodes…</p>
+          ) : detail.isError ? (
+            <p className="text-sm text-destructive" role="alert">Released episodes could not be loaded. Try again.</p>
+          ) : detail.isSuccess ? (
+            <ChannelStartingProgressChoices
+              channels={newAssignmentChannels}
+              episodes={detail.data.programme.episodes}
+              programmeTitle={assignmentTarget.title}
+              selectedEpisodeIds={assignmentStartingEpisodeIds}
+              disabled={assignments.isPending}
+              onSelectionChange={selectAssignmentStartingEpisode}
+            />
+          ) : null)}
+          {assignments.isError && <p className="text-sm text-destructive" role="alert">{apiErrorMessage(assignments.error, "Channel Assignments could not be updated.")}</p>}
+          <DialogFooter>
+            <DialogClose asChild><Button type="button" variant="outline" disabled={assignments.isPending}>Cancel</Button></DialogClose>
+            <Button type="button" disabled={!assignmentTarget || assignments.isPending
+              || (assignmentTarget.type === "show" && newAssignmentChannels.some((channel) => !assignmentStartingEpisodeIds[channel.id]))}
+              onClick={() => assignmentTarget && assignments.mutate({
+                programme: assignmentTarget,
+                channelIds: selectedChannelIds,
+                startingEpisodeIds: assignmentTarget.type === "show"
+                  ? Object.fromEntries(newAssignmentChannels.map((channel) => [channel.id, assignmentStartingEpisodeIds[channel.id]]))
+                  : undefined,
+              })}>
+              {assignments.isPending ? "Saving…" : selectedChannelIds.length === 0 ? "Remove from Library" : "Save Assignments"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -255,12 +370,14 @@ function ProgrammeCard({
   pending,
   onEligibility,
   onProgress,
+  onAssignments,
   onRemove,
 }: {
   programme: ProgrammeSummary;
   pending: boolean;
-  onEligibility: (programme: ProgrammeSummary) => void;
-  onProgress: (programme: ProgrammeSummary) => void;
+  onEligibility: (programme: ProgrammeSummary, assignment: ProgrammeAssignment) => void;
+  onProgress: (programme: ProgrammeSummary, assignment: ProgrammeAssignment) => void;
+  onAssignments: (programme: ProgrammeSummary) => void;
   onRemove: (programme: ProgrammeSummary) => void;
 }) {
   const metadata = [programme.releaseInfo, programme.genres.slice(0, 2).join(", "), programme.imdbRating ? `IMDb ${programme.imdbRating}` : ""].filter(Boolean);
@@ -274,21 +391,28 @@ function ProgrammeCard({
         <h2 className="text-base leading-snug font-semibold break-words">{programme.title}</h2>
         {metadata.length > 0 && <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{metadata.join(" · ")}</p>}
         <div className="mt-2 flex min-h-6 flex-wrap gap-1.5" aria-label="Programme state">
-          {programme.current && <StateBadge current>Current</StateBadge>}
-          {programme.pausedAt && <StateBadge>Paused</StateBadge>}
-          {programme.finished && <StateBadge>Finished</StateBadge>}
+          {programme.type === "movie" && programme.current && <StateBadge current>Current</StateBadge>}
         </div>
-        {programme.type === "show" && programme.showProgress && (
-          <p className="mt-1.5 text-sm text-muted-foreground">
-            Show Progress: <span className="font-mono text-xs">S{String(programme.showProgress.season).padStart(2, "0")}E{String(programme.showProgress.episode).padStart(2, "0")}</span> · {programme.showProgress.title}
-          </p>
-        )}
-        {programme.type === "show" && programme.finished && <p className="mt-1.5 text-sm text-muted-foreground">No next episode. Restart from S01E01 or choose another episode.</p>}
+        {programme.type === "movie" && <p className="mt-1.5 text-sm text-muted-foreground">Channels: {programme.assignments.map((assignment) => assignment.channelName).join(", ")}</p>}
+        {programme.type === "show" && <div className="mt-2 grid gap-2">
+          {programme.assignments.map((assignment) => (
+            <div key={assignment.channelId} className="rounded-[3px] border p-2 text-sm">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <strong className="mr-auto">{assignment.channelName}</strong>
+                {assignment.current && <StateBadge current>Current</StateBadge>}
+                {assignment.pausedAt && <StateBadge>Paused</StateBadge>}
+                {assignment.finished && <StateBadge>Finished</StateBadge>}
+              </div>
+              {assignment.showProgress && <p className="mt-1 text-muted-foreground">Show Progress: <span className="font-mono text-xs">S{String(assignment.showProgress.season).padStart(2, "0")}E{String(assignment.showProgress.episode).padStart(2, "0")}</span> · {assignment.showProgress.title}</p>}
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onEligibility(programme, assignment)}>{pending ? (assignment.pausedAt ? "Resuming…" : "Pausing…") : assignment.pausedAt ? "Resume show" : "Pause show"}</Button>
+                <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onProgress(programme, assignment)}>{assignment.finished ? "Restart show" : "Correct Show Progress"}</Button>
+              </div>
+            </div>
+          ))}
+        </div>}
         <div className="mt-3 flex flex-wrap gap-2">
-          {programme.type === "show" && <>
-            <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onEligibility(programme)}>{pending ? (programme.pausedAt ? "Resuming…" : "Pausing…") : programme.pausedAt ? "Resume show" : "Pause show"}</Button>
-            <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onProgress(programme)}>{programme.finished ? "Restart show" : "Correct Show Progress"}</Button>
-          </>}
+          <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onAssignments(programme)}>Manage Channels</Button>
           <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onRemove(programme)}>Remove {programme.type}</Button>
         </div>
       </div>

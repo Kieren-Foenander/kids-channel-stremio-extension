@@ -46,53 +46,70 @@ export function HouseholdOverview({ secret }: { secret: string }) {
       <section aria-labelledby="channels-heading">
         <h2 id="channels-heading" className="mb-4 text-xl font-semibold tracking-[-0.01em]">On now</h2>
         <div className="grid gap-4 sm:grid-cols-2">
-          <ChannelCurrent
-            kind="TV Channel"
-            programme={overview.tv.current && {
-              title: overview.tv.current.title,
-              detail: episodeLabel(overview.tv.current),
-              poster: overview.tv.current.poster,
-            }}
-            empty={overview.approved.shows === 0
-              ? "Approve a show to start the TV Channel."
-              : "No eligible show is available. Review paused or finished shows."}
-            linkTo={overview.approved.shows === 0 ? "add-programmes" : "approved-library"}
-            secret={secret}
-          />
-          <ChannelCurrent
-            kind="Movie Channel"
-            programme={overview.movie.current && {
-              title: overview.movie.current.title,
-              detail: overview.movie.current.releaseInfo,
-              poster: overview.movie.current.poster,
-            }}
-            empty={overview.approved.movies === 0
-              ? "Approve a movie to start the Movie Channel."
-              : "No movie is currently available. Review the Approved Library."}
-            linkTo={overview.approved.movies === 0 ? "add-programmes" : "approved-library"}
-            secret={secret}
-          />
+          {overview.tvChannels.map((channel) => (
+            <ChannelCurrent
+              key={channel.id}
+              kind="TV"
+              name={channel.name}
+              programme={channel.current && {
+                title: channel.current.title,
+                detail: episodeLabel(channel.current),
+                poster: channel.current.poster,
+              }}
+              empty={overview.approved.shows === 0
+                ? "Approve a show to start the TV Channel."
+                : "No eligible assigned show is available."}
+              secret={secret}
+              linkTo="tv-channel"
+              channelId={channel.id}
+            />
+          ))}
+          {overview.movieChannels.map((channel) => (
+            <ChannelCurrent
+              key={channel.id}
+              kind="Movie"
+              name={channel.name}
+              programme={channel.current && {
+                title: channel.current.title,
+                detail: channel.current.releaseInfo,
+                poster: channel.current.poster,
+              }}
+              empty={overview.approved.movies === 0
+                ? "Approve a movie to start the Movie Channel."
+                : "No assigned movie is currently available."}
+              secret={secret}
+              linkTo="movie-channel"
+              channelId={channel.id}
+            />
+          ))}
         </div>
       </section>
 
       <section aria-labelledby="next-tv-heading">
         <div className="mb-4 flex items-end justify-between gap-4">
-          <h2 id="next-tv-heading" className="text-xl font-semibold tracking-[-0.01em]">Coming up on the TV Channel</h2>
-          <Link className="shrink-0 text-sm font-medium text-accent underline-offset-4 hover:underline" to="/households/$secret/tv-channel" params={{ secret }}>View TV Channel</Link>
+          <h2 id="next-tv-heading" className="text-xl font-semibold tracking-[-0.01em]">Coming up on TV Channels</h2>
+          <Link className="shrink-0 text-sm font-medium text-accent underline-offset-4 hover:underline" to="/households/$secret/tv-channel" params={{ secret }} search={{ channel: undefined }}>View TV Channels</Link>
         </div>
-        {overview.tv.next.length ? (
-          <ol className="divide-y border-y">
-            {overview.tv.next.map((programme, index) => (
-              <li key={`${programme.programmeId}-${programme.episode.id}`} className="flex items-center gap-3 px-4 py-3">
-                <span className="w-6 shrink-0 font-mono text-xs font-semibold text-muted-foreground" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
-                <span className="min-w-0">
-                  <strong className="block truncate text-sm font-medium">{programme.title}</strong>
-                  <small className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">{episodeLabel(programme)}</small>
-                </span>
-              </li>
-            ))}
-          </ol>
-        ) : <p className="text-sm leading-relaxed text-muted-foreground">{overview.approved.shows ? "No upcoming TV programmes are scheduled." : "Approve a show to create the TV Channel Schedule."}</p>}
+        <div className="grid gap-5 sm:grid-cols-2">
+          {overview.tvChannels.map((channel) => (
+            <article key={channel.id}>
+              <h3 className="mb-2 text-sm font-semibold">{channel.name}</h3>
+              {channel.next.length ? (
+                <ol className="divide-y border-y">
+                  {channel.next.map((programme, index) => (
+                    <li key={`${programme.programmeId}-${programme.episode.id}`} className="flex items-center gap-3 px-4 py-3">
+                      <span className="w-6 shrink-0 font-mono text-xs font-semibold text-muted-foreground" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+                      <span className="min-w-0">
+                        <strong className="block truncate text-sm font-medium">{programme.title}</strong>
+                        <small className="mt-0.5 block truncate font-mono text-xs text-muted-foreground">{episodeLabel(programme)}</small>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              ) : <p className="text-sm leading-relaxed text-muted-foreground">No upcoming programmes are scheduled.</p>}
+            </article>
+          ))}
+        </div>
       </section>
 
       <section className="flex flex-col gap-4 border-y py-5 sm:flex-row sm:items-center sm:justify-between" aria-labelledby="library-summary-heading">
@@ -124,33 +141,39 @@ export function HouseholdOverview({ secret }: { secret: string }) {
   );
 }
 
-function ChannelCurrent({ kind, programme, empty, linkTo, secret }: {
-  kind: "TV Channel" | "Movie Channel";
+function ChannelCurrent({ kind, name, programme, empty, secret, linkTo, channelId }: {
+  kind: "TV" | "Movie";
+  name: string;
   programme: { title: string; detail?: string; poster?: string } | null;
   empty: string;
-  linkTo: "add-programmes" | "approved-library";
   secret: string;
+  linkTo: "tv-channel" | "movie-channel";
+  channelId: string;
 }) {
   return (
     <article className="flex min-h-40 gap-4 rounded-[4px] border bg-card p-5">
       <div className="min-w-0 flex-1 self-center">
-        <Ident className="mb-2">{kind === "TV Channel" ? "TV" : "Movie"}</Ident>
+        <Ident className="mb-2">{kind}</Ident>
+        <h3 className="mb-2 text-sm font-semibold text-muted-foreground">{name}</h3>
         {programme ? (
           <>
-            <h3 className="text-lg leading-snug font-semibold break-words">{programme.title}</h3>
+            <h4 className="text-lg leading-snug font-semibold break-words">{programme.title}</h4>
             {programme.detail && <p className="mt-1 font-mono text-xs text-muted-foreground">{programme.detail}</p>}
           </>
         ) : (
           <>
-            <h3 className="text-lg leading-snug font-semibold">No Current Programme</h3>
+            <h4 className="text-lg leading-snug font-semibold">No Current Programme</h4>
             <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{empty}</p>
           </>
         )}
-        {!programme && (
-          <Link className="mt-2 inline-block text-sm font-medium text-accent underline-offset-4 hover:underline" to={`/households/$secret/${linkTo}`} params={{ secret }}>
-            {linkTo === "add-programmes" ? "Add Programmes" : "Review Approved Library"}
-          </Link>
-        )}
+        <Link
+          className="mt-2 inline-block text-sm font-medium text-accent underline-offset-4 hover:underline"
+          to={`/households/$secret/${linkTo}`}
+          params={{ secret }}
+          search={{ channel: channelId }}
+        >
+          View Channel
+        </Link>
       </div>
       {programme?.poster && <img src={programme.poster} alt={`${programme.title} poster`} className="h-27 w-18 shrink-0 self-center rounded-[3px] object-cover" />}
     </article>

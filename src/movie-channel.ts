@@ -1,5 +1,5 @@
 export const MOVIE_CHANNEL_ID = "kids-channels:movie";
-const SIGN_OFF_PREFIX = `${MOVIE_CHANNEL_ID}:sign-off`;
+const SIGN_OFF_PREFIX = "kids-channels:movie-sign-off";
 const MUTATION_ATTEMPTS = 5;
 
 interface MovieRow {
@@ -27,6 +27,7 @@ interface RotationRow extends MovieRow {
 interface CurrentMovieRow extends MovieRow, MovieStateRow {}
 
 export interface MovieProgramme {
+  channelId: string;
   programmeId: string;
   imdbId: string;
   title: string;
@@ -71,24 +72,31 @@ function shuffled(movies: MovieRow[], seed: string, cycle: number): MovieRow[] {
   return result;
 }
 
-async function approvedMovies(db: D1Database, householdId: string): Promise<MovieRow[]> {
+async function approvedMovies(db: D1Database, householdId: string, channelId: string): Promise<MovieRow[]> {
   const rows = await db.prepare(`SELECT id AS programme_id, imdb_id, title, description, poster,
       background, release_info, approved_at
-    FROM approved_programmes
-    WHERE household_id = ? AND content_type = 'movie'
-    ORDER BY approved_at, id`).bind(householdId).all<MovieRow>();
+    FROM approved_programmes programme
+    JOIN channel_assignments assignment ON assignment.programme_id = programme.id
+    WHERE programme.household_id = ? AND assignment.channel_id = ? AND content_type = 'movie'
+    ORDER BY assignment.created_at, id`).bind(householdId, channelId).all<MovieRow>();
   return rows.results;
 }
 
-async function state(db: D1Database, householdId: string): Promise<MovieStateRow | null> {
+async function state(db: D1Database, householdId: string, channelId: string): Promise<MovieStateRow | null> {
   return db.prepare(`SELECT cycle, current_position, selection_seed, revision
-    FROM movie_channel_state WHERE household_id = ?`).bind(householdId).first<MovieStateRow>();
+    FROM movie_channel_state WHERE household_id = ? AND channel_id = ?`)
+    .bind(householdId, channelId).first<MovieStateRow>();
 }
 
-function programmeFromRow(row: CurrentMovieRow | RotationRow, requestedCycle?: number): MovieProgramme {
+function programmeFromRow(
+  row: CurrentMovieRow | RotationRow,
+  channelId: string,
+  requestedCycle?: number,
+): MovieProgramme {
   const cycle = requestedCycle ?? ("cycle" in row ? row.cycle : 0);
   const position = "position" in row ? row.position : row.current_position;
   return {
+    channelId,
     programmeId: row.programme_id,
     imdbId: row.imdb_id,
     title: row.title,
@@ -99,30 +107,45 @@ function programmeFromRow(row: CurrentMovieRow | RotationRow, requestedCycle?: n
     approvedAt: row.approved_at,
     cycle,
     position,
-    signOffId: `${SIGN_OFF_PREFIX}:${cycle}:${position}`,
+    signOffId: `${SIGN_OFF_PREFIX}:${channelId}:${cycle}:${position}`,
   };
 }
 
-function mutationOwnership(householdId: string, revision: number, owner: string) {
+function mutationOwnership(householdId: string, channelId: string, revision: number, owner: string) {
   const sql = `EXISTS (SELECT 1 FROM movie_channel_mutations mutation
-    WHERE mutation.household_id = ? AND mutation.revision = ? AND mutation.owner_token = ?)`;
-  return { sql, values: [householdId, revision, owner] as const };
+    WHERE mutation.household_id = ? AND mutation.channel_id = ?
+      AND mutation.revision = ? AND mutation.owner_token = ?)`;
+  return { sql, values: [householdId, channelId, revision, owner] as const };
 }
 
-function claimMutation(db: D1Database, householdId: string, revision: number, owner: string, now: string) {
+function claimMutation(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  revision: number,
+  owner: string,
+  now: string,
+) {
   return db.prepare(`INSERT OR IGNORE INTO movie_channel_mutations
-    (household_id, revision, owner_token, claimed_at) VALUES (?, ?, ?, ?)`)
-    .bind(householdId, revision, owner, now);
+    (household_id, channel_id, revision, owner_token, claimed_at) VALUES (?, ?, ?, ?, ?)`)
+    .bind(householdId, channelId, revision, owner, now);
 }
 
-async function ownsMutation(db: D1Database, householdId: string, revision: number, owner: string): Promise<boolean> {
+async function ownsMutation(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  revision: number,
+  owner: string,
+): Promise<boolean> {
   return Boolean(await db.prepare(`SELECT 1 FROM movie_channel_mutations
-    WHERE household_id = ? AND revision = ? AND owner_token = ?`).bind(householdId, revision, owner).first());
+    WHERE household_id = ? AND channel_id = ? AND revision = ? AND owner_token = ?`)
+    .bind(householdId, channelId, revision, owner).first());
 }
 
-async function initialize(db: D1Database, householdId: string, configuredSeed?: string): Promise<void> {
-  if (await state(db, householdId)) return;
-  const movies = await approvedMovies(db, householdId);
+async function initialize(db: D1Database, householdId: string, channelId: string, configuredSeed?: string): Promise<void> {
+  if (await state(db, householdId, channelId)) return;
+  const movies = await approvedMovies(db, householdId, channelId);
   if (movies.length === 0) return;
 
   const seed = configuredSeed || crypto.randomUUID();
@@ -130,59 +153,65 @@ async function initialize(db: D1Database, householdId: string, configuredSeed?: 
   const now = new Date().toISOString();
   const first = rotation[0];
   const ownsInitialState = `EXISTS (SELECT 1 FROM movie_channel_state
-    WHERE household_id = ? AND selection_seed = ? AND revision = 0)`;
-  const initialOwnership = [householdId, seed] as const;
+    WHERE household_id = ? AND channel_id = ? AND selection_seed = ? AND revision = 0)`;
+  const initialOwnership = [householdId, channelId, seed] as const;
   const statements: D1PreparedStatement[] = [
     db.prepare(`INSERT OR IGNORE INTO movie_channel_state
-      (household_id, cycle, current_position, selection_seed, initialized_at, revision)
-      VALUES (?, 0, 0, ?, ?, 0)`).bind(householdId, seed, now),
+      (household_id, channel_id, cycle, current_position, selection_seed, initialized_at, revision)
+      VALUES (?, ?, 0, 0, ?, ?, 0)`).bind(householdId, channelId, seed, now),
   ];
   for (const [position, movie] of rotation.entries()) {
     statements.push(db.prepare(`INSERT OR IGNORE INTO movie_rotation
-      (household_id, cycle, position, programme_id)
-      SELECT ?, 0, ?, ? WHERE ${ownsInitialState}`)
-      .bind(householdId, position, movie.programme_id, ...initialOwnership));
+      (household_id, channel_id, cycle, position, programme_id)
+      SELECT ?, ?, 0, ?, ? WHERE ${ownsInitialState}`)
+      .bind(householdId, channelId, position, movie.programme_id, ...initialOwnership));
   }
   statements.push(db.prepare(`INSERT OR IGNORE INTO current_programmes
-    (household_id, channel, programme_id, video_id, selected_at)
-    SELECT ?, 'movie', ?, ?, ? WHERE ${ownsInitialState}`)
-    .bind(householdId, first.programme_id, first.imdb_id, now, ...initialOwnership));
+    (household_id, channel_id, programme_id, video_id, selected_at)
+    SELECT ?, ?, ?, ?, ? WHERE ${ownsInitialState}`)
+    .bind(householdId, channelId, first.programme_id, first.imdb_id, now, ...initialOwnership));
   await db.batch(statements);
 }
 
-async function current(db: D1Database, householdId: string): Promise<MovieProgramme | null> {
+async function current(db: D1Database, householdId: string, channelId: string): Promise<MovieProgramme | null> {
   const row = await db.prepare(`SELECT state.cycle, state.current_position, state.selection_seed, state.revision,
       programme.id AS programme_id, programme.imdb_id, programme.title, programme.description,
       programme.poster, programme.background, programme.release_info, programme.approved_at
     FROM movie_channel_state state
-    JOIN movie_rotation rotation ON rotation.household_id = state.household_id
+    JOIN movie_rotation rotation ON rotation.channel_id = state.channel_id
       AND rotation.cycle = state.cycle AND rotation.position = state.current_position
       AND rotation.consumed_at IS NULL
     JOIN approved_programmes programme ON programme.id = rotation.programme_id
-    WHERE state.household_id = ?`).bind(householdId).first<CurrentMovieRow>();
-  return row ? programmeFromRow(row) : null;
+    WHERE state.household_id = ? AND state.channel_id = ?`).bind(householdId, channelId).first<CurrentMovieRow>();
+  return row ? programmeFromRow(row, channelId) : null;
 }
 
-async function remainingRows(db: D1Database, householdId: string, currentState: MovieStateRow): Promise<RotationRow[]> {
+async function remainingRows(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  currentState: MovieStateRow,
+): Promise<RotationRow[]> {
   const rows = await db.prepare(`SELECT rotation.position, programme.id AS programme_id, programme.imdb_id,
       programme.title, programme.description, programme.poster, programme.background,
       programme.release_info, programme.approved_at
     FROM movie_rotation rotation
     JOIN approved_programmes programme ON programme.id = rotation.programme_id
-    WHERE rotation.household_id = ? AND rotation.cycle = ? AND rotation.position > ?
+    WHERE rotation.household_id = ? AND rotation.channel_id = ? AND rotation.cycle = ? AND rotation.position > ?
       AND rotation.consumed_at IS NULL AND programme.content_type = 'movie'
-    ORDER BY rotation.position`).bind(householdId, currentState.cycle, currentState.current_position).all<RotationRow>();
+    ORDER BY rotation.position`).bind(householdId, channelId, currentState.cycle, currentState.current_position).all<RotationRow>();
   return rows.results;
 }
 
-async function synchronizeRotation(db: D1Database, householdId: string): Promise<void> {
+async function synchronizeRotation(db: D1Database, householdId: string, channelId: string): Promise<void> {
   for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentState = await state(db, householdId);
+    const currentState = await state(db, householdId, channelId);
     if (!currentState) return;
     const [movies, membership] = await Promise.all([
-      approvedMovies(db, householdId),
-      db.prepare(`SELECT position, programme_id FROM movie_rotation WHERE household_id = ? AND cycle = ?`)
-        .bind(householdId, currentState.cycle).all<{ position: number; programme_id: string }>(),
+      approvedMovies(db, householdId, channelId),
+      db.prepare(`SELECT position, programme_id FROM movie_rotation
+        WHERE household_id = ? AND channel_id = ? AND cycle = ?`)
+        .bind(householdId, channelId, currentState.cycle).all<{ position: number; programme_id: string }>(),
     ]);
     const present = new Set(membership.results.map((movie) => movie.programme_id));
     const additions = movies.filter((movie) => !present.has(movie.programme_id));
@@ -197,52 +226,59 @@ async function synchronizeRotation(db: D1Database, householdId: string): Promise
     );
     const owner = crypto.randomUUID();
     const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, currentState.revision, owner);
+    const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
     const statements: D1PreparedStatement[] = [
-      claimMutation(db, householdId, currentState.revision, owner, now),
+      claimMutation(db, householdId, channelId, currentState.revision, owner, now),
     ];
     for (const [offset, movie] of additions.entries()) {
-      statements.push(db.prepare(`INSERT INTO movie_rotation (household_id, cycle, position, programme_id)
-        SELECT ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, currentState.cycle, finalPosition + offset + 1,
+      statements.push(db.prepare(`INSERT INTO movie_rotation (household_id, channel_id, cycle, position, programme_id)
+        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(householdId, channelId, currentState.cycle, finalPosition + offset + 1,
           movie.programme_id, ...owns.values));
     }
     statements.push(db.prepare(`UPDATE movie_channel_state SET revision = revision + 1
-      WHERE household_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
-      .bind(householdId, currentState.cycle, currentState.current_position, currentState.revision, ...owns.values));
+      WHERE household_id = ? AND channel_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
+      .bind(householdId, channelId, currentState.cycle, currentState.current_position, currentState.revision, ...owns.values));
     await db.batch(statements);
-    if (await ownsMutation(db, householdId, currentState.revision, owner)) return;
+    if (await ownsMutation(db, householdId, channelId, currentState.revision, owner)) return;
   }
 }
 
-async function clearEmptyChannel(db: D1Database, householdId: string, currentState: MovieStateRow): Promise<void> {
+async function clearEmptyChannel(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  currentState: MovieStateRow,
+): Promise<void> {
   const owner = crypto.randomUUID();
   const now = new Date().toISOString();
-  const owns = mutationOwnership(householdId, currentState.revision, owner);
+  const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
   await db.batch([
-    claimMutation(db, householdId, currentState.revision, owner, now),
-    db.prepare(`DELETE FROM current_programmes WHERE household_id = ? AND channel = 'movie' AND ${owns.sql}`)
-      .bind(householdId, ...owns.values),
-    db.prepare(`DELETE FROM movie_advancements WHERE household_id = ? AND ${owns.sql}`).bind(householdId, ...owns.values),
-    db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND ${owns.sql}`).bind(householdId, ...owns.values),
-    db.prepare(`DELETE FROM movie_channel_state WHERE household_id = ? AND revision = ? AND ${owns.sql}`)
-      .bind(householdId, currentState.revision, ...owns.values),
+    claimMutation(db, householdId, channelId, currentState.revision, owner, now),
+    db.prepare(`DELETE FROM current_programmes WHERE household_id = ? AND channel_id = ? AND ${owns.sql}`)
+      .bind(householdId, channelId, ...owns.values),
+    db.prepare(`DELETE FROM movie_advancements WHERE household_id = ? AND channel_id = ? AND ${owns.sql}`)
+      .bind(householdId, channelId, ...owns.values),
+    db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND channel_id = ? AND ${owns.sql}`)
+      .bind(householdId, channelId, ...owns.values),
+    db.prepare(`DELETE FROM movie_channel_state WHERE household_id = ? AND channel_id = ? AND revision = ? AND ${owns.sql}`)
+      .bind(householdId, channelId, currentState.revision, ...owns.values),
   ]);
 }
 
-async function selectValidCurrent(db: D1Database, householdId: string): Promise<MovieProgramme | null> {
+async function selectValidCurrent(db: D1Database, householdId: string, channelId: string): Promise<MovieProgramme | null> {
   for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentProgramme = await current(db, householdId);
+    const currentProgramme = await current(db, householdId, channelId);
     if (currentProgramme) return currentProgramme;
-    const currentState = await state(db, householdId);
+    const currentState = await state(db, householdId, channelId);
     if (!currentState) return null;
-    const movies = await approvedMovies(db, householdId);
+    const movies = await approvedMovies(db, householdId, channelId);
     if (movies.length === 0) {
-      await clearEmptyChannel(db, householdId, currentState);
+      await clearEmptyChannel(db, householdId, channelId, currentState);
       return null;
     }
 
-    const remaining = await remainingRows(db, householdId, currentState);
+    const remaining = await remainingRows(db, householdId, channelId, currentState);
     const nextCycle = remaining.length > 0 ? currentState.cycle : currentState.cycle + 1;
     const nextPosition = remaining[0]?.position ?? 0;
     const nextRotation = remaining.length > 0 ? [] : shuffled(movies, currentState.selection_seed, nextCycle);
@@ -250,63 +286,68 @@ async function selectValidCurrent(db: D1Database, householdId: string): Promise<
     if (!nextMovie) return null;
     const owner = crypto.randomUUID();
     const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, currentState.revision, owner);
-    const statements: D1PreparedStatement[] = [claimMutation(db, householdId, currentState.revision, owner, now)];
+    const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
+    const statements: D1PreparedStatement[] = [claimMutation(db, householdId, channelId, currentState.revision, owner, now)];
     for (const [position, movie] of nextRotation.entries()) {
       statements.push(db.prepare(`INSERT OR IGNORE INTO movie_rotation
-        (household_id, cycle, position, programme_id)
-        SELECT ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, nextCycle, position, movie.programme_id, ...owns.values));
+        (household_id, channel_id, cycle, position, programme_id)
+        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(householdId, channelId, nextCycle, position, movie.programme_id, ...owns.values));
     }
     statements.push(
       db.prepare(`UPDATE movie_channel_state SET cycle = ?, current_position = ?, revision = revision + 1
-        WHERE household_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
-        .bind(nextCycle, nextPosition, householdId, currentState.cycle, currentState.current_position,
+        WHERE household_id = ? AND channel_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
+        .bind(nextCycle, nextPosition, householdId, channelId, currentState.cycle, currentState.current_position,
           currentState.revision, ...owns.values),
-      db.prepare(`INSERT INTO current_programmes (household_id, channel, programme_id, video_id, selected_at)
-        SELECT ?, 'movie', ?, ?, ? WHERE ${owns.sql}
-        ON CONFLICT(household_id, channel) DO UPDATE SET programme_id = excluded.programme_id,
+      db.prepare(`INSERT INTO current_programmes (household_id, channel_id, programme_id, video_id, selected_at)
+        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}
+        ON CONFLICT(channel_id) DO UPDATE SET programme_id = excluded.programme_id,
           video_id = excluded.video_id, selected_at = excluded.selected_at`)
-        .bind(householdId, nextMovie.programme_id, nextMovie.imdb_id, now, ...owns.values),
+        .bind(householdId, channelId, nextMovie.programme_id, nextMovie.imdb_id, now, ...owns.values),
     );
     await db.batch(statements);
-    if (await ownsMutation(db, householdId, currentState.revision, owner)) return current(db, householdId);
+    if (await ownsMutation(db, householdId, channelId, currentState.revision, owner)) {
+      return current(db, householdId, channelId);
+    }
   }
-  return current(db, householdId);
+  return current(db, householdId, channelId);
 }
 
 export async function reconcileMovieChannel(
   db: D1Database,
   householdId: string,
+  channelId: string,
   configuredSeed?: string,
 ): Promise<MovieProgramme | null> {
-  await initialize(db, householdId, configuredSeed);
-  await synchronizeRotation(db, householdId);
-  return selectValidCurrent(db, householdId);
+  await initialize(db, householdId, channelId, configuredSeed);
+  await synchronizeRotation(db, householdId, channelId);
+  return selectValidCurrent(db, householdId, channelId);
 }
 
 export async function movieChannelProgramme(
   db: D1Database,
   householdId: string,
+  channelId: string,
   configuredSeed?: string,
 ): Promise<MovieProgramme | null> {
-  return reconcileMovieChannel(db, householdId, configuredSeed);
+  return reconcileMovieChannel(db, householdId, channelId, configuredSeed);
 }
 
 export async function parentMovieChannelState(
   db: D1Database,
   householdId: string,
+  channelId: string,
   configuredSeed?: string,
 ): Promise<ParentMovieChannelState> {
-  const currentProgramme = await reconcileMovieChannel(db, householdId, configuredSeed);
-  const currentState = await state(db, householdId);
-  const remaining = currentState ? await remainingRows(db, householdId, currentState) : [];
+  const currentProgramme = await reconcileMovieChannel(db, householdId, channelId, configuredSeed);
+  const currentState = await state(db, householdId, channelId);
+  const remaining = currentState ? await remainingRows(db, householdId, channelId, currentState) : [];
   const history = await db.prepare(`SELECT programme_id, imdb_id, title, played_at
-    FROM movie_playback_history WHERE household_id = ? ORDER BY played_at DESC LIMIT 10`)
-    .bind(householdId).all<{ programme_id: string; imdb_id: string; title: string; played_at: string }>();
+    FROM movie_playback_history WHERE household_id = ? AND channel_id = ? ORDER BY played_at DESC LIMIT 10`)
+    .bind(householdId, channelId).all<{ programme_id: string; imdb_id: string; title: string; played_at: string }>();
   return {
     current: currentProgramme ?? undefined,
-    remaining: remaining.map((movie) => programmeFromRow(movie, currentState!.cycle)),
+    remaining: remaining.map((movie) => programmeFromRow(movie, channelId, currentState!.cycle)),
     recentPlayback: history.results.map((item) => ({
       programmeId: item.programme_id,
       imdbId: item.imdb_id,
@@ -319,101 +360,70 @@ export async function parentMovieChannelState(
 export async function resetMovieRotation(
   db: D1Database,
   householdId: string,
+  channelId: string,
   configuredSeed?: string,
 ): Promise<MovieProgramme | null> {
-  await reconcileMovieChannel(db, householdId, configuredSeed);
+  await reconcileMovieChannel(db, householdId, channelId, configuredSeed);
   for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentState = await state(db, householdId);
-    const currentProgramme = await current(db, householdId);
+    const currentState = await state(db, householdId, channelId);
+    const currentProgramme = await current(db, householdId, channelId);
     if (!currentState || !currentProgramme) return currentProgramme;
-    const movies = await approvedMovies(db, householdId);
+    const movies = await approvedMovies(db, householdId, channelId);
     const seed = configuredSeed ? `${configuredSeed}:reset:${currentState.revision}` : crypto.randomUUID();
     const future = shuffled(movies.filter((movie) => movie.programme_id !== currentProgramme.programmeId), seed, currentState.cycle);
     const owner = crypto.randomUUID();
     const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, currentState.revision, owner);
+    const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
     const statements: D1PreparedStatement[] = [
-      claimMutation(db, householdId, currentState.revision, owner, now),
-      db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND cycle = ? AND position != ? AND ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position, ...owns.values),
-      db.prepare(`UPDATE movie_rotation SET consumed_at = NULL WHERE household_id = ? AND cycle = ?
+      claimMutation(db, householdId, channelId, currentState.revision, owner, now),
+      db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND channel_id = ?
+        AND cycle = ? AND position != ? AND ${owns.sql}`)
+        .bind(householdId, channelId, currentState.cycle, currentState.current_position, ...owns.values),
+      db.prepare(`UPDATE movie_rotation SET consumed_at = NULL WHERE household_id = ? AND channel_id = ? AND cycle = ?
         AND position = ? AND ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position, ...owns.values),
+        .bind(householdId, channelId, currentState.cycle, currentState.current_position, ...owns.values),
     ];
     for (const [offset, movie] of future.entries()) {
-      statements.push(db.prepare(`INSERT INTO movie_rotation (household_id, cycle, position, programme_id)
-        SELECT ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position + offset + 1,
+      statements.push(db.prepare(`INSERT INTO movie_rotation (household_id, channel_id, cycle, position, programme_id)
+        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(householdId, channelId, currentState.cycle, currentState.current_position + offset + 1,
           movie.programme_id, ...owns.values));
     }
     statements.push(db.prepare(`UPDATE movie_channel_state SET selection_seed = ?, revision = revision + 1
-      WHERE household_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
-      .bind(seed, householdId, currentState.cycle, currentState.current_position,
+      WHERE household_id = ? AND channel_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
+      .bind(seed, householdId, channelId, currentState.cycle, currentState.current_position,
         currentState.revision, ...owns.values));
     await db.batch(statements);
-    if (await ownsMutation(db, householdId, currentState.revision, owner)) return current(db, householdId);
-  }
-  return current(db, householdId);
-}
-
-export async function removeApprovedMovie(
-  db: D1Database,
-  householdId: string,
-  programmeId: string,
-  configuredSeed?: string,
-): Promise<void> {
-  for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentState = await state(db, householdId);
-    if (!currentState) {
-      await db.batch([
-        db.prepare("DELETE FROM current_programmes WHERE household_id = ? AND channel = 'movie' AND programme_id = ?")
-          .bind(householdId, programmeId),
-        db.prepare("DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ?").bind(householdId, programmeId),
-        db.prepare("DELETE FROM approved_programmes WHERE household_id = ? AND id = ? AND content_type = 'movie'")
-          .bind(householdId, programmeId),
-      ]);
-      return;
+    if (await ownsMutation(db, householdId, channelId, currentState.revision, owner)) {
+      return current(db, householdId, channelId);
     }
-    const owner = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, currentState.revision, owner);
-    await db.batch([
-      claimMutation(db, householdId, currentState.revision, owner, now),
-      db.prepare(`DELETE FROM current_programmes WHERE household_id = ? AND channel = 'movie'
-        AND programme_id = ? AND ${owns.sql}`).bind(householdId, programmeId, ...owns.values),
-      db.prepare(`DELETE FROM movie_rotation WHERE household_id = ? AND programme_id = ? AND ${owns.sql}`)
-        .bind(householdId, programmeId, ...owns.values),
-      db.prepare(`DELETE FROM approved_programmes WHERE household_id = ? AND id = ?
-        AND content_type = 'movie' AND ${owns.sql}`).bind(householdId, programmeId, ...owns.values),
-      db.prepare(`UPDATE movie_channel_state SET revision = revision + 1
-        WHERE household_id = ? AND revision = ? AND ${owns.sql}`)
-        .bind(householdId, currentState.revision, ...owns.values),
-    ]);
-    if (await ownsMutation(db, householdId, currentState.revision, owner)) break;
   }
-  await reconcileMovieChannel(db, householdId, configuredSeed);
+  return current(db, householdId, channelId);
 }
 
-export function parseSignOffId(videoId: string): { cycle: number; position: number } | null {
-  const match = videoId.match(new RegExp(`^${SIGN_OFF_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:(\\d+):(\\d+)$`));
-  if (!match) return null;
-  return { cycle: Number(match[1]), position: Number(match[2]) };
+export function parseSignOffId(videoId: string): { channelId?: string; cycle: number; position: number } | null {
+  const escapedPrefix = SIGN_OFF_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const scoped = videoId.match(new RegExp(`^${escapedPrefix}:([^:]+):(\\d+):(\\d+)$`));
+  if (scoped) return { channelId: scoped[1], cycle: Number(scoped[2]), position: Number(scoped[3]) };
+  const legacy = videoId.match(new RegExp(`^${escapedPrefix}:(\\d+):(\\d+)$`));
+  return legacy ? { cycle: Number(legacy[1]), position: Number(legacy[2]) } : null;
 }
 
 export async function requestMovieSignOff(
   db: D1Database,
   householdId: string,
+  channelId: string,
   expectedCycle: number,
   expectedPosition: number,
 ): Promise<void> {
-  await reconcileMovieChannel(db, householdId);
+  await reconcileMovieChannel(db, householdId, channelId);
   for (let attempt = 0; attempt < MUTATION_ATTEMPTS; attempt += 1) {
-    const currentState = await state(db, householdId);
+    const currentState = await state(db, householdId, channelId);
     if (!currentState || currentState.cycle !== expectedCycle || currentState.current_position !== expectedPosition) return;
-    const currentProgramme = await current(db, householdId);
-    const movies = await approvedMovies(db, householdId);
+    const currentProgramme = await current(db, householdId, channelId);
+    const movies = await approvedMovies(db, householdId, channelId);
     if (!currentProgramme || movies.length === 0) return;
-    const remaining = await remainingRows(db, householdId, currentState);
+    const remaining = await remainingRows(db, householdId, channelId, currentState);
     const nextCycle = remaining.length > 0 ? currentState.cycle : currentState.cycle + 1;
     const nextPosition = remaining[0]?.position ?? 0;
     const nextRotation = remaining.length > 0 ? [] : shuffled(movies, currentState.selection_seed, nextCycle);
@@ -422,38 +432,38 @@ export async function requestMovieSignOff(
 
     const owner = crypto.randomUUID();
     const now = new Date().toISOString();
-    const owns = mutationOwnership(householdId, currentState.revision, owner);
+    const owns = mutationOwnership(householdId, channelId, currentState.revision, owner);
     const statements: D1PreparedStatement[] = [
-      claimMutation(db, householdId, currentState.revision, owner, now),
+      claimMutation(db, householdId, channelId, currentState.revision, owner, now),
       db.prepare(`INSERT OR IGNORE INTO movie_advancements
-        (household_id, cycle, position, owner_token, advanced_at)
-        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, currentState.cycle, currentState.current_position, owner, now, ...owns.values),
+        (household_id, channel_id, cycle, position, owner_token, advanced_at)
+        SELECT ?, ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(householdId, channelId, currentState.cycle, currentState.current_position, owner, now, ...owns.values),
       db.prepare(`INSERT INTO movie_playback_history
-        (id, household_id, programme_id, imdb_id, title, cycle, position, played_at)
-        SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(owner, householdId, currentProgramme.programmeId, currentProgramme.imdbId,
+        (id, household_id, channel_id, programme_id, imdb_id, title, cycle, position, played_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(owner, householdId, channelId, currentProgramme.programmeId, currentProgramme.imdbId,
           currentProgramme.title, currentState.cycle, currentState.current_position, now, ...owns.values),
       db.prepare(`UPDATE movie_rotation SET consumed_at = ?
-        WHERE household_id = ? AND cycle = ? AND position = ? AND ${owns.sql}`)
-        .bind(now, householdId, currentState.cycle, currentState.current_position, ...owns.values),
+        WHERE household_id = ? AND channel_id = ? AND cycle = ? AND position = ? AND ${owns.sql}`)
+        .bind(now, householdId, channelId, currentState.cycle, currentState.current_position, ...owns.values),
     ];
     for (const [position, movie] of nextRotation.entries()) {
       statements.push(db.prepare(`INSERT OR IGNORE INTO movie_rotation
-        (household_id, cycle, position, programme_id)
-        SELECT ?, ?, ?, ? WHERE ${owns.sql}`)
-        .bind(householdId, nextCycle, position, movie.programme_id, ...owns.values));
+        (household_id, channel_id, cycle, position, programme_id)
+        SELECT ?, ?, ?, ?, ? WHERE ${owns.sql}`)
+        .bind(householdId, channelId, nextCycle, position, movie.programme_id, ...owns.values));
     }
     statements.push(
       db.prepare(`UPDATE movie_channel_state SET cycle = ?, current_position = ?, revision = revision + 1
-        WHERE household_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
-        .bind(nextCycle, nextPosition, householdId, currentState.cycle, currentState.current_position,
+        WHERE household_id = ? AND channel_id = ? AND cycle = ? AND current_position = ? AND revision = ? AND ${owns.sql}`)
+        .bind(nextCycle, nextPosition, householdId, channelId, currentState.cycle, currentState.current_position,
           currentState.revision, ...owns.values),
       db.prepare(`UPDATE current_programmes SET programme_id = ?, video_id = ?, selected_at = ?
-        WHERE household_id = ? AND channel = 'movie' AND ${owns.sql}`)
-        .bind(nextMovie.programme_id, nextMovie.imdb_id, now, householdId, ...owns.values),
+        WHERE household_id = ? AND channel_id = ? AND ${owns.sql}`)
+        .bind(nextMovie.programme_id, nextMovie.imdb_id, now, householdId, channelId, ...owns.values),
     );
     await db.batch(statements);
-    if (await ownsMutation(db, householdId, currentState.revision, owner)) return;
+    if (await ownsMutation(db, householdId, channelId, currentState.revision, owner)) return;
   }
 }

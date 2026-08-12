@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
-import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
+import { ChannelStartingProgressChoices } from "../components/ChannelStartingProgressChoices";
+import type { SelectableEpisode } from "../components/EpisodeSelector";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
 import { StateBadge } from "../components/StateBadge";
@@ -19,6 +20,7 @@ import {
 } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
+import { useChannels, type ParentChannel } from "../lib/channels";
 
 type ProgrammeType = "show" | "movie";
 type SearchState = { q?: string; type?: ProgrammeType; page?: number };
@@ -42,15 +44,13 @@ type ProgrammeSummary = {
   genres: string[];
   imdbRating?: string;
   approvedAt: string;
-  pausedAt?: string;
   current: boolean;
   finished: boolean;
-  showProgress?: SelectableEpisode;
 };
 type SearchResponse = { results: SearchProgramme[] };
 type LibraryResponse = { programmes: ProgrammeSummary[] };
 type ShowDetailResponse = { title: SearchProgramme & { type: "show"; episodes: SelectableEpisode[] } };
-type ApprovalInput = { programme: SearchProgramme; startingEpisodeId?: string };
+type ApprovalInput = { programme: SearchProgramme; startingEpisodeIds?: Record<string, string>; channelIds: string[] };
 type ApprovalResponse = {
   programme: Omit<ProgrammeSummary, "current" | "finished">;
 };
@@ -82,12 +82,15 @@ function AddProgrammesPage() {
   const [input, setInput] = useState(searchState.q ?? "");
   const [inputError, setInputError] = useState("");
   const [detail, setDetail] = useState<SearchProgramme | null>(null);
-  const [startingEpisodeId, setStartingEpisodeId] = useState<string | null>(null);
+  const [startingEpisodeIds, setStartingEpisodeIds] = useState<Record<string, string>>({});
+  const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
+  const [newChannelName, setNewChannelName] = useState("");
+  const channelsQuery = useChannels(secret);
 
   useEffect(() => setInput(searchState.q ?? ""), [searchState.q]);
 
   const results = useQuery({
-    queryKey: ["household", secret, "cinemeta-search", query],
+    queryKey: parentKeys.search(secret, query),
     queryFn: () => parentApi<SearchResponse>(`/api/households/${secret}/cinemeta/search?q=${encodeURIComponent(query)}`),
     enabled: query.length >= 2 && query.length <= 100,
     retry: false,
@@ -106,15 +109,15 @@ function AddProgrammesPage() {
   const visible = typedResults.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const approved = useMemo(() => new Set((library.data?.programmes ?? []).map((programme) => `${programme.type}:${programme.imdbId}`)), [library.data]);
   const showDetail = useQuery({
-    queryKey: ["household", secret, "cinemeta-title", "show", detail?.type === "show" ? detail.id : ""],
+    queryKey: parentKeys.title(secret, "show", detail?.type === "show" ? detail.id : ""),
     queryFn: () => parentApi<ShowDetailResponse>(`/api/households/${secret}/cinemeta/title/show/${detail!.id}`),
     enabled: detail?.type === "show" && !approved.has(`show:${detail.id}`),
     retry: false,
   });
 
-  const approveProgramme = ({ programme, startingEpisodeId: selectedEpisode }: ApprovalInput) => parentApi<ApprovalResponse>(`/api/households/${secret}/library`, {
+  const approveProgramme = ({ programme, startingEpisodeIds: selectedEpisodes, channelIds }: ApprovalInput) => parentApi<ApprovalResponse>(`/api/households/${secret}/library`, {
     method: "POST",
-    body: { type: programme.type, imdbId: programme.id, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
+    body: { type: programme.type, imdbId: programme.id, channelIds, ...(selectedEpisodes ? { startingEpisodeIds: selectedEpisodes } : {}) },
   });
   const settleAfterApproval = (response: ApprovalResponse) => {
     queryClient.setQueryData<LibraryResponse>(parentKeys.library(secret), (current) => {
@@ -156,6 +159,18 @@ function AddProgrammesPage() {
       toast.error(apiErrorMessage(error, `“${programme.title}” could not be approved. Try again.`));
     },
   });
+  const channelCreation = useMutation({
+    mutationFn: () => parentApi<{ channel: ParentChannel }>(`/api/households/${secret}/channels`, {
+      method: "POST",
+      body: { type: detail?.type === "show" ? "tv" : "movie", name: newChannelName },
+    }),
+    onSuccess: async ({ channel }) => {
+      await queryClient.invalidateQueries({ queryKey: parentKeys.channels(secret) });
+      setSelectedChannelIds([channel.id]);
+      setNewChannelName("");
+      window.dispatchEvent(new Event("stremio-restart-required"));
+    },
+  });
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -166,6 +181,8 @@ function AddProgrammesPage() {
     }
     setInputError("");
     approval.reset();
+    channelCreation.reset();
+    setNewChannelName("");
     void navigate({ search: { q: submitted, type: tab, page: 1 } });
   }
 
@@ -180,12 +197,21 @@ function AddProgrammesPage() {
 
   function openDetails(programme: SearchProgramme) {
     approval.reset();
-    setStartingEpisodeId(null);
+    setStartingEpisodeIds({});
+    const compatible = (channelsQuery.data ?? []).filter((channel) => channel.type === (programme.type === "show" ? "tv" : "movie"));
+    setSelectedChannelIds(compatible.length === 1 ? [compatible[0].id] : []);
     setDetail(programme);
   }
 
-  const selectStartingEpisode = useCallback((episodeId: string | null) => {
-    setStartingEpisodeId(episodeId);
+  const selectStartingEpisode = useCallback((channelId: string, episodeId: string | null) => {
+    setStartingEpisodeIds((current) => {
+      if (episodeId && current[channelId] === episodeId) return current;
+      if (episodeId) return { ...current, [channelId]: episodeId };
+      if (!(channelId in current)) return current;
+      const next = { ...current };
+      delete next[channelId];
+      return next;
+    });
   }, []);
 
   const invalidRestoredQuery = Boolean(query) && (query.length < 2 || query.length > 100);
@@ -241,7 +267,11 @@ function AddProgrammesPage() {
                   programme={programme}
                   isApproved={approved.has(`${programme.type}:${programme.id}`)}
                   isApproving={quickApproval.isPending && quickApproval.variables?.programme.id === programme.id}
-                  onApprove={(movie) => quickApproval.mutate({ programme: movie })}
+                  onApprove={(movie) => {
+                    const compatible = (channelsQuery.data ?? []).filter((channel) => channel.type === "movie");
+                    if (compatible.length === 1) quickApproval.mutate({ programme: movie, channelIds: [compatible[0].id] });
+                    else openDetails(movie);
+                  }}
                   onDetails={openDetails}
                 />)}
               </div>
@@ -267,10 +297,23 @@ function AddProgrammesPage() {
               <p className="mt-2 max-h-[min(40vh,18rem)] overflow-y-auto leading-relaxed text-popover-foreground">{detail?.description || "No description is available."}</p>
             </div></DialogDescription>
           </DialogHeader>
-          {detail?.type === "show" && !approved.has(`show:${detail.id}`) && <ShowEpisodeChoice
+          {detail && !approved.has(`${detail.type}:${detail.id}`) && <ChannelChoices
+            channels={(channelsQuery.data ?? []).filter((channel) => channel.type === (detail.type === "show" ? "tv" : "movie"))}
+            selected={selectedChannelIds}
+            disabled={approval.isPending || approval.isSuccess}
+            onChange={setSelectedChannelIds}
+            newChannelName={newChannelName}
+            creating={channelCreation.isPending}
+            creationError={channelCreation.isError ? apiErrorMessage(channelCreation.error, "The Channel could not be created.") : ""}
+            onNewChannelName={setNewChannelName}
+            onCreate={() => channelCreation.mutate()}
+          />}
+          {detail?.type === "show" && !approved.has(`show:${detail.id}`) && <ShowEpisodeChoices
             key={detail.id}
             query={showDetail}
             programmeTitle={detail.title}
+            channels={(channelsQuery.data ?? []).filter((channel) => selectedChannelIds.includes(channel.id))}
+            selectedEpisodeIds={startingEpisodeIds}
             disabled={approval.isPending || approval.isSuccess}
             onSelectionChange={selectStartingEpisode}
           />}
@@ -278,13 +321,19 @@ function AddProgrammesPage() {
           {approval.isError && <p className="rounded-[4px] border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">{apiErrorMessage(approval.error, "The programme could not be approved. Try again.")}</p>}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline" disabled={approval.isPending}>Close</Button></DialogClose>
-            {detail?.type === "movie" && <Button type="button" disabled={approval.isPending || approval.isSuccess || approved.has(`movie:${detail.id}`)} onClick={() => approval.mutate({ programme: detail })}>
+            {detail?.type === "movie" && <Button type="button" disabled={approval.isPending || approval.isSuccess || approved.has(`movie:${detail.id}`) || selectedChannelIds.length === 0} onClick={() => approval.mutate({ programme: detail, channelIds: selectedChannelIds })}>
               {approval.isPending ? "Approving…" : approval.isSuccess || approved.has(`movie:${detail.id}`) ? "Already approved" : "Approve movie"}
             </Button>}
             {detail?.type === "show" && <Button
               type="button"
-              disabled={approval.isPending || approval.isSuccess || approved.has(`show:${detail.id}`) || !startingEpisodeId || !showDetail.isSuccess}
-              onClick={() => approval.mutate({ programme: detail, startingEpisodeId: startingEpisodeId ?? undefined })}
+              disabled={approval.isPending || approval.isSuccess || approved.has(`show:${detail.id}`)
+                || !showDetail.isSuccess || selectedChannelIds.length === 0
+                || selectedChannelIds.some((channelId) => !startingEpisodeIds[channelId])}
+              onClick={() => approval.mutate({
+                programme: detail,
+                channelIds: selectedChannelIds,
+                startingEpisodeIds: Object.fromEntries(selectedChannelIds.map((channelId) => [channelId, startingEpisodeIds[channelId]])),
+              })}
             >
               {approval.isPending ? "Approving…" : approval.isSuccess || approved.has(`show:${detail.id}`) ? "Already approved" : "Approve show"}
             </Button>}
@@ -295,9 +344,51 @@ function AddProgrammesPage() {
   );
 }
 
-function ShowEpisodeChoice({
+function ChannelChoices({ channels, selected, disabled, onChange, newChannelName, creating, creationError, onNewChannelName, onCreate }: {
+  channels: ParentChannel[];
+  selected: string[];
+  disabled: boolean;
+  onChange: (channelIds: string[]) => void;
+  newChannelName: string;
+  creating: boolean;
+  creationError: string;
+  onNewChannelName: (name: string) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <fieldset className="grid gap-2 rounded-[4px] border p-4">
+      <legend className="px-1 text-sm font-semibold">Assign to Channels</legend>
+      {channels.map((channel) => (
+        <label key={channel.id} className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={selected.includes(channel.id)}
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.checked
+              ? [...selected, channel.id]
+              : selected.filter((channelId) => channelId !== channel.id))}
+          />
+          {channel.name}
+        </label>
+      ))}
+      {channels.length === 0 && <div className="grid gap-2">
+        <p className="text-sm text-muted-foreground">Create a compatible Channel before approving this programme.</p>
+        <div className="flex gap-2">
+          <Input aria-label="New Channel name" minLength={1} maxLength={40} value={newChannelName} disabled={creating} onChange={(event) => onNewChannelName(event.target.value)} placeholder="Channel name" />
+          <Button type="button" variant="outline" disabled={creating || !newChannelName.trim() || newChannelName.trim().length > 40} onClick={onCreate}>{creating ? "Creating…" : "Create"}</Button>
+        </div>
+        {creationError && <p className="text-sm text-destructive" role="alert">{creationError}</p>}
+      </div>}
+      {channels.length > 1 && selected.length === 0 && <p className="text-xs text-muted-foreground">Choose at least one Channel.</p>}
+    </fieldset>
+  );
+}
+
+function ShowEpisodeChoices({
   query,
   programmeTitle,
+  channels,
+  selectedEpisodeIds,
   disabled,
   onSelectionChange,
 }: {
@@ -310,8 +401,10 @@ function ShowEpisodeChoice({
     refetch: () => Promise<unknown>;
   };
   programmeTitle: string;
+  channels: ParentChannel[];
+  selectedEpisodeIds: Record<string, string>;
   disabled: boolean;
-  onSelectionChange: (episodeId: string | null) => void;
+  onSelectionChange: (channelId: string, episodeId: string | null) => void;
 }) {
   if (query.isFetching) return <p className="text-sm text-muted-foreground" role="status">Loading released episodes…</p>;
   if (query.isError) return (
@@ -323,7 +416,14 @@ function ShowEpisodeChoice({
   if (!query.isSuccess) return null;
   const episodes = query.data?.title.episodes ?? [];
   if (episodes.length === 0) return <p className="text-sm text-destructive" role="alert">This show has no regular released episodes available to approve.</p>;
-  return <EpisodeSelector episodes={episodes} programmeTitle={programmeTitle} disabled={disabled} onSelectionChange={onSelectionChange} />;
+  return <ChannelStartingProgressChoices
+    channels={channels}
+    episodes={episodes}
+    programmeTitle={programmeTitle}
+    selectedEpisodeIds={selectedEpisodeIds}
+    disabled={disabled}
+    onSelectionChange={onSelectionChange}
+  />;
 }
 
 function SearchCard({ programme, isApproved, isApproving, onApprove, onDetails }: { programme: SearchProgramme; isApproved: boolean; isApproving: boolean; onApprove: (programme: SearchProgramme) => void; onDetails: (programme: SearchProgramme) => void }) {

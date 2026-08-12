@@ -14,8 +14,8 @@ const destinations = [
   { to: "/households/$secret", label: "Overview", end: true },
   { to: "/households/$secret/add-programmes", label: "Add Programmes" },
   { to: "/households/$secret/approved-library", label: "Approved Library" },
-  { to: "/households/$secret/tv-channel", label: "TV Channel" },
-  { to: "/households/$secret/movie-channel", label: "Movie Channel" },
+  { to: "/households/$secret/tv-channel", label: "TV Channels" },
+  { to: "/households/$secret/movie-channel", label: "Movie Channels" },
   { to: "/households/$secret/settings", label: "Settings" },
 ] as const;
 
@@ -142,7 +142,7 @@ export function ParentShell({ secret }: { secret: string }) {
     try {
       await lockMutation.mutateAsync();
       wasAuthenticated.current = false;
-      queryClient.removeQueries({ queryKey: ["household", secret] });
+      queryClient.removeQueries({ queryKey: parentKeys.household(secret) });
       setSession("locked");
     } catch {
       setLockError("The Parent Page could not be locked. Try again.");

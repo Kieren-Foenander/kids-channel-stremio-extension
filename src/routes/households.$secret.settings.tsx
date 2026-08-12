@@ -141,7 +141,7 @@ function SettingsPage() {
     try {
       await deletion.mutateAsync(values);
       deletionForm.reset();
-      queryClient.removeQueries({ queryKey: ["household", secret] });
+      queryClient.removeQueries({ queryKey: parentKeys.household(secret) });
       window.dispatchEvent(new Event("household-deleted"));
     } catch (error) {
       const message = apiErrorMessage(error, "The Household could not be deleted. Nothing was removed. Try again.");

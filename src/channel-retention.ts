@@ -1,6 +1,8 @@
 export const CHANNEL_RETENTION = {
   claimHours: 24,
-  playbackHistoryPerHousehold: 10,
+  // Both history tables are ranked per Channel, so a Household holding the maximum ten
+  // Channels retains ten times this bound.
+  playbackHistoryPerChannel: 10,
   preparationRunsPerHousehold: 10,
   // D1 permits 100 bound parameters per statement; reserve ten for cutoffs and limits.
   householdsPerSweep: 90,
@@ -50,8 +52,9 @@ export async function pruneObsoleteChannelState(
       WHERE claim.household_id IN (${householdSql}) AND claim.advanced_at < ?
         AND NOT EXISTS (
           SELECT 1 FROM tv_advancement_history history
-          JOIN channel_state state ON state.household_id = history.household_id AND state.channel = 'tv'
-          WHERE history.household_id = claim.household_id AND history.from_position = claim.from_position
+          JOIN channel_state state ON state.channel_id = history.channel_id
+          WHERE history.household_id = claim.household_id AND history.channel_id = claim.channel_id
+            AND history.from_position = claim.from_position
             AND history.id = claim.owner_token AND history.undone_at IS NULL
             AND history.target_position = state.current_position
         )
@@ -67,27 +70,27 @@ export async function pruneObsoleteChannelState(
     )`).bind(...householdIds, cutoff, rowLimit),
     db.prepare(`DELETE FROM tv_advancement_history WHERE id IN (
       SELECT id FROM (
-        SELECT id, household_id, target_position, undone_at,
-          ROW_NUMBER() OVER (PARTITION BY household_id ORDER BY advanced_at DESC, id DESC) AS history_rank
+        SELECT id, household_id, channel_id, target_position, undone_at,
+          ROW_NUMBER() OVER (PARTITION BY channel_id ORDER BY advanced_at DESC, id DESC) AS history_rank
         FROM tv_advancement_history WHERE household_id IN (${householdSql})
       ) old
       WHERE old.history_rank > ? AND NOT EXISTS (
         SELECT 1 FROM channel_state state
-        WHERE state.household_id = old.household_id AND state.channel = 'tv'
+        WHERE state.household_id = old.household_id AND state.channel_id = old.channel_id
           AND old.undone_at IS NULL AND old.target_position = state.current_position
       ) LIMIT ?
-    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerHousehold, rowLimit),
+    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerChannel, rowLimit),
     db.prepare(`DELETE FROM movie_playback_history WHERE id IN (
       SELECT id FROM (
         SELECT id, ROW_NUMBER() OVER (
-          PARTITION BY household_id ORDER BY played_at DESC, id DESC
+          PARTITION BY channel_id ORDER BY played_at DESC, id DESC
         ) AS history_rank
         FROM movie_playback_history WHERE household_id IN (${householdSql})
       ) old WHERE old.history_rank > ? LIMIT ?
-    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerHousehold, rowLimit),
+    )`).bind(...householdIds, CHANNEL_RETENTION.playbackHistoryPerChannel, rowLimit),
     db.prepare(`DELETE FROM movie_rotation WHERE rowid IN (
       SELECT rotation.rowid FROM movie_rotation rotation
-      JOIN movie_channel_state state ON state.household_id = rotation.household_id
+      JOIN movie_channel_state state ON state.channel_id = rotation.channel_id
       WHERE rotation.household_id IN (${householdSql}) AND rotation.cycle < state.cycle LIMIT ?
     )`).bind(...householdIds, rowLimit),
     db.prepare(`DELETE FROM tv_preparation_runs WHERE id IN (

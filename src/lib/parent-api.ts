@@ -61,12 +61,25 @@ export function apiErrorMessage(error: unknown, fallback: string) {
   return error.message;
 }
 
+/** Channel-scoped keys nest under a per-type prefix so a change that affects every Channel
+ * can invalidate them all without knowing which Channels are currently loaded. */
 export const parentKeys = {
+  household: (secret: string) => ["household", secret] as const,
   session: (secret: string) => ["household", secret, "session"] as const,
   overview: (secret: string) => ["household", secret, "overview"] as const,
   library: (secret: string) => ["household", secret, "approved-library"] as const,
-  tv: (secret: string) => ["household", secret, "tv-channel"] as const,
-  tvPreparation: (secret: string) => ["household", secret, "tv-preparation"] as const,
-  movie: (secret: string) => ["household", secret, "movie-channel"] as const,
+  libraryProgramme: (secret: string, programmeId?: string) =>
+    ["household", secret, "approved-library", "programme", programmeId] as const,
+  search: (secret: string, query?: string) => ["household", secret, "cinemeta-search", query] as const,
+  title: (secret: string, type: string, imdbId: string) =>
+    ["household", secret, "cinemeta-title", type, imdbId] as const,
+  channels: (secret: string) => ["household", secret, "channels"] as const,
+  channel: (secret: string, channelId: string) => ["household", secret, "channel", channelId] as const,
+  tvChannels: (secret: string) => ["household", secret, "tv-channel"] as const,
+  tv: (secret: string, channelId?: string) => ["household", secret, "tv-channel", channelId ?? "default"] as const,
+  tvPreparations: (secret: string) => ["household", secret, "tv-preparation"] as const,
+  tvPreparation: (secret: string, channelId?: string) => ["household", secret, "tv-preparation", channelId ?? "default"] as const,
+  movieChannels: (secret: string) => ["household", secret, "movie-channel"] as const,
+  movie: (secret: string, channelId?: string) => ["household", secret, "movie-channel", channelId ?? "default"] as const,
   torBox: (secret: string) => ["household", secret, "torbox"] as const,
 };
