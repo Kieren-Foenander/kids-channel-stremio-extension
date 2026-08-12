@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type FormEvent, type MouseEvent } from "react";
 import { ParentApiError, parentApi, parentKeys } from "../lib/parent-api";
+import { DonationLink } from "./DonationLink";
 import { Ident } from "./Ident";
 import { Button, buttonVariants } from "./ui/button";
 import { Input } from "./ui/input";
@@ -216,6 +217,7 @@ export function ParentShell({ secret }: { secret: string }) {
           <Button type="button" variant="outline" className="w-full" disabled={lockMutation.isPending} onClick={() => void lock()}>
             {lockMutation.isPending ? "Locking…" : "Lock Parent Page"}
           </Button>
+          <DonationLink />
         </div>
       </aside>
 
@@ -230,6 +232,7 @@ export function ParentShell({ secret }: { secret: string }) {
               <Button type="button" variant="outline" className="w-full" disabled={lockMutation.isPending} onClick={() => void lock()}>
                 {lockMutation.isPending ? "Locking…" : "Lock Parent Page"}
               </Button>
+              <DonationLink />
             </div>
           </div>
         </details>

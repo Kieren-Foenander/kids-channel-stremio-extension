@@ -45,6 +45,19 @@ test("browser and Stremio configure entry points use the hardened SPA shell", as
   await expect(page.locator("#unlock-form")).toHaveCount(0);
 });
 
+test("the donation link is subtle, external, and available across the site", async ({ page }) => {
+  await page.goto("/");
+  const publicDonationLink = page.getByRole("link", { name: "Buy me a coffee" });
+  await expect(publicDonationLink).toHaveAttribute("href", "https://buymeacoffee.com/kieren.foenander");
+  await expect(publicDonationLink).toHaveAttribute("target", "_blank");
+  await expect(publicDonationLink).toHaveAttribute("rel", "noreferrer");
+
+  const parentUrl = await createHousehold(page);
+  await page.getByRole("link", { name: "Continue to Parent Page" }).click();
+  await expect(page).toHaveURL(parentUrl);
+  await expect(page.locator('[data-slot="parent-sidebar"]').getByRole("link", { name: "Buy me a coffee" })).toBeVisible();
+});
+
 test("a Parent unlocks with a cookie and keeps access across routes, reloads, and tabs", async ({ page, context }) => {
   const parentUrl = await createHousehold(page);
   await context.clearCookies();

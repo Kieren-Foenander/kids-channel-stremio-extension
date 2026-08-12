@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
+import { DonationLink } from "../components/DonationLink";
 import { Ident } from "../components/Ident";
 import { InstallationDetails } from "../components/InstallationDetails";
 import { parentApi, parentKeys } from "../lib/parent-api";
@@ -31,6 +32,7 @@ function OnboardingPage() {
       </section>
 
       <InstallationDetails secret={secret} numbered />
+      <DonationLink className="mt-10" />
     </main>
   );
 }

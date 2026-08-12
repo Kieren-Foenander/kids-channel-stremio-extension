@@ -3,6 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useForm } from "react-hook-form";
 import { z } from "zod";
+import { DonationLink } from "../components/DonationLink";
 import { Ident } from "../components/Ident";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -74,6 +75,7 @@ function CreateHouseholdPage() {
           {createMutation.isPending ? "Creating Household…" : "Create Household"}
         </Button>
       </form>
+      <DonationLink className="mt-6 self-center" />
     </main>
   );
 }
