@@ -2,7 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
-import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
+import { ChannelStartingProgressChoices } from "../components/ChannelStartingProgressChoices";
+import type { SelectableEpisode } from "../components/EpisodeSelector";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
 import { StateBadge } from "../components/StateBadge";
@@ -49,7 +50,7 @@ type ProgrammeSummary = {
 type SearchResponse = { results: SearchProgramme[] };
 type LibraryResponse = { programmes: ProgrammeSummary[] };
 type ShowDetailResponse = { title: SearchProgramme & { type: "show"; episodes: SelectableEpisode[] } };
-type ApprovalInput = { programme: SearchProgramme; startingEpisodeId?: string; channelIds: string[] };
+type ApprovalInput = { programme: SearchProgramme; startingEpisodeIds?: Record<string, string>; channelIds: string[] };
 type ApprovalResponse = {
   programme: Omit<ProgrammeSummary, "current" | "finished">;
 };
@@ -81,7 +82,7 @@ function AddProgrammesPage() {
   const [input, setInput] = useState(searchState.q ?? "");
   const [inputError, setInputError] = useState("");
   const [detail, setDetail] = useState<SearchProgramme | null>(null);
-  const [startingEpisodeId, setStartingEpisodeId] = useState<string | null>(null);
+  const [startingEpisodeIds, setStartingEpisodeIds] = useState<Record<string, string>>({});
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
   const [newChannelName, setNewChannelName] = useState("");
   const channelsQuery = useChannels(secret);
@@ -114,9 +115,9 @@ function AddProgrammesPage() {
     retry: false,
   });
 
-  const approveProgramme = ({ programme, startingEpisodeId: selectedEpisode, channelIds }: ApprovalInput) => parentApi<ApprovalResponse>(`/api/households/${secret}/library`, {
+  const approveProgramme = ({ programme, startingEpisodeIds: selectedEpisodes, channelIds }: ApprovalInput) => parentApi<ApprovalResponse>(`/api/households/${secret}/library`, {
     method: "POST",
-    body: { type: programme.type, imdbId: programme.id, channelIds, ...(selectedEpisode ? { startingEpisodeId: selectedEpisode } : {}) },
+    body: { type: programme.type, imdbId: programme.id, channelIds, ...(selectedEpisodes ? { startingEpisodeIds: selectedEpisodes } : {}) },
   });
   const settleAfterApproval = (response: ApprovalResponse) => {
     queryClient.setQueryData<LibraryResponse>(parentKeys.library(secret), (current) => {
@@ -196,14 +197,21 @@ function AddProgrammesPage() {
 
   function openDetails(programme: SearchProgramme) {
     approval.reset();
-    setStartingEpisodeId(null);
+    setStartingEpisodeIds({});
     const compatible = (channelsQuery.data ?? []).filter((channel) => channel.type === (programme.type === "show" ? "tv" : "movie"));
     setSelectedChannelIds(compatible.length === 1 ? [compatible[0].id] : []);
     setDetail(programme);
   }
 
-  const selectStartingEpisode = useCallback((episodeId: string | null) => {
-    setStartingEpisodeId(episodeId);
+  const selectStartingEpisode = useCallback((channelId: string, episodeId: string | null) => {
+    setStartingEpisodeIds((current) => {
+      if (episodeId && current[channelId] === episodeId) return current;
+      if (episodeId) return { ...current, [channelId]: episodeId };
+      if (!(channelId in current)) return current;
+      const next = { ...current };
+      delete next[channelId];
+      return next;
+    });
   }, []);
 
   const invalidRestoredQuery = Boolean(query) && (query.length < 2 || query.length > 100);
@@ -300,10 +308,12 @@ function AddProgrammesPage() {
             onNewChannelName={setNewChannelName}
             onCreate={() => channelCreation.mutate()}
           />}
-          {detail?.type === "show" && !approved.has(`show:${detail.id}`) && <ShowEpisodeChoice
+          {detail?.type === "show" && !approved.has(`show:${detail.id}`) && <ShowEpisodeChoices
             key={detail.id}
             query={showDetail}
             programmeTitle={detail.title}
+            channels={(channelsQuery.data ?? []).filter((channel) => selectedChannelIds.includes(channel.id))}
+            selectedEpisodeIds={startingEpisodeIds}
             disabled={approval.isPending || approval.isSuccess}
             onSelectionChange={selectStartingEpisode}
           />}
@@ -316,8 +326,14 @@ function AddProgrammesPage() {
             </Button>}
             {detail?.type === "show" && <Button
               type="button"
-              disabled={approval.isPending || approval.isSuccess || approved.has(`show:${detail.id}`) || !startingEpisodeId || !showDetail.isSuccess || selectedChannelIds.length === 0}
-              onClick={() => approval.mutate({ programme: detail, channelIds: selectedChannelIds, startingEpisodeId: startingEpisodeId ?? undefined })}
+              disabled={approval.isPending || approval.isSuccess || approved.has(`show:${detail.id}`)
+                || !showDetail.isSuccess || selectedChannelIds.length === 0
+                || selectedChannelIds.some((channelId) => !startingEpisodeIds[channelId])}
+              onClick={() => approval.mutate({
+                programme: detail,
+                channelIds: selectedChannelIds,
+                startingEpisodeIds: Object.fromEntries(selectedChannelIds.map((channelId) => [channelId, startingEpisodeIds[channelId]])),
+              })}
             >
               {approval.isPending ? "Approving…" : approval.isSuccess || approved.has(`show:${detail.id}`) ? "Already approved" : "Approve show"}
             </Button>}
@@ -368,9 +384,11 @@ function ChannelChoices({ channels, selected, disabled, onChange, newChannelName
   );
 }
 
-function ShowEpisodeChoice({
+function ShowEpisodeChoices({
   query,
   programmeTitle,
+  channels,
+  selectedEpisodeIds,
   disabled,
   onSelectionChange,
 }: {
@@ -383,8 +401,10 @@ function ShowEpisodeChoice({
     refetch: () => Promise<unknown>;
   };
   programmeTitle: string;
+  channels: ParentChannel[];
+  selectedEpisodeIds: Record<string, string>;
   disabled: boolean;
-  onSelectionChange: (episodeId: string | null) => void;
+  onSelectionChange: (channelId: string, episodeId: string | null) => void;
 }) {
   if (query.isFetching) return <p className="text-sm text-muted-foreground" role="status">Loading released episodes…</p>;
   if (query.isError) return (
@@ -396,7 +416,14 @@ function ShowEpisodeChoice({
   if (!query.isSuccess) return null;
   const episodes = query.data?.title.episodes ?? [];
   if (episodes.length === 0) return <p className="text-sm text-destructive" role="alert">This show has no regular released episodes available to approve.</p>;
-  return <EpisodeSelector episodes={episodes} programmeTitle={programmeTitle} disabled={disabled} onSelectionChange={onSelectionChange} />;
+  return <ChannelStartingProgressChoices
+    channels={channels}
+    episodes={episodes}
+    programmeTitle={programmeTitle}
+    selectedEpisodeIds={selectedEpisodeIds}
+    disabled={disabled}
+    onSelectionChange={onSelectionChange}
+  />;
 }
 
 function SearchCard({ programme, isApproved, isApproving, onApprove, onDetails }: { programme: SearchProgramme; isApproved: boolean; isApproving: boolean; onApprove: (programme: SearchProgramme) => void; onDetails: (programme: SearchProgramme) => void }) {

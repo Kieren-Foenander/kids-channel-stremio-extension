@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { ChannelStartingProgressChoices } from "../components/ChannelStartingProgressChoices";
 import { EpisodeSelector, type SelectableEpisode } from "../components/EpisodeSelector";
 import { Ident } from "../components/Ident";
 import { PageHeader } from "../components/PageHeader";
@@ -64,6 +65,7 @@ function ApprovedLibraryPage() {
   const [progressChannelId, setProgressChannelId] = useState<string | null>(null);
   const [assignmentTarget, setAssignmentTarget] = useState<ProgrammeSummary | null>(null);
   const [selectedChannelIds, setSelectedChannelIds] = useState<string[]>([]);
+  const [assignmentStartingEpisodeIds, setAssignmentStartingEpisodeIds] = useState<Record<string, string>>({});
   const [selectedEpisodeId, setSelectedEpisodeId] = useState<string | null>(null);
   const [status, setStatus] = useState("");
   const channels = useChannels(secret);
@@ -72,10 +74,11 @@ function ApprovedLibraryPage() {
     queryKey: parentKeys.library(secret),
     queryFn: () => parentApi<LibraryResponse>(`/api/households/${secret}/library`),
   });
+  const detailProgrammeId = progressTarget?.id ?? (assignmentTarget?.type === "show" ? assignmentTarget.id : undefined);
   const detail = useQuery({
-    queryKey: parentKeys.libraryProgramme(secret, progressTarget?.id),
-    queryFn: () => parentApi<ProgrammeDetailResponse>(`/api/households/${secret}/library/${encodeURIComponent(progressTarget!.id)}`),
-    enabled: Boolean(progressTarget),
+    queryKey: parentKeys.libraryProgramme(secret, detailProgrammeId),
+    queryFn: () => parentApi<ProgrammeDetailResponse>(`/api/households/${secret}/library/${encodeURIComponent(detailProgrammeId!)}`),
+    enabled: Boolean(detailProgrammeId),
   });
   const programmes = library.data?.programmes ?? [];
   const counts = {
@@ -150,9 +153,13 @@ function ApprovedLibraryPage() {
   });
 
   const assignments = useMutation({
-    mutationFn: ({ programme, channelIds }: { programme: ProgrammeSummary; channelIds: string[] }) => parentApi<{ message: string }>(
+    mutationFn: ({ programme, channelIds, startingEpisodeIds }: {
+      programme: ProgrammeSummary;
+      channelIds: string[];
+      startingEpisodeIds?: Record<string, string>;
+    }) => parentApi<{ message: string }>(
       `/api/households/${secret}/library/${encodeURIComponent(programme.id)}/assignments`,
-      { method: "PUT", body: { channelIds } },
+      { method: "PUT", body: { channelIds, ...(startingEpisodeIds ? { startingEpisodeIds } : {}) } },
     ),
     onSuccess: async (_, { programme }) => {
       setAssignmentTarget(null);
@@ -174,10 +181,26 @@ function ApprovedLibraryPage() {
     setProgressTarget(programme);
   }
 
+  const selectAssignmentStartingEpisode = useCallback((channelId: string, episodeId: string | null) => {
+    setAssignmentStartingEpisodeIds((current) => {
+      if (episodeId && current[channelId] === episodeId) return current;
+      if (episodeId) return { ...current, [channelId]: episodeId };
+      if (!(channelId in current)) return current;
+      const next = { ...current };
+      delete next[channelId];
+      return next;
+    });
+  }, []);
+
   const actionError = showEligibility.isError
     ? apiErrorMessage(showEligibility.error, "The show could not be updated. Try again.")
     : "";
   const progressAssignment = progressTarget?.assignments.find((assignment) => assignment.channelId === progressChannelId);
+  const compatibleAssignmentChannels = (channels.data ?? []).filter((channel) =>
+    channel.type === (assignmentTarget?.type === "show" ? "tv" : "movie"));
+  const existingAssignmentIds = new Set(assignmentTarget?.assignments.map((assignment) => assignment.channelId) ?? []);
+  const newAssignmentChannels = compatibleAssignmentChannels.filter((channel) =>
+    selectedChannelIds.includes(channel.id) && !existingAssignmentIds.has(channel.id));
 
   return (
     <div className="grid gap-6">
@@ -222,6 +245,7 @@ function ApprovedLibraryPage() {
               onAssignments={(target) => {
                 assignments.reset();
                 setSelectedChannelIds(target.assignments.map((assignment) => assignment.channelId));
+                setAssignmentStartingEpisodeIds({});
                 setAssignmentTarget(target);
               }}
               onRemove={(target) => { removal.reset(); setRemoveTarget(target); }}
@@ -292,7 +316,7 @@ function ApprovedLibraryPage() {
           </DialogHeader>
           <fieldset className="grid gap-2 rounded-[4px] border p-4">
             <legend className="px-1 text-sm font-semibold">Channels</legend>
-            {(channels.data ?? []).filter((channel) => channel.type === (assignmentTarget?.type === "show" ? "tv" : "movie")).map((channel) => (
+            {compatibleAssignmentChannels.map((channel) => (
               <label key={channel.id} className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
@@ -306,10 +330,32 @@ function ApprovedLibraryPage() {
               </label>
             ))}
           </fieldset>
+          {assignmentTarget?.type === "show" && newAssignmentChannels.length > 0 && (detail.isFetching ? (
+            <p className="text-sm text-muted-foreground" role="status">Loading released episodes…</p>
+          ) : detail.isError ? (
+            <p className="text-sm text-destructive" role="alert">Released episodes could not be loaded. Try again.</p>
+          ) : detail.isSuccess ? (
+            <ChannelStartingProgressChoices
+              channels={newAssignmentChannels}
+              episodes={detail.data.programme.episodes}
+              programmeTitle={assignmentTarget.title}
+              selectedEpisodeIds={assignmentStartingEpisodeIds}
+              disabled={assignments.isPending}
+              onSelectionChange={selectAssignmentStartingEpisode}
+            />
+          ) : null)}
           {assignments.isError && <p className="text-sm text-destructive" role="alert">{apiErrorMessage(assignments.error, "Channel Assignments could not be updated.")}</p>}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline" disabled={assignments.isPending}>Cancel</Button></DialogClose>
-            <Button type="button" disabled={!assignmentTarget || assignments.isPending} onClick={() => assignmentTarget && assignments.mutate({ programme: assignmentTarget, channelIds: selectedChannelIds })}>
+            <Button type="button" disabled={!assignmentTarget || assignments.isPending
+              || (assignmentTarget.type === "show" && newAssignmentChannels.some((channel) => !assignmentStartingEpisodeIds[channel.id]))}
+              onClick={() => assignmentTarget && assignments.mutate({
+                programme: assignmentTarget,
+                channelIds: selectedChannelIds,
+                startingEpisodeIds: assignmentTarget.type === "show"
+                  ? Object.fromEntries(newAssignmentChannels.map((channel) => [channel.id, assignmentStartingEpisodeIds[channel.id]]))
+                  : undefined,
+              })}>
               {assignments.isPending ? "Saving…" : selectedChannelIds.length === 0 ? "Remove from Library" : "Save Assignments"}
             </Button>
           </DialogFooter>

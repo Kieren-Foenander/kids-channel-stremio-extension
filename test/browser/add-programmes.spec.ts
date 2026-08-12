@@ -140,6 +140,42 @@ test("a show can be approved from a non-default released episode without losing 
   await expect(show.getByText("Already approved")).toBeVisible();
 });
 
+test("a show can start at different Show Progress on each selected TV Channel", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  await page.getByRole("button", { name: "Create Channel" }).click();
+  const createDialog = page.getByRole("dialog", { name: "Create TV Channel" });
+  await createDialog.getByLabel("Channel name").fill("Weekend");
+  await createDialog.getByRole("button", { name: "Save Channel" }).click();
+
+  await page.goto(`${parentUrl}/add-programmes?q=Example&type=show&page=1`);
+  const show = page.getByRole("article").filter({ has: page.getByRole("heading", { name: "The Example", exact: true }) });
+  await show.getByRole("button", { name: "View details for The Example" }).click();
+  const dialog = page.getByRole("dialog", { name: "The Example" });
+  await dialog.getByLabel("TV Channel", { exact: true }).check();
+  await dialog.getByLabel("Weekend", { exact: true }).check();
+
+  const defaultProgress = dialog.getByRole("group", { name: "Starting Show Progress for TV Channel" });
+  const weekendProgress = dialog.getByRole("group", { name: "Starting Show Progress for Weekend" });
+  await expect(defaultProgress.getByLabel("Episode")).toHaveValue("tt1234567:1:1");
+  await weekendProgress.getByLabel("Episode").selectOption("tt1234567:1:2");
+
+  const approvalResponse = page.waitForResponse((response) => response.request().method() === "POST"
+    && /\/api\/households\/[^/]+\/library$/.test(new URL(response.url()).pathname));
+  await dialog.getByRole("button", { name: "Approve show" }).click();
+  const approval = await approvalResponse;
+  expect(approval.status()).toBe(201);
+  const assignments = (await approval.json()).programme.assignments as Array<{
+    channelName: string;
+    showProgress: { id: string };
+  }>;
+  expect(new Map(assignments.map((assignment) => [assignment.channelName, assignment.showProgress.id])))
+    .toEqual(new Map([
+      ["TV Channel", "tt1234567:1:1"],
+      ["Weekend", "tt1234567:1:2"],
+    ]));
+});
+
 test("a restored URL reruns search and search failures are announced", async ({ page }) => {
   const parentUrl = await createHousehold(page);
   await page.goto(`${parentUrl}/add-programmes?q=Example&type=movie&page=2`);

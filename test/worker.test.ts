@@ -2333,13 +2333,21 @@ describe("Stremio protocol", () => {
     const showApproval = await SELF.fetch(`https://kids.test/api/households/${secret}/library`, {
       method: "POST", headers, body: JSON.stringify({
         type: "show", imdbId: "tt6666666", channelIds: [tvChannels[0].id, tvChannels[1].id],
+        startingEpisodeIds: {
+          [tvChannels[0].id]: "tt6666666:1:1",
+          [tvChannels[1].id]: "tt6666666:1:2",
+        },
       }),
     });
     expect(showApproval.status).toBe(201);
     const show = (await showApproval.json<any>()).programme;
+    expect(new Map(show.assignments.map((assignment: any) => [assignment.channelId, assignment.showProgress.id])))
+      .toEqual(new Map([
+        [tvChannels[0].id, "tt6666666:1:1"], [tvChannels[1].id, "tt6666666:1:2"],
+      ]));
     const secondTvMeta = await (await SELF.fetch(`${base}/meta/series/${encodeURIComponent(`kids-channels:tv:${tvChannels[1].id}`)}.json`)).json<any>();
-    expect(secondTvMeta.meta.videos).toHaveLength(2);
-    const scopedPlayback = await SELF.fetch(secondTvMeta.meta.videos[1].streams[0].url);
+    expect(secondTvMeta.meta.videos).toHaveLength(1);
+    const scopedPlayback = await SELF.fetch(secondTvMeta.meta.videos[0].streams[0].url);
     expect(scopedPlayback.status).toBe(200);
     const currentByChannel = await env.DB.prepare(`SELECT channel_id, video_id FROM current_programmes
       WHERE channel_id IN (?, ?) ORDER BY channel_id`).bind(tvChannels[0].id, tvChannels[1].id)
@@ -2359,7 +2367,17 @@ describe("Stremio protocol", () => {
       method: "PUT", headers, body: JSON.stringify({ channelIds: [tvChannels[0].id] }),
     });
     expect(removedFromSecondTv.status).toBe(200);
-    expect((await SELF.fetch(secondTvMeta.meta.videos[1].streams[0].url)).status).toBe(404);
+    expect((await SELF.fetch(secondTvMeta.meta.videos[0].streams[0].url)).status).toBe(404);
+    const restoredToSecondTv = await SELF.fetch(`https://kids.test/api/households/${secret}/library/${show.id}/assignments`, {
+      method: "PUT", headers, body: JSON.stringify({
+        channelIds: [tvChannels[0].id, tvChannels[1].id],
+        startingEpisodeIds: { [tvChannels[1].id]: "tt6666666:1:2" },
+      }),
+    });
+    expect(restoredToSecondTv.status).toBe(200);
+    expect(await env.DB.prepare(`SELECT next_video_id FROM channel_assignments
+      WHERE channel_id = ? AND programme_id = ?`).bind(tvChannels[1].id, show.id).first<string>("next_video_id"))
+      .toBe("tt6666666:1:2");
   });
 
   it("serves a configurable household-specific manifest", async () => {

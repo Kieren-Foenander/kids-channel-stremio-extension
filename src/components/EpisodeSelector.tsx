@@ -23,6 +23,7 @@ export function EpisodeSelector({
   programmeTitle,
   disabled = false,
   initialEpisodeId,
+  idPrefix = "starting",
   legend = "Choose starting Show Progress",
   helpText,
   onSelectionChange,
@@ -31,6 +32,7 @@ export function EpisodeSelector({
   programmeTitle: string;
   disabled?: boolean;
   initialEpisodeId?: string;
+  idPrefix?: string;
   legend?: string;
   helpText?: string;
   onSelectionChange: (episodeId: string | null) => void;
@@ -50,14 +52,14 @@ export function EpisodeSelector({
   return (
     <fieldset className="min-w-0 rounded-[4px] border p-4" disabled={disabled}>
       <legend className="px-1 text-sm font-bold">{legend}</legend>
-      <p id="starting-episode-help" className="mb-3 text-sm leading-relaxed text-muted-foreground">{helpText ?? `Choose a season, then a released regular episode for ${programmeTitle}.`}</p>
+      <p id={`${idPrefix}-episode-help`} className="mb-3 text-sm leading-relaxed text-muted-foreground">{helpText ?? `Choose a season, then a released regular episode for ${programmeTitle}.`}</p>
       <div className="grid gap-3 sm:grid-cols-[minmax(7rem,0.35fr)_minmax(0,1fr)]">
         <div>
-          <label htmlFor="starting-season" className="mb-1.5 block text-sm font-semibold">Season</label>
+          <label htmlFor={`${idPrefix}-season`} className="mb-1.5 block text-sm font-semibold">Season</label>
           <NativeSelect
-            id="starting-season"
+            id={`${idPrefix}-season`}
             value={season ?? ""}
-            aria-describedby="starting-episode-help"
+            aria-describedby={`${idPrefix}-episode-help`}
             onChange={(event) => {
               const nextSeason = event.target.value ? Number(event.target.value) : null;
               setSeason(nextSeason);
@@ -70,12 +72,12 @@ export function EpisodeSelector({
           </NativeSelect>
         </div>
         <div>
-          <label htmlFor="starting-episode" className="mb-1.5 block text-sm font-semibold">Episode</label>
+          <label htmlFor={`${idPrefix}-episode`} className="mb-1.5 block text-sm font-semibold">Episode</label>
           <NativeSelect
-            id="starting-episode"
+            id={`${idPrefix}-episode`}
             value={episodeId}
             disabled={disabled || season === null}
-            aria-describedby="starting-episode-help"
+            aria-describedby={`${idPrefix}-episode-help`}
             onChange={(event) => {
               setEpisodeId(event.target.value);
               onSelectionChange(event.target.value || null);

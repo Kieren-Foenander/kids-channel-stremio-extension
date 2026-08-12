@@ -634,13 +634,24 @@ export default {
         return json({ error: "Parent authentication is required." }, 401);
       }
       if (request.method === "GET") return json({ programmes: await approvedLibrary(env.DB, household.id) });
-      let input: { type?: unknown; imdbId?: unknown; startingEpisodeId?: unknown; channelIds?: unknown } = {};
+      let input: {
+        type?: unknown;
+        imdbId?: unknown;
+        startingEpisodeId?: unknown;
+        startingEpisodeIds?: unknown;
+        channelIds?: unknown;
+      } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
       if ((input.type !== "show" && input.type !== "movie") || typeof input.imdbId !== "string" || !/^tt\d+$/.test(input.imdbId)) {
         return json({ error: "Choose a valid Cinemeta show or movie." }, 400);
       }
       if (input.startingEpisodeId !== undefined && (typeof input.startingEpisodeId !== "string" || input.startingEpisodeId.length === 0)) {
         return json({ error: "Choose a valid regular released starting episode." }, 400);
+      }
+      if (input.startingEpisodeIds !== undefined && (!input.startingEpisodeIds
+        || typeof input.startingEpisodeIds !== "object" || Array.isArray(input.startingEpisodeIds)
+        || Object.values(input.startingEpisodeIds).some((videoId) => typeof videoId !== "string" || videoId.length === 0))) {
+        return json({ error: "Choose a valid regular released starting episode for each TV Channel." }, 400);
       }
       if (input.channelIds !== undefined && (!Array.isArray(input.channelIds)
         || input.channelIds.some((channelId) => typeof channelId !== "string"))) {
@@ -658,6 +669,7 @@ export default {
           title,
           input.startingEpisodeId,
           input.channelIds as string[] | undefined,
+          input.startingEpisodeIds as Record<string, string> | undefined,
         );
         await reconcileAssignedChannels(
           env,
@@ -705,11 +717,16 @@ export default {
         WHERE id = ? AND household_id = ?`).bind(assignmentsMatch[2], household.id)
         .first<{ id: string; content_type: ContentType }>();
       if (!programme) return json({ error: "Programme was not found in the Approved Library." }, 404);
-      let input: { channelIds?: unknown; startingEpisodeId?: unknown } = {};
+      let input: { channelIds?: unknown; startingEpisodeId?: unknown; startingEpisodeIds?: unknown } = {};
       try { input = await request.json() as typeof input; } catch { /* handled below */ }
       if (!Array.isArray(input.channelIds)
         || input.channelIds.some((channelId) => typeof channelId !== "string")) {
         return json({ error: "Choose compatible Channels for this programme." }, 400);
+      }
+      if (input.startingEpisodeIds !== undefined && (!input.startingEpisodeIds
+        || typeof input.startingEpisodeIds !== "object" || Array.isArray(input.startingEpisodeIds)
+        || Object.values(input.startingEpisodeIds).some((videoId) => typeof videoId !== "string" || videoId.length === 0))) {
+        return json({ error: "Choose a valid regular released starting episode for each new TV Channel Assignment." }, 400);
       }
       const desiredIds = [...new Set(input.channelIds as string[])];
       const compatible = await channelsForHousehold(env.DB, household.id, channelTypeForContent(programme.content_type));
@@ -736,18 +753,24 @@ export default {
       }
       const additions = desiredIds.filter((channelId) => !existingIds.has(channelId));
       const removals = [...existingIds].filter((channelId) => !desiredIds.includes(channelId));
-      let startingEpisodeId: string | null = null;
+      const startingEpisodeIds = new Map<string, string>();
       if (programme.content_type === "show" && additions.length > 0) {
-        if (typeof input.startingEpisodeId === "string") {
-          const episode = await env.DB.prepare(`SELECT 1 FROM show_episodes
-            WHERE programme_id = ? AND video_id = ?`).bind(programme.id, input.startingEpisodeId).first();
-          if (!episode) return json({ error: "Choose a valid regular released starting episode." }, 400);
-          startingEpisodeId = input.startingEpisodeId;
-        } else {
-          startingEpisodeId = await env.DB.prepare(`SELECT video_id FROM show_episodes
-            WHERE programme_id = ? ORDER BY CASE WHEN season = 1 AND episode = 1 THEN 0 ELSE 1 END,
-              season, episode LIMIT 1`).bind(programme.id).first<string>("video_id");
-          if (!startingEpisodeId) return json({ error: "This show has no regular released episodes." }, 400);
+        const requestedStartingEpisodeIds = input.startingEpisodeIds as Record<string, string> | undefined;
+        if (requestedStartingEpisodeIds
+          && Object.keys(requestedStartingEpisodeIds).some((channelId) => !additions.includes(channelId))) {
+          return json({ error: "Choose starting Show Progress only for new TV Channel Assignments." }, 400);
+        }
+        const episodes = await env.DB.prepare(`SELECT video_id, season, episode FROM show_episodes
+          WHERE programme_id = ? ORDER BY season, episode`).bind(programme.id)
+          .all<{ video_id: string; season: number; episode: number }>();
+        const defaultEpisodeId = episodes.results.find((episode) => episode.season === 1 && episode.episode === 1)?.video_id;
+        for (const channelId of additions) {
+          const startingEpisodeId = requestedStartingEpisodeIds?.[channelId]
+            ?? (typeof input.startingEpisodeId === "string" ? input.startingEpisodeId : defaultEpisodeId);
+          if (!startingEpisodeId || !episodes.results.some((episode) => episode.video_id === startingEpisodeId)) {
+            return json({ error: "Choose a valid regular released starting episode for each new TV Channel Assignment." }, 400);
+          }
+          startingEpisodeIds.set(channelId, startingEpisodeId);
         }
       }
       const now = new Date().toISOString();
@@ -767,7 +790,7 @@ export default {
       for (const channelId of additions) {
         statements.push(env.DB.prepare(`INSERT INTO channel_assignments
           (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
-          .bind(channelId, programme.id, startingEpisodeId, now));
+          .bind(channelId, programme.id, startingEpisodeIds.get(channelId) ?? null, now));
       }
       if (statements.length > 0) await env.DB.batch(statements);
       await reconcileAssignedChannels(env, household.id, [...additions, ...removals], programme.content_type);

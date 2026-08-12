@@ -199,6 +199,7 @@ export async function approveProgramme(
   title: CinemetaTitle | CinemetaShow,
   startingEpisodeId?: string,
   requestedChannelIds?: string[],
+  requestedStartingEpisodeIds?: Record<string, string>,
 ): Promise<ApprovedProgramme> {
   const id = crypto.randomUUID();
   const approvedAt = new Date().toISOString();
@@ -220,14 +221,21 @@ export async function approveProgramme(
     .bind(id, householdId, title.id, title.type, title.title, title.description ?? null, title.poster ?? null,
       title.background ?? null, title.releaseInfo ?? null, JSON.stringify(title.genres), title.imdbRating ?? null, approvedAt)];
 
-  let startingEpisode: CinemetaEpisode | undefined;
+  const startingEpisodes = new Map<string, CinemetaEpisode>();
   if (title.type === "show") {
     const show = title as CinemetaShow;
     if (show.episodes.length === 0) throw new Error("show has no regular released episodes");
-    startingEpisode = startingEpisodeId
-      ? show.episodes.find((episode) => episode.id === startingEpisodeId)
-      : show.episodes.find((episode) => episode.season === 1 && episode.episode === 1);
-    if (!startingEpisode) throw new Error("starting episode is invalid");
+    if (requestedStartingEpisodeIds
+      && Object.keys(requestedStartingEpisodeIds).some((channelId) => !requested.includes(channelId))) {
+      throw new Error("starting episode is invalid");
+    }
+    const defaultEpisode = show.episodes.find((episode) => episode.season === 1 && episode.episode === 1);
+    for (const channelId of requested) {
+      const requestedEpisodeId = requestedStartingEpisodeIds?.[channelId] ?? startingEpisodeId ?? defaultEpisode?.id;
+      const startingEpisode = show.episodes.find((episode) => episode.id === requestedEpisodeId);
+      if (!startingEpisode) throw new Error("starting episode is invalid");
+      startingEpisodes.set(channelId, startingEpisode);
+    }
     for (const episode of show.episodes) {
       statements.push(db.prepare(`INSERT INTO show_episodes
         (programme_id, video_id, season, episode, title, released_at, overview) VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -238,7 +246,7 @@ export async function approveProgramme(
   for (const channelId of requested) {
     statements.push(db.prepare(`INSERT INTO channel_assignments
       (channel_id, programme_id, next_video_id, created_at) VALUES (?, ?, ?, ?)`)
-      .bind(channelId, id, startingEpisode?.id ?? null, approvedAt));
+      .bind(channelId, id, startingEpisodes.get(channelId)?.id ?? null, approvedAt));
   }
 
   await db.batch(statements);
@@ -254,7 +262,7 @@ export async function approveProgramme(
       createdAt: approvedAt,
       current: false,
       finished: false,
-      showProgress: startingEpisode,
+      showProgress: startingEpisodes.get(channelId),
     })),
   };
 }
