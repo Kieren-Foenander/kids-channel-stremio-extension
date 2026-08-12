@@ -11,6 +11,17 @@ export interface Channel {
   createdAt: string;
 }
 
+export interface ChannelDeletionProgramme {
+  programmeId: string;
+  title: string;
+  type: ContentType;
+}
+
+export interface ChannelDeletionImpact {
+  assignments: ChannelDeletionProgramme[];
+  programmesLeavingHousehold: ChannelDeletionProgramme[];
+}
+
 interface ChannelRow {
   id: string;
   household_id: string;
@@ -69,6 +80,39 @@ export async function findChannel(
     : await db.prepare("SELECT * FROM channels WHERE id = ? AND household_id = ?")
       .bind(channelId, householdId).first<ChannelRow>();
   return row ? fromRow(row) : null;
+}
+
+export async function channelDeletionImpact(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+): Promise<ChannelDeletionImpact> {
+  const rows = await db.prepare(`SELECT programme.id AS programme_id, programme.content_type,
+      COALESCE(canonical.title, programme.title) AS title,
+      CASE WHEN NOT EXISTS (
+        SELECT 1 FROM channel_assignments other
+        WHERE other.programme_id = assignment.programme_id AND other.channel_id != assignment.channel_id
+      ) THEN 1 ELSE 0 END AS leaves_household
+    FROM channel_assignments assignment
+    JOIN approved_programmes programme ON programme.id = assignment.programme_id
+    LEFT JOIN canonical_shows canonical
+      ON programme.content_type = 'show' AND canonical.imdb_id = programme.imdb_id
+    WHERE assignment.channel_id = ? AND programme.household_id = ?
+    ORDER BY assignment.created_at, programme.id`).bind(channelId, householdId).all<{
+      programme_id: string;
+      content_type: ContentType;
+      title: string;
+      leaves_household: number;
+    }>();
+  const assignments = rows.results.map((row) => ({
+    programmeId: row.programme_id,
+    title: row.title,
+    type: row.content_type,
+  }));
+  return {
+    assignments,
+    programmesLeavingHousehold: assignments.filter((_, index) => Boolean(rows.results[index].leaves_household)),
+  };
 }
 
 export async function legacyChannel(

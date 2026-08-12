@@ -68,6 +68,7 @@ import {
 import { pruneObsoleteChannelState } from "./channel-retention";
 import {
   channelTypeForContent,
+  channelDeletionImpact,
   channelsForHousehold,
   createChannel,
   findChannel,
@@ -569,7 +570,12 @@ export default {
       }
       const channel = await findChannel(env.DB, household.id, channelMatch[2]);
       if (!channel) return json({ error: "Channel was not found." }, 404);
-      if (request.method === "GET") return json({ channel }, 200, { "cache-control": "no-store" });
+      if (request.method === "GET") {
+        return json({
+          channel,
+          deletionImpact: await channelDeletionImpact(env.DB, household.id, channel.id),
+        }, 200, { "cache-control": "no-store" });
+      }
       if (request.method === "PATCH") {
         let input: { name?: unknown } = {};
         try { input = await request.json() as typeof input; } catch { /* handled below */ }
@@ -577,21 +583,17 @@ export default {
         const renamed = await renameChannel(env.DB, household.id, channel.id, input.name);
         return json({ channel: renamed, message: "Channel renamed. Restart Stremio to refresh its tile." });
       }
-      const orphanRows = await env.DB.prepare(`SELECT assignment.programme_id FROM channel_assignments assignment
-        WHERE assignment.channel_id = ? AND NOT EXISTS (
-          SELECT 1 FROM channel_assignments other
-          WHERE other.programme_id = assignment.programme_id AND other.channel_id != assignment.channel_id
-        )`).bind(channel.id).all<{ programme_id: string }>();
+      const deletionImpact = await channelDeletionImpact(env.DB, household.id, channel.id);
       await env.DB.batch([
         env.DB.prepare("DELETE FROM channels WHERE id = ? AND household_id = ?").bind(channel.id, household.id),
-        ...orphanRows.results.map((row) => env.DB.prepare(
+        ...deletionImpact.programmesLeavingHousehold.map((programme) => env.DB.prepare(
           "DELETE FROM approved_programmes WHERE id = ? AND household_id = ?",
-        ).bind(row.programme_id, household.id)),
+        ).bind(programme.programmeId, household.id)),
       ]);
       queueAutomaticTvPreparation(env, ctx, household.id);
       return json({
         message: "Channel deleted. Restart Stremio to refresh the Channel rows.",
-        removedProgrammes: orphanRows.results.length,
+        removedProgrammes: deletionImpact.programmesLeavingHousehold.length,
       });
     }
 

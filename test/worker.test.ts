@@ -2286,6 +2286,14 @@ describe("Stremio protocol", () => {
     expect(approval.status).toBe(201);
     const programme = (await approval.json<any>()).programme;
     expect(programme.assignments).toMatchObject([{ channelId: comedy.id, channelName: "Comedy" }]);
+    const comedyDetail = await (await SELF.fetch(
+      `https://kids.test/api/households/${secret}/channels/${comedy.id}`,
+      { headers },
+    )).json<any>();
+    expect(comedyDetail.deletionImpact).toEqual({
+      assignments: [{ programmeId: programme.id, title: "Funny Movie", type: "movie" }],
+      programmesLeavingHousehold: [{ programmeId: programme.id, title: "Funny Movie", type: "movie" }],
+    });
 
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
     const catalog = await (await SELF.fetch(`${base}/catalog/movie/kids-movie-channel.json`)).json<any>();

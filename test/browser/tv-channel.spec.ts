@@ -91,6 +91,41 @@ test("the TV Channel page selects a surviving Channel after the Default Channel 
   await expect(page.getByRole("heading", { name: "Channel Schedule" })).toBeVisible();
 });
 
+test("Channel deletion names affected assignments and programmes leaving the Household", async ({ page }) => {
+  const parentUrl = await createHousehold(page);
+  await page.goto(`${parentUrl}/tv-channel`);
+  const channelSelect = page.getByLabel("TV Channel", { exact: true });
+  await expect(channelSelect).toHaveValue(/.+/);
+  const channelId = await channelSelect.inputValue();
+  await page.route("**/channels/**", async route => {
+    if (route.request().method() !== "GET" || !new URL(route.request().url()).pathname.endsWith(`/channels/${channelId}`)) {
+      return route.continue();
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        channel: { id: channelId, type: "tv", name: "TV Channel" },
+        deletionImpact: {
+          assignments: [
+            { programmeId: "shared", title: "Shared Adventures", type: "show" },
+            { programmeId: "exclusive", title: "Only Here", type: "show" },
+          ],
+          programmesLeavingHousehold: [
+            { programmeId: "exclusive", title: "Only Here", type: "show" },
+          ],
+        },
+      }),
+    });
+  });
+
+  await page.getByRole("button", { name: "Delete" }).click();
+  const dialog = page.getByRole("dialog", { name: "Delete TV Channel?" });
+  await expect(dialog).toContainText("Shared Adventures");
+  await expect(dialog).toContainText("Only Here");
+  await expect(dialog).toContainText("leaves the Approved Library");
+});
+
 test("a Parent inspects and controls the TV Channel with progressive disclosure", async ({ page }) => {
   let state = channelState();
   let stateRequests = 0;

@@ -1,4 +1,4 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type FormEvent } from "react";
 import { CHANNEL_LIMIT_PER_TYPE, useChannels, type ChannelType, type ParentChannel } from "../lib/channels";
 import { apiErrorMessage, parentApi, parentKeys } from "../lib/parent-api";
@@ -25,6 +25,17 @@ export function ChannelCollectionControl({
   const [mode, setMode] = useState<"create" | "rename" | "delete" | null>(null);
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
+  const deletionImpactQuery = useQuery({
+    queryKey: parentKeys.channel(secret, selected?.id ?? ""),
+    queryFn: () => parentApi<{
+      deletionImpact: {
+        assignments: Array<{ programmeId: string; title: string; type: "show" | "movie" }>;
+        programmesLeavingHousehold: Array<{ programmeId: string; title: string; type: "show" | "movie" }>;
+      };
+    }>(`/api/households/${secret}/channels/${selected!.id}`),
+    enabled: mode === "delete" && Boolean(selected),
+    staleTime: 0,
+  });
 
   // A missing or deleted selection falls back to the first Channel, including when the
   // Default Channel a link once pointed at has been deleted.
@@ -131,10 +142,30 @@ export function ChannelCollectionControl({
             <DialogTitle>Delete {selected?.name}?</DialogTitle>
             <DialogDescription>Its schedule, progress, and history will be removed. Programmes assigned nowhere else will also leave the Approved Library.</DialogDescription>
           </DialogHeader>
+          {deletionImpactQuery.isPending ? (
+            <p className="text-sm text-muted-foreground" role="status">Loading affected programmes…</p>
+          ) : deletionImpactQuery.isError ? (
+            <p className="text-sm text-destructive" role="alert">The deletion impact could not be loaded. Try again before deleting this Channel.</p>
+          ) : deletionImpactQuery.data.deletionImpact.assignments.length === 0 ? (
+            <p className="text-sm text-muted-foreground">This Channel has no Channel Assignments.</p>
+          ) : (
+            <div className="grid gap-2 text-sm">
+              <p>Deleting this Channel removes these Channel Assignments:</p>
+              <ul className="grid gap-1" aria-label="Affected Channel Assignments">
+                {deletionImpactQuery.data.deletionImpact.assignments.map((programme) => {
+                  const leaves = deletionImpactQuery.data.deletionImpact.programmesLeavingHousehold
+                    .some((candidate) => candidate.programmeId === programme.programmeId);
+                  return <li key={programme.programmeId}><strong>{programme.title}</strong> — {leaves
+                    ? "leaves the Approved Library"
+                    : "remains assigned to another Channel"}</li>;
+                })}
+              </ul>
+            </div>
+          )}
           {deleteMutation.isError && <p className="text-sm text-destructive" role="alert">{apiErrorMessage(deleteMutation.error, "The Channel could not be deleted.")}</p>}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline" disabled={deleteMutation.isPending}>Cancel</Button></DialogClose>
-            <Button type="button" disabled={deleteMutation.isPending || !selected} onClick={() => deleteMutation.mutate()}>{deleteMutation.isPending ? "Deleting…" : "Delete Channel"}</Button>
+            <Button type="button" disabled={deleteMutation.isPending || !selected || !deletionImpactQuery.data} onClick={() => deleteMutation.mutate()}>{deleteMutation.isPending ? "Deleting…" : "Delete Channel"}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
