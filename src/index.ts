@@ -133,6 +133,18 @@ function playbackRedirect(location: string): Response {
   });
 }
 
+function playbackProbeResponse(): Response {
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "accept-ranges": "bytes",
+      "access-control-allow-origin": "*",
+      "cache-control": "no-store",
+      "content-type": "application/octet-stream",
+    },
+  });
+}
+
 function queueAutomaticTvPreparation(env: Env, ctx: ExecutionContext, householdId: string): void {
   ctx.waitUntil(ensureAutomaticTvPreparation(env, householdId).catch((error) => {
     console.error(JSON.stringify({
@@ -180,6 +192,10 @@ async function playChannelProgramme(
       .some((programme) => programme.episode.id === videoId)
     : (await movieChannelProgramme(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED))?.imdbId === videoId;
   if (!belongsToChannel) return playbackResponse("Programme not found in this Channel.", 404);
+  // Stremio probes every inline playback URL with HEAD while building its player.
+  // A probe confirms reachability only; treating it as playback advances the whole
+  // visible schedule and can consume a movie before the viewer presses Play.
+  if (request.method === "HEAD") return playbackProbeResponse();
   if (!env.CONFIG_SECRET) return playbackResponse("Playback is temporarily unavailable.", 503);
   try {
     const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
@@ -1075,13 +1091,15 @@ export default {
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const channel = await findChannel(env.DB, household.id, movieSignOffMatch[2], "movie");
       if (!channel) return addonJson({ error: "Movie Channel not found." }, 404);
-      await requestMovieSignOff(
-        env.DB,
-        household.id,
-        channel.id,
-        Number(movieSignOffMatch[3]),
-        Number(movieSignOffMatch[4]),
-      );
+      if (request.method === "GET") {
+        await requestMovieSignOff(
+          env.DB,
+          household.id,
+          channel.id,
+          Number(movieSignOffMatch[3]),
+          Number(movieSignOffMatch[4]),
+        );
+      }
       return movieSignOff(request);
     }
 

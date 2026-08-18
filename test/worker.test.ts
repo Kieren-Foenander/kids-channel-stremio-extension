@@ -1378,6 +1378,27 @@ describe("rolling TV Channel Schedule", () => {
     ]);
   });
 
+  it("does not advance the Channel when Stremio probes inline playback URLs", async () => {
+    const { created, channelId, base } = await arrangeShows(3);
+    const before = await metadata(base);
+    const prepared = before.meta.videos.slice(0, 5);
+
+    const responses = await Promise.all(prepared.map((video: any) => SELF.fetch(
+      video.streams[0].url,
+      { method: "HEAD", redirect: "manual" },
+    )));
+
+    expect(responses.every((response) => response.ok || response.status === 302)).toBe(true);
+    const after = await tvChannelSchedule(
+      env.DB,
+      created.householdId,
+      channelId,
+      "deterministic-test-seed",
+    );
+    expect(after.slice(0, 5).map((programme) => programme.episode.id))
+      .toEqual(prepared.map((video: any) => video.id));
+  });
+
   it("schedules one eligible show's regular episodes consecutively in order", async () => {
     const { base } = await arrangeShows(1, 25);
     const result = await metadata(base);
@@ -1839,6 +1860,21 @@ describe("Movie Channel rotation and sign-off", () => {
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toMatch(/^tt800000[1-3]$/);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE cycle = 0 AND consumed_at IS NOT NULL").first())
       .toMatchObject({ count: 3 });
+  });
+
+  it("does not consume the Current Programme when Stremio probes the sign-off URL", async () => {
+    const { base } = await arrangeMovies();
+    const before = await metadata(base);
+    const signOffUrl = before.meta.videos[1].streams[0].url;
+
+    const probe = await SELF.fetch(signOffUrl, { method: "HEAD" });
+
+    expect(probe.status).toBe(200);
+    expect(probe.headers.get("content-type")).toBe("video/mp4");
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId)
+      .toBe(before.meta.behaviorHints.defaultVideoId);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_advancements").first())
+      .toMatchObject({ count: 0 });
   });
 
   it("adds a newly approved movie to the unplayed rotation before any movie repeats", async () => {
