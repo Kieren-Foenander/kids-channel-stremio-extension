@@ -86,9 +86,9 @@ The Worker encrypts each Household's TorBox API token with `CONFIG_SECRET`. It c
 - `GET /addons/:secret/catalog/series/kids-tv-channel.json` — every configured TV Channel tile, including empty Channels
 - `GET /addons/:secret/catalog/movie/kids-movie-channel.json` — every configured Movie Channel tile, including empty Channels
 - `GET /addons/:secret/meta/series/kids-channels:tv.json` — Current Programme plus the rolling Channel Schedule with canonical episode IDs
-- `GET /addons/:secret/stream/series/:episodeId.json` — return one ready stream, atomically advance only after selection, or start preparation and defer an Unavailable Episode behind an autoplay bumper
+- `GET /addons/:secret/stream/series/:episodeId.json` — read-only compatibility lookup for an already-prepared stream; not advertised in current manifests
 - `GET /addons/:secret/meta/movie/kids-channels:movie.json` — the canonical Current Programme followed only by its final sign-off
-- `GET /addons/:secret/stream/movie/:videoId.json` — return one cached canonical movie stream, with a compatibility fallback for sign-off requests
+- `GET /addons/:secret/stream/movie/:videoId.json` — read-only compatibility lookup for an already-prepared movie stream or sign-off asset; not advertised in current manifests
 - `GET|HEAD /addons/:secret/media/movie-sign-off/:channelId/:cycle/:position.mp4` — atomically consume the movie in one Channel and directly serve its inline five-second sign-off
 - `GET|HEAD /addons/:secret/play/:type/:channelId/:videoId` — resolve Channel-scoped inline playback while retaining the canonical video ID
 - `GET|HEAD /assets/movie-sign-off.mp4` — branded H.264 Constrained Baseline still with a five-second silent AAC-LC track and Android-compatible byte-range support

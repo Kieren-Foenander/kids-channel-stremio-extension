@@ -131,6 +131,24 @@ function storedSelection(row: StoredSelection): StreamSelection {
   };
 }
 
+/** Return only a completed, unexpired selection already prepared in D1.
+ * Compatibility stream lookups are speculative in Stremio desktop, so they
+ * must not contact providers, create torrents, or mutate Channel state. */
+export async function preparedStreamSelection(
+  db: D1Database,
+  householdId: string,
+  contentType: StreamContentType,
+  videoId: string,
+  now = new Date(),
+): Promise<StreamSelection | null> {
+  const row = await db.prepare(`SELECT * FROM stream_selections
+    WHERE household_id = ? AND content_type = ? AND video_id = ?
+      AND download_pending = 0 AND stale_at > ?`)
+    .bind(householdId, contentType, videoId, now.toISOString())
+    .first<StoredSelection>();
+  return row ? storedSelection(row) : null;
+}
+
 function releaseYear(value: string | null): number | undefined {
   const match = value?.match(/\b(19|20)\d{2}\b/);
   return match ? Number(match[0]) : undefined;

@@ -46,6 +46,7 @@ import {
   StreamSelectionGoneError,
 } from "./stream-resolution";
 import {
+  preparedStreamSelection,
   selectCachedStream,
   type StreamContentType,
   type StreamSelectionOutcome,
@@ -1305,17 +1306,9 @@ export default {
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
-      const streamChannel = streamMatch[2] === "series"
-        ? await legacyChannel(env.DB, household.id, "tv")
-        : null;
       if (streamMatch[2] === "movie") {
         const signOff = videoId ? parseSignOffId(videoId) : null;
         if (signOff) {
-          const signOffChannel = signOff.channelId
-            ? await findChannel(env.DB, household.id, signOff.channelId, "movie")
-            : await legacyChannel(env.DB, household.id, "movie");
-          if (!signOffChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
-          await requestMovieSignOff(env.DB, household.id, signOffChannel.id, signOff.cycle, signOff.position);
           return addonJson({ streams: [{
             name: "Kids Channels",
             description: "Five-second sign-off",
@@ -1333,53 +1326,14 @@ export default {
       }
       try {
         const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
-        if (!torBoxToken) {
-          if (streamMatch[2] === "series" && streamChannel) {
-            await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
-            queueAutomaticTvPreparation(env, ctx, household.id);
-          }
-          return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
-        }
-        const selection = await selectCachedStream(
+        if (!torBoxToken) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
+        const selection = await preparedStreamSelection(
           env.DB,
           household.id,
           streamMatch[2] as StreamContentType,
           videoId,
-          torBoxToken,
-          env,
         );
-        if (!selection) {
-          if (streamMatch[2] !== "series") {
-            return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
-          }
-          if (!streamChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
-          await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
-          queueAutomaticTvPreparation(env, ctx, household.id);
-          const deferred = await deferUnavailableTvProgramme(
-            env.DB,
-            household.id,
-            streamChannel.id,
-            videoId,
-            env.TV_SCHEDULE_SEED,
-          );
-          return addonJson({ streams: [{
-            name: "Kids Channels",
-            description: deferred.terminal
-              ? "Programme unavailable • Try again later"
-              : "Programme unavailable • Trying next show",
-            url: `${url.origin}/assets/programme-unavailable-v2.mp4`,
-            behaviorHints: {
-              ...(deferred.terminal ? {} : { bingeGroup: "kids-channels-tv" }),
-              filename: "kids-channels-programme-unavailable.mp4",
-            },
-          }] }, 200, { "cache-control": "no-store" });
-        }
-        if (streamMatch[2] === "series") {
-          if (!streamChannel) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
-          await clearUnavailableTvProgramme(env.DB, household.id, videoId);
-          await requestTvProgramme(env.DB, household.id, streamChannel.id, videoId, env.TV_SCHEDULE_SEED);
-          queueAutomaticTvPreparation(env, ctx, household.id);
-        }
+        if (!selection) return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
         const resolveToken = await issueStreamToken(
           household.id,
           selection.torrentId,

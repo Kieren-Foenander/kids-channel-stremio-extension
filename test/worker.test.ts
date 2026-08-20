@@ -978,7 +978,7 @@ describe("TV Channel client-side stream resolution", () => {
     expect(await env.DB.prepare("SELECT video_id FROM current_programmes").first()).toMatchObject({ video_id: canonicalEpisodeId });
   });
 
-  it("returns exactly one cached first-party stream and reuses its D1 selection", async () => {
+  it("returns an already-prepared stream through the read-only compatibility route", async () => {
     const created = await arrangePlayback();
     const base = created.manifestUrl.replace(/\/manifest\.json$/, "");
     await storeTorBoxCredential(
@@ -1022,6 +1022,13 @@ describe("TV Channel client-side stream resolution", () => {
       }
       throw new Error(`unexpected outbound request: ${url}`);
     });
+
+    const channelMeta = await (await SELF.fetch(
+      `${base}/meta/series/${encodeURIComponent("kids-channels:tv")}.json`,
+    )).json<any>();
+    const inline = await SELF.fetch(channelMeta.meta.videos[0].streams[0].url, { redirect: "manual" });
+    expect(inline.status).toBe(302);
+    expect(inline.headers.get("location")).toBe("https://download.torbox.test/fresh-signed-media");
 
     const streamUrl = `${base}/stream/series/${encodeURIComponent(canonicalEpisodeId)}.json`;
     const first = await SELF.fetch(streamUrl);
@@ -1460,6 +1467,58 @@ describe("rolling TV Channel Schedule", () => {
       .toMatchObject({ count: 1 });
   });
 
+  it("keeps speculative legacy stream lookups from invalidating desktop playback retries", async () => {
+    const { created, channelId, base } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const current = before.meta.videos[0] as { id: string; streams: Array<{ url: string }> };
+    const speculativeId = before.meta.videos[1].id as string;
+    const scheduled = await env.DB.prepare(`SELECT programme_id FROM channel_schedule
+      WHERE household_id = ? AND channel_id = ? AND video_id = ?`)
+      .bind(created.householdId, channelId, current.id)
+      .first<{ programme_id: string }>();
+    const hash = "e".repeat(40);
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at, download_pending, last_progress)
+      VALUES (?, ?, 'series', ?, '92', ?, 10, 'Current.S01E01.mkv',
+        '1080p', 10, '2026-08-20T00:00:00.000Z', '2099-08-20T00:00:00.000Z', 0, 100)`)
+      .bind(created.householdId, scheduled!.programme_id, current.id, hash)
+      .run();
+    vi.restoreAllMocks();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 92,
+        hash,
+        download_state: "cached",
+        download_present: true,
+        download_finished: true,
+        files: [{ id: 10, name: "/Current.S01E01.mkv", size: 1_000 }],
+      } });
+      if (url.pathname.endsWith("/torrents/requestdl")) {
+        return Response.json({ success: true, data: "https://download.torbox.test/current-media" });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const first = await SELF.fetch(current.streams[0].url, { redirect: "manual" });
+    expect(first.status).toBe(302);
+    const speculative = await SELF.fetch(
+      `${base}/stream/series/${encodeURIComponent(speculativeId)}.json`,
+    );
+    expect(await speculative.json()).toEqual({ streams: [] });
+    const retries = await Promise.all(Array.from({ length: 8 }, () =>
+      SELF.fetch(current.streams[0].url, { redirect: "manual" })));
+
+    expect(retries.every((response) => response.status === 302)).toBe(true);
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(current.id);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 0 });
+  });
+
   it("schedules one eligible show's regular episodes consecutively in order", async () => {
     const { base } = await arrangeShows(1, 25);
     const result = await metadata(base);
@@ -1500,17 +1559,16 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("advances naturally or through Next exactly once and replenishes the shared schedule", async () => {
-    const { base } = await arrangeShows(2);
+    const { created, channelId, base } = await arrangeShows(2);
     const before = await metadata(base);
     const currentId = before.meta.videos[0].id;
     const nextId = before.meta.videos[1].id;
 
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(currentId)}.json`);
+    await requestTvProgramme(env.DB, created.householdId, channelId, currentId, "deterministic-test-seed");
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(currentId);
 
-    const responses = await Promise.all(Array.from({ length: 8 }, () =>
-      SELF.fetch(`${base}/stream/series/${encodeURIComponent(nextId)}.json`)));
-    expect(responses.every((response) => response.status === 200)).toBe(true);
+    await Promise.all(Array.from({ length: 8 }, () =>
+      requestTvProgramme(env.DB, created.householdId, channelId, nextId, "deterministic-test-seed")));
     const after = await metadata(base);
     expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
     expect(after.meta.videos).toHaveLength(20);
@@ -1534,25 +1592,11 @@ describe("rolling TV Channel Schedule", () => {
       throw new Error(`unexpected outbound request: ${url}`);
     });
 
-    const responses = await Promise.all(Array.from({ length: 8 }, () =>
-      SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`)));
-    expect(responses.every((response) => response.status === 200)).toBe(true);
-    expect(await responses[0].json()).toEqual({
-      streams: [{
-        name: "Kids Channels",
-        description: "Programme unavailable • Trying next show",
-        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
-        behaviorHints: {
-          bingeGroup: "kids-channels-tv",
-          filename: "kids-channels-programme-unavailable.mp4",
-        },
-      }],
-    });
-    const bumper = await SELF.fetch("https://kids.test/assets/programme-unavailable-v2.mp4");
+    const bumper = await SELF.fetch(before.meta.videos[0].streams[0].url);
     expect(bumper.status).toBe(200);
     expect(bumper.headers.get("content-type")).toBe("video/mp4");
     expect(bumper.headers.get("access-control-allow-origin")).toBe("*");
-    expect((await bumper.arrayBuffer()).byteLength).toBeGreaterThan(99_000);
+    expect((await bumper.arrayBuffer()).byteLength).toBeGreaterThan(90_000);
 
     const after = await metadata(base);
     expect(after.meta.behaviorHints.defaultVideoId).toBe(nextId);
@@ -1579,15 +1623,9 @@ describe("rolling TV Channel Schedule", () => {
       throw new Error(`unexpected outbound request: ${url}`);
     });
 
-    const response = await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
-    expect(await response.json()).toEqual({
-      streams: [{
-        name: "Kids Channels",
-        description: "Programme unavailable • Try again later",
-        url: "https://kids.test/assets/programme-unavailable-v2.mp4",
-        behaviorHints: { filename: "kids-channels-programme-unavailable.mp4" },
-      }],
-    });
+    const response = await SELF.fetch(before.meta.videos[0].streams[0].url);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("video/mp4");
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(unavailableId);
     expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments").first())
       .toMatchObject({ next_video_id: unavailableId });
@@ -1611,7 +1649,7 @@ describe("rolling TV Channel Schedule", () => {
       throw new Error(`unexpected outbound request: ${url}`);
     });
 
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(unavailableId)}.json`);
+    await SELF.fetch(before.meta.videos[1].streams[0].url);
 
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(`${currentImdb}:1:2`);
     expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = ?")
@@ -1621,10 +1659,12 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("displays Current Programme, Channel Schedule, and recent playback only to the Parent", async () => {
-    const { created, base } = await arrangeShows(2);
+    const { created, channelId, base } = await arrangeShows(2);
     expect((await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-state`)).status).toBe(401);
     const before = await metadata(base);
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(before.meta.videos[1].id)}.json`);
+    await requestTvProgramme(
+      env.DB, created.householdId, channelId, before.meta.videos[1].id, "deterministic-test-seed",
+    );
 
     const response = await SELF.fetch(`https://kids.test/api/households/${secretFrom(created)}/tv-state`, {
       headers: await parentHeaders(created),
@@ -1657,9 +1697,11 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("undoes only the latest advancement and does not overwrite another show's later correction", async () => {
-    const { created, base } = await arrangeShows(2, 8);
+    const { created, channelId, base } = await arrangeShows(2, 8);
     const before = await metadata(base);
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(before.meta.videos[1].id)}.json`);
+    await requestTvProgramme(
+      env.DB, created.householdId, channelId, before.meta.videos[1].id, "deterministic-test-seed",
+    );
     const headers = await parentHeaders(created);
     const priorShow = before.meta.videos[0].id.startsWith("tt9000001:") ? "programme-1" : "programme-2";
     const otherShow = priorShow === "programme-1" ? "programme-2" : "programme-1";
@@ -1677,13 +1719,13 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("marks exhausted shows Finished and lets the Parent restart them", async () => {
-    const { created, base } = await arrangeShows(2, 2);
+    const { created, channelId, base } = await arrangeShows(2, 2);
     const before = await metadata(base);
     const lastShowOne = before.meta.videos.findIndex((video: any) => video.id === "tt9000001:1:2");
     expect(lastShowOne).toBeGreaterThanOrEqual(0);
     const target = before.meta.videos[lastShowOne + 1];
     expect(target).toBeTruthy();
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(target.id)}.json`);
+    await requestTvProgramme(env.DB, created.householdId, channelId, target.id, "deterministic-test-seed");
     expect(await env.DB.prepare("SELECT next_video_id FROM channel_assignments WHERE programme_id = 'programme-1'").first())
       .toMatchObject({ next_video_id: null });
     const exhausted = await metadata(base);
@@ -1699,12 +1741,12 @@ describe("rolling TV Channel Schedule", () => {
   });
 
   it("plays a distant visible programme and treats every bypassed programme as skipped", async () => {
-    const { base } = await arrangeShows(3);
+    const { created, channelId, base } = await arrangeShows(3);
     const before = await metadata(base);
     const target = before.meta.videos[8];
     const bypassed = before.meta.videos.slice(0, 8).map((video: any) => video.id);
 
-    await SELF.fetch(`${base}/stream/series/${encodeURIComponent(target.id)}.json`);
+    await requestTvProgramme(env.DB, created.householdId, channelId, target.id, "deterministic-test-seed");
     const after = await metadata(base);
     expect(after.meta.behaviorHints.defaultVideoId).toBe(target.id);
     expect(after.meta.videos).toHaveLength(20);
@@ -2484,9 +2526,9 @@ describe("Stremio protocol", () => {
 
     expect(response.headers.get("access-control-allow-origin")).toBe("*");
     expect(manifest).toMatchObject({
-      version: "0.4.1",
+      version: "0.4.2",
       name: "Kids Channels",
-      resources: ["catalog", "meta", "stream"],
+      resources: ["catalog", "meta"],
       types: ["series", "movie"],
       behaviorHints: { configurable: true, configurationRequired: false },
     });

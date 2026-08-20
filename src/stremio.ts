@@ -14,10 +14,10 @@ export interface HouseholdIdentity {
 export function manifestFor(household: HouseholdIdentity) {
   return {
     id: `community.kids-channels.${household.id}`,
-    version: "0.4.1",
+    version: "0.4.2",
     name: "Kids Channels",
     description: "Parent-curated TV and Movie Channels for the household.",
-    resources: ["catalog", "meta", "stream"],
+    resources: ["catalog", "meta"],
     types: ["series", "movie"],
     catalogs: [
       { type: "series", id: TV_CATALOG_ID, name: "Kids Channels - TV" },
