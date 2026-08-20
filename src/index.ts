@@ -340,6 +340,17 @@ async function resolveStreamWithFailover(
         userIp,
       );
     } catch (error) {
+      if (error instanceof TorBoxResolutionError
+        && (error.status === null || error.status >= 500)
+        && attempt < MAX_RESOLUTION_ATTEMPTS - 1) {
+        console.warn(JSON.stringify({
+          message: "stream resolution retry",
+          householdId,
+          attempt: attempt + 1,
+          torBoxStatus: error.status,
+        }));
+        continue;
+      }
       if (!(error instanceof StreamSelectionGoneError) || !context) throw error;
       await discardStreamSelection(env.DB, householdId, currentIdentity, torBoxToken, env);
       excludedInfoHashes.add(context.infoHash);

@@ -644,16 +644,14 @@ export async function requestTvProgramme(
     if (!currentState || schedule.length === 0) return schedule;
     const target = schedule.find((programme) => programme.episode.id === videoId);
     if (!target || target.position <= currentState.current_position) {
-      return await releaseExpiredUnavailableEpisodes(db, householdId)
-        ? refreshTvChannelSchedule(db, householdId, channelId, false, configuredSeed)
-        : schedule;
+      await releaseExpiredUnavailableEpisodes(db, householdId);
+      return schedule;
     }
     await advanceOnce(db, householdId, channelId, target, currentState, schedule);
     const latest = await state(db, householdId, channelId);
     if (!latest || latest.current_position >= target.position) {
-      return await releaseExpiredUnavailableEpisodes(db, householdId)
-        ? refreshTvChannelSchedule(db, householdId, channelId, false, configuredSeed)
-        : scheduleRows(db, householdId, channelId);
+      await releaseExpiredUnavailableEpisodes(db, householdId);
+      return scheduleRows(db, householdId, channelId);
     }
   }
   return scheduleRows(db, householdId, channelId);

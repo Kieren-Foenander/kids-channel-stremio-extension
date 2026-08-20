@@ -11,7 +11,12 @@ import {
   ensureAutomaticTvPreparation,
   tvPreparationRun,
 } from "../src/tv-preparation";
-import { refreshTvChannelSchedule, requestTvProgramme, tvChannelSchedule } from "../src/tv-channel";
+import {
+  deferUnavailableTvProgramme,
+  refreshTvChannelSchedule,
+  requestTvProgramme,
+  tvChannelSchedule,
+} from "../src/tv-channel";
 import { createChannel } from "../src/channels";
 import { APPROVED_LIBRARY_SQL } from "../src/approved-library";
 
@@ -1467,6 +1472,52 @@ describe("rolling TV Channel Schedule", () => {
       .toMatchObject({ count: 1 });
   });
 
+  it("retries a transient TorBox resolution failure before returning holding media", async () => {
+    const { created, channelId, base } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const current = before.meta.videos[0] as { id: string; streams: Array<{ url: string }> };
+    const scheduled = await env.DB.prepare(`SELECT programme_id FROM channel_schedule
+      WHERE household_id = ? AND channel_id = ? AND video_id = ?`)
+      .bind(created.householdId, channelId, current.id)
+      .first<{ programme_id: string }>();
+    const hash = "f".repeat(40);
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at, download_pending, last_progress)
+      VALUES (?, ?, 'series', ?, '93', ?, 11, 'Transient.S01E01.mkv',
+        '1080p', 10, '2026-08-20T00:00:00.000Z', '2099-08-20T00:00:00.000Z', 0, 100)`)
+      .bind(created.householdId, scheduled!.programme_id, current.id, hash)
+      .run();
+    vi.restoreAllMocks();
+    let downloadRequests = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 93,
+        hash,
+        download_state: "cached",
+        download_present: true,
+        download_finished: true,
+        files: [{ id: 11, name: "/Transient.S01E01.mkv", size: 1_000 }],
+      } });
+      if (url.pathname.endsWith("/torrents/requestdl")) {
+        downloadRequests += 1;
+        if (downloadRequests === 1) throw new TypeError("transient network failure");
+        return Response.json({ success: true, data: "https://download.torbox.test/recovered-media" });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await SELF.fetch(current.streams[0].url, { redirect: "manual" });
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://download.torbox.test/recovered-media");
+    expect(downloadRequests).toBe(2);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 0 });
+  });
+
   it("keeps speculative legacy stream lookups from invalidating desktop playback retries", async () => {
     const { created, channelId, base } = await arrangeShows(2);
     await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
@@ -1629,6 +1680,41 @@ describe("rolling TV Channel Schedule", () => {
 
     expect(responses.map((response) => response.status)).toEqual(Array(8).fill(200));
     expect(responses.every((response) => response.headers.get("content-type") === "video/mp4")).toBe(true);
+  });
+
+  it("cleans up expired unavailable markers without rebuilding an advertised schedule", async () => {
+    const { created, channelId } = await arrangeShows(4);
+    const initial = await tvChannelSchedule(
+      env.DB, created.householdId, channelId, "deterministic-test-seed",
+    );
+    await deferUnavailableTvProgramme(
+      env.DB,
+      created.householdId,
+      channelId,
+      initial[0].episode.id,
+      "deterministic-test-seed",
+      new Date("2026-08-20T00:00:00.000Z"),
+    );
+    const advertised = await tvChannelSchedule(
+      env.DB, created.householdId, channelId, "deterministic-test-seed",
+    );
+    await env.DB.prepare("UPDATE unavailable_episodes SET retry_at = '2000-01-01T00:00:00.000Z'").run();
+
+    await requestTvProgramme(
+      env.DB,
+      created.householdId,
+      channelId,
+      advertised[0].episode.id,
+      "deterministic-test-seed",
+    );
+
+    const after = await tvChannelSchedule(
+      env.DB, created.householdId, channelId, "deterministic-test-seed",
+    );
+    expect(after.map((programme) => programme.episode.id))
+      .toEqual(advertised.map((programme) => programme.episode.id));
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM unavailable_episodes").first())
+      .toMatchObject({ count: 0 });
   });
 
   it("uses a terminal bumper without autoplay when every show is unavailable", async () => {
