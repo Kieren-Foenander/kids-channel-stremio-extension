@@ -28,7 +28,14 @@
   },
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
   },
   "env": {
     "development": {

@@ -1399,6 +1399,67 @@ describe("rolling TV Channel Schedule", () => {
       .toEqual(prepared.map((video: any) => video.id));
   });
 
+  it("does not advance the Channel until TorBox issues the inline programme's download URL", async () => {
+    const { created, channelId, base } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const currentId = before.meta.videos[0].id as string;
+    const target = before.meta.videos[1] as { id: string; streams: Array<{ url: string }> };
+    const scheduled = await env.DB.prepare(`SELECT programme_id FROM channel_schedule
+      WHERE household_id = ? AND channel_id = ? AND video_id = ?`)
+      .bind(created.householdId, channelId, target.id)
+      .first<{ programme_id: string }>();
+    const hash = "d".repeat(40);
+    await env.DB.prepare(`INSERT INTO stream_selections
+      (household_id, programme_id, content_type, video_id, torrent_id, info_hash, file_id, filename,
+        quality, seeders, selected_at, stale_at, download_pending, last_progress)
+      VALUES (?, ?, 'series', ?, '91', ?, 9, 'Target.S01E01.mkv',
+        '1080p', 10, '2026-08-20T00:00:00.000Z', '2099-08-20T00:00:00.000Z', 0, 100)`)
+      .bind(created.householdId, scheduled!.programme_id, target.id, hash)
+      .run();
+    vi.restoreAllMocks();
+    let downloadRequests = 0;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 91,
+        hash,
+        download_state: "cached",
+        download_present: true,
+        download_finished: true,
+        files: [{ id: 9, name: "/Target.S01E01.mkv", size: 1_000 }],
+      } });
+      if (url.pathname.endsWith("/torrents/requestdl")) {
+        downloadRequests += 1;
+        if (downloadRequests === 1) {
+          return Response.json(
+            { success: false, error: "RATE_LIMITED", detail: "Try again" },
+            { status: 429, headers: { "retry-after": "5" } },
+          );
+        }
+        return Response.json({ success: true, data: "https://download.torbox.test/target-media" });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const failed = await SELF.fetch(target.streams[0].url, { redirect: "manual" });
+
+    expect(failed.status).toBe(200);
+    expect(failed.headers.get("content-type")).toBe("video/mp4");
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(currentId);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 0 });
+
+    const succeeded = await SELF.fetch(target.streams[0].url, { redirect: "manual" });
+
+    expect(succeeded.status).toBe(302);
+    expect(succeeded.headers.get("location")).toBe("https://download.torbox.test/target-media");
+    expect(succeeded.headers.get("x-kids-channels-handoff-id")).toMatch(/^[0-9a-f-]{36}$/);
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(target.id);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first())
+      .toMatchObject({ count: 1 });
+  });
+
   it("schedules one eligible show's regular episodes consecutively in order", async () => {
     const { base } = await arrangeShows(1, 25);
     const result = await metadata(base);

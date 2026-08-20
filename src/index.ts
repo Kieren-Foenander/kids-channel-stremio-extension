@@ -41,10 +41,15 @@ import {
   TorBoxResolutionError,
   resolveCachedStream,
   type StreamIdentity,
+  type StreamSelectionContext,
   streamSelectionContext,
   StreamSelectionGoneError,
 } from "./stream-resolution";
-import { selectCachedStream, type StreamContentType } from "./stream-selection";
+import {
+  selectCachedStream,
+  type StreamContentType,
+  type StreamSelectionOutcome,
+} from "./stream-selection";
 import {
   ensureAutomaticTvPreparation,
   ensureAutomaticTvPreparationForAll,
@@ -121,7 +126,7 @@ function playbackResponse(message: string, status: number): Response {
   });
 }
 
-function playbackRedirect(location: string): Response {
+function playbackRedirect(location: string, handoffId?: string): Response {
   return new Response(null, {
     status: 302,
     headers: {
@@ -129,8 +134,15 @@ function playbackRedirect(location: string): Response {
       "access-control-allow-origin": "*",
       "cache-control": "no-store",
       "referrer-policy": "no-referrer",
+      ...(handoffId ? { "x-kids-channels-handoff-id": handoffId } : {}),
     },
   });
+}
+
+type PlaybackLogLevel = "log" | "warn" | "error";
+
+function logPlayback(level: PlaybackLogLevel, event: string, fields: Record<string, unknown>): void {
+  console[level](JSON.stringify({ message: "Channel playback", event, ...fields }));
 }
 
 function playbackProbeResponse(): Response {
@@ -187,15 +199,26 @@ async function playChannelProgramme(
   contentType: StreamContentType,
   videoId: string,
 ): Promise<Response> {
+  const handoffId = crypto.randomUUID();
   const belongsToChannel = contentType === "series"
     ? (await tvChannelSchedule(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED))
       .some((programme) => programme.episode.id === videoId)
     : (await movieChannelProgramme(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED))?.imdbId === videoId;
-  if (!belongsToChannel) return playbackResponse("Programme not found in this Channel.", 404);
+  if (!belongsToChannel) {
+    logPlayback("warn", "programme_rejected", {
+      handoffId, householdId: household.id, channelId: channel.id, contentType, videoId,
+    });
+    return playbackResponse("Programme not found in this Channel.", 404);
+  }
   // Stremio probes every inline playback URL with HEAD while building its player.
   // A probe confirms reachability only; treating it as playback advances the whole
   // visible schedule and can consume a movie before the viewer presses Play.
-  if (request.method === "HEAD") return playbackProbeResponse();
+  if (request.method === "HEAD") {
+    logPlayback("log", "head_probe", {
+      handoffId, householdId: household.id, channelId: channel.id, contentType, videoId,
+    });
+    return playbackProbeResponse();
+  }
   if (!env.CONFIG_SECRET) return playbackResponse("Playback is temporarily unavailable.", 503);
   try {
     const torBoxToken = await loadTorBoxCredential(env.DB, household.id, env.CONFIG_SECRET);
@@ -207,6 +230,7 @@ async function playChannelProgramme(
       }
       return playbackResponse("TorBox is not configured for this Household.", 503);
     }
+    let selectionOutcome: StreamSelectionOutcome | null = null;
     const selection = await selectCachedStream(
       env.DB,
       household.id,
@@ -214,41 +238,119 @@ async function playChannelProgramme(
       videoId,
       torBoxToken,
       env,
+      new Date(),
+      new Set(),
+      { onOutcome: (outcome) => { selectionOutcome = outcome; } },
     );
     if (!selection) {
+      logPlayback("warn", "selection_unavailable", {
+        handoffId,
+        householdId: household.id,
+        channelId: channel.id,
+        contentType,
+        videoId,
+        selectionOutcome,
+      });
       if (contentType !== "series") return playbackResponse("Movie stream is unavailable.", 404);
       await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
       await deferUnavailableTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       return programmeUnavailable(request);
     }
+    const directLink = await resolveStreamWithFailover(
+      env,
+      household.id,
+      { torrentId: selection.torrentId, fileId: selection.fileId },
+      {
+        contentType: selection.contentType,
+        videoId: selection.videoId,
+        infoHash: selection.infoHash,
+      },
+      torBoxToken,
+      request.headers.get("cf-connecting-ip") ?? undefined,
+    );
     if (contentType === "series") {
       await clearUnavailableTvProgramme(env.DB, household.id, videoId);
       await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
     }
-    const resolveToken = await issueStreamToken(
-      household.id,
-      selection.torrentId,
-      selection.fileId,
-      Date.parse(selection.staleAt),
-      env.CONFIG_SECRET,
-    );
-    return playbackRedirect(
-      `${new URL(request.url).origin}/addons/${household.secret}/resolve/${resolveToken}`,
-    );
-  } catch (error) {
-    console.error(JSON.stringify({
-      message: "Channel playback failed",
+    logPlayback("log", "cdn_handoff", {
+      handoffId,
       householdId: household.id,
       channelId: channel.id,
       contentType,
+      videoId,
+      selectionOutcome,
+      quality: selection.quality,
+      cdnHost: new URL(directLink).hostname,
+      colo: request.cf?.colo,
+      country: request.cf?.country,
+    });
+    return playbackRedirect(directLink, handoffId);
+  } catch (error) {
+    logPlayback("error", "failed", {
+      handoffId,
+      householdId: household.id,
+      channelId: channel.id,
+      contentType,
+      videoId,
+      torBoxStatus: error instanceof TorBoxResolutionError ? error.status : undefined,
+      retryAfter: error instanceof TorBoxResolutionError ? error.retryAfter : undefined,
       reason: error instanceof Error ? error.message : "unknown error",
-    }));
+    });
     return contentType === "series"
       ? programmeUnavailable(request)
       : playbackResponse("Movie playback is temporarily unavailable.", 502);
   }
+}
+
+async function resolveStreamWithFailover(
+  env: Env,
+  householdId: string,
+  initialIdentity: StreamIdentity,
+  initialContext: StreamSelectionContext | null,
+  torBoxToken: string,
+  userIp?: string,
+): Promise<string> {
+  let currentIdentity = initialIdentity;
+  let context = initialContext;
+  const excludedInfoHashes = new Set<string>();
+  for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS; attempt += 1) {
+    try {
+      return await resolveCachedStream(
+        env.DB,
+        householdId,
+        currentIdentity,
+        torBoxToken,
+        env,
+        Date.now(),
+        userIp,
+      );
+    } catch (error) {
+      if (!(error instanceof StreamSelectionGoneError) || !context) throw error;
+      await discardStreamSelection(env.DB, householdId, currentIdentity, torBoxToken, env);
+      excludedInfoHashes.add(context.infoHash);
+      if (attempt === MAX_RESOLUTION_ATTEMPTS - 1) throw error;
+      const alternative = await selectCachedStream(
+        env.DB,
+        householdId,
+        context.contentType,
+        context.videoId,
+        torBoxToken,
+        env,
+        new Date(),
+        excludedInfoHashes,
+      );
+      if (!alternative) throw error;
+      currentIdentity = { torrentId: alternative.torrentId, fileId: alternative.fileId };
+      context = {
+        contentType: alternative.contentType,
+        videoId: alternative.videoId,
+        infoHash: alternative.infoHash,
+      };
+    }
+  }
+  throw new StreamSelectionGoneError("no alternate stream remains");
 }
 
 async function householdNotFoundResponse(request: Request, assets?: Fetcher): Promise<Response> {
@@ -1119,6 +1221,7 @@ export default {
 
     const resolveMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/resolve\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/);
     if (request.method === "GET" && resolveMatch) {
+      const handoffId = crypto.randomUUID();
       const household = await findHousehold(env.DB, resolveMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404, { "cache-control": "no-store" });
       if (!env.CONFIG_SECRET) {
@@ -1126,6 +1229,7 @@ export default {
       }
       const identity = await verifyStreamToken(resolveMatch[2], household.id, env.CONFIG_SECRET);
       if (!identity) {
+        logPlayback("warn", "resolve_authorization_rejected", { handoffId, householdId: household.id });
         return addonJson({ error: "Stream authorization is invalid or expired." }, 403, { "cache-control": "no-store" });
       }
       try {
@@ -1133,62 +1237,44 @@ export default {
         if (!torBoxToken) {
           return addonJson({ error: "TorBox is not configured for this Household." }, 503, { "cache-control": "no-store" });
         }
-        let currentIdentity: StreamIdentity = identity;
-        let context = await streamSelectionContext(env.DB, household.id, currentIdentity);
-        const excludedInfoHashes = new Set<string>();
-        for (let attempt = 0; attempt < MAX_RESOLUTION_ATTEMPTS; attempt += 1) {
-          try {
-            const directLink = await resolveCachedStream(
-              env.DB,
-              household.id,
-              currentIdentity,
-              torBoxToken,
-              env,
-              Date.now(),
-              request.headers.get("cf-connecting-ip") ?? undefined,
-            );
-            return new Response(null, {
-              status: 302,
-              headers: {
-                location: directLink,
-                "cache-control": "no-store",
-                "referrer-policy": "no-referrer",
-                "x-content-type-options": "nosniff",
-                "access-control-allow-origin": "*",
-              },
-            });
-          } catch (error) {
-            if (!(error instanceof StreamSelectionGoneError) || !context) throw error;
-            await discardStreamSelection(
-              env.DB,
-              household.id,
-              currentIdentity,
-              torBoxToken,
-              env,
-            );
-            excludedInfoHashes.add(context.infoHash);
-            if (attempt === MAX_RESOLUTION_ATTEMPTS - 1) throw error;
-            const alternative = await selectCachedStream(
-              env.DB,
-              household.id,
-              context.contentType,
-              context.videoId,
-              torBoxToken,
-              env,
-              new Date(),
-              excludedInfoHashes,
-            );
-            if (!alternative) throw error;
-            currentIdentity = { torrentId: alternative.torrentId, fileId: alternative.fileId };
-            context = {
-              contentType: alternative.contentType,
-              videoId: alternative.videoId,
-              infoHash: alternative.infoHash,
-            };
-          }
-        }
-        throw new StreamSelectionGoneError("no alternate stream remains");
+        const context = await streamSelectionContext(env.DB, household.id, identity);
+        const directLink = await resolveStreamWithFailover(
+          env,
+          household.id,
+          identity,
+          context,
+          torBoxToken,
+          request.headers.get("cf-connecting-ip") ?? undefined,
+        );
+        logPlayback("log", "cdn_handoff", {
+          handoffId,
+          householdId: household.id,
+          contentType: context?.contentType,
+          videoId: context?.videoId,
+          cdnHost: new URL(directLink).hostname,
+          colo: request.cf?.colo,
+          country: request.cf?.country,
+          route: "resolve",
+        });
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: directLink,
+            "cache-control": "no-store",
+            "referrer-policy": "no-referrer",
+            "x-content-type-options": "nosniff",
+            "access-control-allow-origin": "*",
+            "x-kids-channels-handoff-id": handoffId,
+          },
+        });
       } catch (error) {
+        logPlayback(error instanceof StreamSelectionGoneError ? "warn" : "error", "resolve_failed", {
+          handoffId,
+          householdId: household.id,
+          torBoxStatus: error instanceof TorBoxResolutionError ? error.status : undefined,
+          retryAfter: error instanceof TorBoxResolutionError ? error.retryAfter : undefined,
+          reason: error instanceof Error ? error.message : "unknown error",
+        });
         if (error instanceof StreamSelectionGoneError) {
           await invalidateStreamSelection(env.DB, household.id, identity);
           return addonJson(
@@ -1215,6 +1301,7 @@ export default {
 
     const streamMatch = path.match(/^\/addons\/([A-Za-z0-9_-]+)\/stream\/(series|movie)\/([^/]+)\.json$/);
     if (request.method === "GET" && streamMatch) {
+      const handoffId = crypto.randomUUID();
       const household = await findHousehold(env.DB, streamMatch[1]);
       if (!household) return addonJson({ error: "Household not found." }, 404);
       const videoId = decodedPathSegment(streamMatch[3]);
@@ -1300,6 +1387,14 @@ export default {
           Date.parse(selection.staleAt),
           env.CONFIG_SECRET,
         );
+        logPlayback("log", "stream_offered", {
+          handoffId,
+          householdId: household.id,
+          contentType: streamMatch[2],
+          videoId,
+          quality: selection.quality,
+          route: "stream",
+        });
         return addonJson({ streams: [{
           name: "Kids Channels",
           description: `${selection.quality} • TorBox ready`,
@@ -1311,7 +1406,14 @@ export default {
             filename: selection.filename,
           },
         }] }, 200, { "cache-control": "no-store" });
-      } catch {
+      } catch (error) {
+        logPlayback("error", "stream_offer_failed", {
+          handoffId,
+          householdId: household.id,
+          contentType: streamMatch[2],
+          videoId,
+          reason: error instanceof Error ? error.message : "unknown error",
+        });
         return addonJson({ streams: [] }, 200, { "cache-control": "no-store" });
       }
     }

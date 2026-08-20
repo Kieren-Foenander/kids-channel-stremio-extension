@@ -27,6 +27,8 @@ Stremio retains loaded addon metadata in memory even when responses use `Cache-C
 
 When TorBox is connected, Kids Channels automatically warms the next five episodes in every TV Channel, breadth-first, with at most 25 positions per Household. Every schedule advancement or correction reconciles one Household Preparation Run in the background, and a fifteen-minute scheduled check restarts preparation when a selection expires or an earlier trigger was missed.
 
+Production playback troubleshooting is documented in [Playback diagnostics](docs/playback-diagnostics.md).
+
 Local D1 data is stored by Wrangler under `.wrangler/`. There is no forgotten-PIN or account recovery. Five incorrect PIN attempts from one request origin within 15 minutes lock PIN access from that origin for 15 minutes for that Household only. A Parent can rotate the PIN by supplying the current PIN; rotation invalidates older Parent sessions. Permanent deletion requires the current PIN plus the exact confirmation `DELETE`, removes all Household data, and invalidates every synced addon route.
 
 ## Test
