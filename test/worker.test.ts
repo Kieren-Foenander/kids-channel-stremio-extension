@@ -1607,8 +1607,28 @@ describe("rolling TV Channel Schedule", () => {
       .bind(created.householdId).first<{ video_id: string; unavailable_at: string; retry_at: string }>();
     expect(unavailable).toMatchObject({ video_id: unavailableId });
     expect(Date.parse(unavailable!.retry_at) - Date.parse(unavailable!.unavailable_at)).toBe(5 * 60 * 1000);
-    expect(after.meta.videos[1].id).toBe(unavailableId);
+    expect(after.meta.videos.map((video: any) => video.id)).not.toContain(unavailableId);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
+  });
+
+  it("keeps an advertised desktop schedule valid across consecutive unavailable programmes", async () => {
+    const { created, base } = await arrangeShows(5);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const advertised = await metadata(base);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) return Response.json({ hits: [] });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const responses = [];
+    for (const video of advertised.meta.videos.slice(0, 8)) {
+      responses.push(await SELF.fetch(video.streams[0].url));
+    }
+
+    expect(responses.map((response) => response.status)).toEqual(Array(8).fill(200));
+    expect(responses.every((response) => response.headers.get("content-type") === "video/mp4")).toBe(true);
   });
 
   it("uses a terminal bumper without autoplay when every show is unavailable", async () => {

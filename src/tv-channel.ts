@@ -673,6 +673,29 @@ export async function clearUnavailableTvProgramme(
     .bind(householdId, videoId).run();
 }
 
+/** An installed Stremio client may keep requesting URLs from an older metadata
+ * snapshot after this show's current episode was deferred. Those URLs should
+ * keep returning the holding media, not become misleading HTTP 404 failures. */
+export async function belongsToTemporarilyUnavailableTvShow(
+  db: D1Database,
+  householdId: string,
+  channelId: string,
+  videoId: string,
+  now = new Date(),
+): Promise<boolean> {
+  return Boolean(await db.prepare(`SELECT 1 FROM show_episodes episode
+    JOIN approved_programmes programme ON programme.id = episode.programme_id
+    JOIN channel_assignments assignment ON assignment.programme_id = programme.id
+    JOIN unavailable_episodes unavailable
+      ON unavailable.household_id = programme.household_id
+      AND unavailable.programme_id = programme.id
+    WHERE programme.household_id = ? AND assignment.channel_id = ?
+      AND episode.video_id = ? AND unavailable.retry_at > ?
+    LIMIT 1`)
+    .bind(householdId, channelId, videoId, now.toISOString())
+    .first());
+}
+
 export async function deferUnavailableTvProgramme(
   db: D1Database,
   householdId: string,
@@ -698,40 +721,35 @@ export async function deferUnavailableTvProgramme(
 
   const shows = await loadShows(db, householdId, channelId);
   const unavailable = await activeUnavailableVideoIds(db, householdId, now);
-  const eligibleShows = shows.filter((show) => {
-    const next = show.episodes[show.progressIndex];
-    return next && !unavailable.has(next.id);
-  });
   const targetPosition = currentState.current_position + 1;
-  const target = project(
-    eligibleShows,
+  // Stremio keeps using the metadata snapshot it opened. Preserve that advertised
+  // order while removing temporarily unavailable entries, otherwise repeated
+  // holding bumpers make later inline URLs disappear and turn into HTTP 404s.
+  const eligibleProgrammeIds = new Set(shows
+    .filter((show) => {
+      const next = show.episodes[show.progressIndex];
+      return next && !unavailable.has(next.id);
+    })
+    .map((show) => show.programmeId));
+  const retained = currentSchedule.slice(1)
+    .filter((programme) => eligibleProgrammeIds.has(programme.programmeId))
+    .map((programme, index) => ({ ...programme, position: targetPosition + index }));
+  const target = retained[0];
+  if (!target) return { advanced: false, terminal: true };
+  const appended = project(
+    shows,
     channelId,
     currentState.selection_seed,
-    targetPosition,
-    1,
-    [],
-    current.programmeId,
+    targetPosition + retained.length,
+    TV_SCHEDULE_LENGTH - retained.length,
+    retained.map((programme) => ({
+      programmeId: programme.programmeId,
+      videoId: programme.episode.id,
+    })),
+    retained[retained.length - 1]?.programmeId,
     unavailable,
-  )[0];
-  if (!target) return { advanced: false, terminal: true };
-  const requeued = { ...current, position: targetPosition + 1 };
-  const programmes = [
-    target,
-    requeued,
-    ...project(
-      shows,
-      channelId,
-      currentState.selection_seed,
-      targetPosition + 2,
-      TV_SCHEDULE_LENGTH - 2,
-      [
-        { programmeId: target.programmeId, videoId: target.episode.id },
-        { programmeId: current.programmeId, videoId: current.episode.id },
-      ],
-      current.programmeId,
-      unavailable,
-    ),
-  ];
+  );
+  const programmes = [...retained, ...appended];
 
   const owner = crypto.randomUUID();
   const owns = `EXISTS (SELECT 1 FROM channel_advancements claim

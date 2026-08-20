@@ -62,6 +62,7 @@ import {
   type TvPreparationWorkflowParams,
 } from "./tv-preparation";
 import {
+  belongsToTemporarilyUnavailableTvShow,
   clearUnavailableTvProgramme,
   deferUnavailableTvProgramme,
   parentTvChannelState,
@@ -205,6 +206,17 @@ async function playChannelProgramme(
     ? (await tvChannelSchedule(env.DB, household.id, channel.id, env.TV_SCHEDULE_SEED))
       .some((programme) => programme.episode.id === videoId)
     : (await movieChannelProgramme(env.DB, household.id, channel.id, env.MOVIE_ROTATION_SEED))?.imdbId === videoId;
+  const belongsToDeferredSnapshot = contentType === "series" && !belongsToChannel
+    ? await belongsToTemporarilyUnavailableTvShow(
+      env.DB, household.id, channel.id, videoId,
+    )
+    : false;
+  if (belongsToDeferredSnapshot) {
+    logPlayback("log", "deferred_snapshot", {
+      handoffId, householdId: household.id, channelId: channel.id, contentType, videoId,
+    });
+    return request.method === "HEAD" ? playbackProbeResponse() : programmeUnavailable(request);
+  }
   if (!belongsToChannel) {
     logPlayback("warn", "programme_rejected", {
       handoffId, householdId: household.id, channelId: channel.id, contentType, videoId,
