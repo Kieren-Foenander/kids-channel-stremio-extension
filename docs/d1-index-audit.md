@@ -1,5 +1,28 @@
 # D1 index audit
 
+## 3 September 2026 recurring-read follow-up
+
+The current 24-hour production sample reported 819,610 rows read across 37,885 read queries. That is
+below D1's five-million-row daily free allowance, while the 37.85-million-row 30-day view was heavily
+inflated by the one-time canonical metadata migrations described below. No KV cache is justified yet:
+the largest recurring reads came from avoidable SQL scans and repeated Workflow polling.
+
+| Recurring statement | Rows read / 24h | Why it ran | Change in `0024` |
+| --- | ---: | --- | --- |
+| Delete obsolete Movie rotation cycles | 159,133 | General retention checked every 15 minutes, even when there was nothing to delete | Seek by Household/cycle with `movie_rotation_household_cycle_idx`; move complete Household traversal to the daily 03:00 UTC cron |
+| Resolve a prepared episode to its canonical show | 149,750 | Every Preparation retry rediscovered metadata already known when its run was created | Store IMDb/release metadata in the Preparation snapshot; add a video-first fallback index |
+| Build automatic Preparation schedules | 118,978 | Each TV Channel built the default 20 positions before JavaScript kept five | Ask the schedule query for five positions directly |
+| Load/count Preparation items | 128,765 combined | Every five-minute batch loaded the entire run and recounted all unfinished items | Read only the current due five-item range and count once after a round |
+| Resolve a stream URL by TorBox identity | 11,000 | Playback looked up `(household, torrent, file)` through an unrelated primary key | Add `stream_selections_identity_idx` |
+
+Nine active production Preparation Runs had 31 items still in `trying`, averaging 57.7 attempts and
+reaching 91 attempts. Migration `0024` adds `next_attempt_at`; active downloads remain responsive at
+five minutes, while repeated misses progress from 5 to 15 to 30 minutes. Local `EXPLAIN QUERY PLAN`
+validation selects all three new indexes and the Household range cursor uses the primary-key index.
+
+After rollout, compare the next full 24-hour D1 Insights window. KV should be reconsidered only if a
+remaining hot read is both unavoidable and safely cacheable after these query/control-flow changes.
+
 This audit covers production database `kids-channels` after migrations `0020` and `0021` on 9 August 2026. It uses `wrangler d1 insights`, `EXPLAIN QUERY PLAN`, and the per-query `meta.rows_read` returned by D1.
 
 ## What caused the usage spike

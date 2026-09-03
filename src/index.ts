@@ -72,7 +72,7 @@ import {
   tvChannelSchedule,
   undoLatestTvAdvancement,
 } from "./tv-channel";
-import { pruneObsoleteChannelState } from "./channel-retention";
+import { pruneAllObsoleteChannelState } from "./channel-retention";
 import {
   channelTypeForContent,
   channelDeletionImpact,
@@ -101,6 +101,9 @@ export interface Env {
 }
 
 export { TvSchedulePreparationWorkflow };
+
+export const AUTOMATIC_PREPARATION_CRON = "*/15 * * * *";
+export const DAILY_RETENTION_CRON = "0 3 * * *";
 
 const jsonHeaders = {
   "content-type": "application/json; charset=utf-8",
@@ -1397,14 +1400,18 @@ export default {
 
     return json({ error: "Not found." }, 404);
   },
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(ensureAutomaticTvPreparationForAll(env).catch((error) => {
-      console.error(JSON.stringify({
-        message: "automatic TV preparation sweep failed",
-        reason: error instanceof Error ? error.message : "unknown error",
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (controller.cron === AUTOMATIC_PREPARATION_CRON) {
+      ctx.waitUntil(ensureAutomaticTvPreparationForAll(env).catch((error) => {
+        console.error(JSON.stringify({
+          message: "automatic TV preparation sweep failed",
+          reason: error instanceof Error ? error.message : "unknown error",
+        }));
       }));
-    }));
-    ctx.waitUntil(pruneObsoleteChannelState(env.DB).then((result) => {
+      return;
+    }
+    if (controller.cron !== DAILY_RETENTION_CRON) return;
+    ctx.waitUntil(pruneAllObsoleteChannelState(env.DB).then((result) => {
       const totalDeleted = Object.values(result.deleted).reduce((total, count) => total + count, 0);
       if (totalDeleted > 0) console.log(JSON.stringify({ message: "obsolete Channel state pruned", ...result }));
     }).catch((error) => {

@@ -1,10 +1,21 @@
-import { env, SELF as worker } from "cloudflare:test";
+import {
+  createExecutionContext,
+  createScheduledController,
+  env,
+  SELF as worker,
+  waitOnExecutionContext,
+} from "cloudflare:test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storeTorBoxCredential } from "../src/torbox-credentials";
 import { reconcileMovieChannel } from "../src/movie-channel";
 import { issueStreamToken } from "../src/secrets";
 import { deleteHousehold } from "../src/households";
-import { CHANNEL_RETENTION, pruneObsoleteChannelState } from "../src/channel-retention";
+import {
+  CHANNEL_RETENTION,
+  pruneAllObsoleteChannelState,
+  pruneObsoleteChannelState,
+} from "../src/channel-retention";
+import handler, { AUTOMATIC_PREPARATION_CRON, DAILY_RETENTION_CRON } from "../src/index";
 import {
   cancelTvPreparationRun,
   createTvPreparationRun,
@@ -205,13 +216,20 @@ beforeEach(async () => {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS tv_preparation_items (
     run_id TEXT NOT NULL, channel_id TEXT NOT NULL, position INTEGER NOT NULL, sequence INTEGER NOT NULL,
     programme_id TEXT NOT NULL, video_id TEXT NOT NULL,
+    show_imdb_id TEXT, release_info TEXT,
     show_title TEXT NOT NULL, season INTEGER NOT NULL, episode INTEGER NOT NULL, episode_title TEXT NOT NULL,
     status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, quality TEXT, filename TEXT, info_hash TEXT,
-    message TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, channel_id, position)
+    message TEXT, next_attempt_at TEXT, updated_at TEXT NOT NULL, PRIMARY KEY (run_id, channel_id, position)
   )`).run();
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS maintenance_cursors (
     name TEXT PRIMARY KEY NOT NULL, last_household_id TEXT, updated_at TEXT NOT NULL
   )`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS movie_rotation_household_cycle_idx
+    ON movie_rotation (household_id, channel_id, cycle)`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS stream_selections_identity_idx
+    ON stream_selections (household_id, torrent_id, file_id)`).run();
+  await env.DB.prepare(`CREATE INDEX IF NOT EXISTS canonical_show_episodes_video_idx
+    ON canonical_show_episodes (video_id, show_imdb_id)`).run();
   await env.DB.prepare("CREATE INDEX IF NOT EXISTS households_secret_idx ON households (secret)").run();
   await env.DB.prepare("DELETE FROM pin_attempts").run();
   await env.DB.prepare("DELETE FROM maintenance_cursors").run();
@@ -1301,6 +1319,9 @@ describe("rolling TV Channel Schedule", () => {
       counts: { queued: 3, ready: 0 },
     });
     expect(run.items.map((item) => item.videoId)).toEqual(schedule.slice(0, 3).map((item) => item.episode.id));
+    const snapshot = await env.DB.prepare(`SELECT show_imdb_id, release_info FROM tv_preparation_items
+      WHERE run_id = ? ORDER BY sequence LIMIT 1`).bind(run.id).first();
+    expect(snapshot).toMatchObject({ show_imdb_id: schedule[0].imdbId });
     await expect(createTvPreparationRun(env.DB, created.householdId, schedule, 1, 1, now))
       .rejects.toThrow("preparation already active");
 
@@ -2372,6 +2393,84 @@ describe("Household deletion", () => {
 });
 
 describe("scheduled Channel state retention", () => {
+  it("uses indexed lookups for the measured high-read query shapes", async () => {
+    const rotationPlan = await env.DB.prepare(`EXPLAIN QUERY PLAN
+      SELECT rotation.rowid FROM movie_rotation rotation
+      JOIN movie_channel_state state ON state.channel_id = rotation.channel_id
+      WHERE rotation.household_id IN (?) AND rotation.cycle < state.cycle LIMIT ?`)
+      .bind("household", 500).all<{ detail: string }>();
+    expect(rotationPlan.results.some((row) => row.detail.includes("movie_rotation_household_cycle_idx"))).toBe(true);
+
+    const streamPlan = await env.DB.prepare(`EXPLAIN QUERY PLAN
+      SELECT stale_at FROM stream_selections
+      WHERE household_id = ? AND torrent_id = ? AND file_id = ?`)
+      .bind("household", "torrent", 1).all<{ detail: string }>();
+    expect(streamPlan.results.some((row) => row.detail.includes("stream_selections_identity_idx"))).toBe(true);
+
+    // The empty test database can legitimately reverse this join. The populated local migration
+    // fixture is checked separately with EXPLAIN; here, guard the required fallback index itself.
+    const episodeIndexes = await env.DB.prepare("PRAGMA index_list('canonical_show_episodes')")
+      .all<{ name: string }>();
+    expect(episodeIndexes.results.some((row) => row.name === "canonical_show_episodes_video_idx")).toBe(true);
+  });
+
+  it("runs a complete retention sweep only on the daily cron", async () => {
+    const expired = "2026-08-07T12:00:00.000Z";
+    for (const suffix of ["a", "b", "c"]) {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+          VALUES (?, ?, 'salt', 'hash', ?)`)
+          .bind(`daily-${suffix}`, `daily-secret-${suffix}`, expired),
+        env.DB.prepare(`INSERT INTO movie_channel_mutations
+          VALUES (?, ?, 0, ?, ?)`)
+          .bind(`daily-${suffix}`, `daily-channel-${suffix}`, `owner-${suffix}`, expired),
+      ]);
+    }
+
+    const automaticContext = createExecutionContext();
+    await handler.scheduled(
+      createScheduledController({ cron: AUTOMATIC_PREPARATION_CRON }),
+      env,
+      automaticContext,
+    );
+    await waitOnExecutionContext(automaticContext);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_channel_mutations").first())
+      .toMatchObject({ count: 3 });
+
+    const dailyContext = createExecutionContext();
+    await handler.scheduled(
+      createScheduledController({ cron: DAILY_RETENTION_CRON }),
+      env,
+      dailyContext,
+    );
+    await waitOnExecutionContext(dailyContext);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_channel_mutations").first())
+      .toMatchObject({ count: 0 });
+  });
+
+  it("sweeps every Household in one invocation while retaining bounded SQL batches", async () => {
+    const expired = "2026-08-07T12:00:00.000Z";
+    for (const suffix of ["a", "b", "c"]) {
+      await env.DB.batch([
+        env.DB.prepare(`INSERT INTO households (id, secret, pin_salt, pin_hash, created_at)
+          VALUES (?, ?, 'salt', 'hash', ?)`)
+          .bind(`full-${suffix}`, `full-secret-${suffix}`, expired),
+        env.DB.prepare("INSERT INTO movie_channel_mutations VALUES (?, ?, 0, ?, ?)")
+          .bind(`full-${suffix}`, `full-channel-${suffix}`, `owner-${suffix}`, expired),
+      ]);
+    }
+
+    const result = await pruneAllObsoleteChannelState(
+      env.DB,
+      new Date("2026-08-09T12:00:00.000Z"),
+      1,
+      500,
+    );
+
+    expect(result).toMatchObject({ households: 3, batches: 3 });
+    expect(result.deleted.movie_channel_mutations).toBe(3);
+  });
+
   it("prunes bounded expired state while preserving active ownership, undo, and Parent history", async () => {
     const now = new Date("2026-08-09T12:00:00.000Z");
     const expired = "2026-08-07T12:00:00.000Z";
