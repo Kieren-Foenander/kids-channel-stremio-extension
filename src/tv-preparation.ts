@@ -507,25 +507,26 @@ async function processBatch(
   return { stop: false };
 }
 
-async function finishRound(
+export async function finishTvPreparationRound(
   db: D1Database,
   householdId: string,
   runId: string,
+  now = new Date(),
 ): Promise<{ complete: boolean; sleepMs: number }> {
   const run = await db.prepare("SELECT * FROM tv_preparation_runs WHERE household_id = ? AND id = ?")
     .bind(householdId, runId).first<RunRow>();
   if (!run || run.status === "cancelled" || run.status === "failed" || run.status === "completed") {
     return { complete: true, sleepMs: 0 };
   }
-  const now = new Date();
   if (Date.parse(run.deadline_at) <= now.getTime()) {
     await finishRun(db, runId, now, "Preparation window ended");
     return { complete: true, sleepMs: 0 };
   }
-  const unfinished = await db.prepare(`SELECT COUNT(*) AS count, MIN(next_attempt_at) AS next_attempt_at
+  const unfinished = await db.prepare(`SELECT COUNT(*) AS count,
+      MIN(COALESCE(next_attempt_at, ?)) AS next_attempt_at
     FROM tv_preparation_items
     WHERE run_id = ? AND status NOT IN ('ready', 'unavailable', 'cancelled')`)
-    .bind(runId).first<{ count: number; next_attempt_at: string | null }>();
+    .bind(now.toISOString(), runId).first<{ count: number; next_attempt_at: string | null }>();
   if ((unfinished?.count ?? 0) === 0) {
     await finishRun(db, runId, now);
     return { complete: true, sleepMs: 0 };
@@ -563,19 +564,22 @@ export class TvSchedulePreparationWorkflow extends WorkflowEntrypoint<TvPreparat
       });
       if (plan.stop || plan.batchCount === 0) return;
       for (let round = 0; round < MAX_ROUNDS; round += 1) {
-        for (let batch = 0; batch < Math.min(plan.batchCount, MAX_ITEM_BATCHES); batch += 1) {
+        // Retain all five historical step names so active pre-deploy instances can replay their
+        // cached boolean results. Surplus steps in new instances return without touching D1.
+        for (let batch = 0; batch < MAX_ITEM_BATCHES; batch += 1) {
           const result = await step.do(`prepare round ${round + 1} batch ${batch + 1}`, { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "10 minutes" },
             async () => {
+              if (batch >= plan.batchCount) return { stop: false };
               if (!this.env.CONFIG_SECRET) throw new Error("Configuration secret is unavailable");
               // Keep the decrypted credential inside the step callback so it is never persisted as Workflow output.
               const token = await loadTorBoxCredential(this.env.DB, householdId, this.env.CONFIG_SECRET);
               if (!token) throw new Error("TorBox is not configured");
               return processBatch(this.env, runId, householdId, token, batch);
-            });
-          if (result.stop) return;
+            }) as boolean | { stop: boolean };
+          if (result === true || (typeof result === "object" && result.stop)) return;
         }
         const roundStatus = await step.do(`finish round ${round + 1}`, () =>
-          finishRound(this.env.DB, householdId, runId));
+          finishTvPreparationRound(this.env.DB, householdId, runId));
         if (roundStatus.complete) return;
         await step.sleep(`wait for round ${round + 2}`, roundStatus.sleepMs);
       }

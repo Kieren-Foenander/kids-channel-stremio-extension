@@ -20,6 +20,8 @@ import {
   cancelTvPreparationRun,
   createTvPreparationRun,
   ensureAutomaticTvPreparation,
+  finishTvPreparationRound,
+  TvSchedulePreparationWorkflow,
   tvPreparationRun,
 } from "../src/tv-preparation";
 import {
@@ -1330,6 +1332,61 @@ describe("rolling TV Channel Schedule", () => {
     expect((await tvPreparationRun(env.DB, created.householdId))?.items.every((item) => item.message === "Stopped by Parent")).toBe(true);
   });
 
+  it("wakes immediately when an unfinished item has no next attempt beside a future retry", async () => {
+    const { created, channelId } = await arrangeShows(1);
+    const schedule = await tvChannelSchedule(env.DB, created.householdId, channelId, "deterministic-test-seed");
+    const now = new Date("2026-08-01T10:00:00.000Z");
+    const run = await createTvPreparationRun(env.DB, created.householdId, schedule, 2, 8, now);
+    await env.DB.prepare(`UPDATE tv_preparation_items SET next_attempt_at = ?
+      WHERE run_id = ? AND sequence = 1`)
+      .bind("2026-08-01T10:30:00.000Z", run.id).run();
+
+    const result = await finishTvPreparationRound(env.DB, created.householdId, run.id, now);
+
+    expect(result).toEqual({ complete: false, sleepMs: 1_000 });
+  });
+
+  it("replays all historical batch names and stops on a cached boolean result", async () => {
+    const workflow = Object.create(TvSchedulePreparationWorkflow.prototype) as TvSchedulePreparationWorkflow;
+    const doStep = vi.fn(async (name: string) => {
+      if (name === "load preparation plan") return { stop: false, batchCount: 1 };
+      if (name === "prepare round 1 batch 1") return false;
+      if (name === "prepare round 1 batch 2") return true;
+      throw new Error(`unexpected step: ${name}`);
+    });
+    const sleep = vi.fn();
+
+    await workflow.run(
+      { payload: { runId: "run", householdId: "household" } } as any,
+      { do: doStep, sleep } as any,
+    );
+
+    expect(doStep.mock.calls.map(([name]) => name)).toEqual([
+      "load preparation plan",
+      "prepare round 1 batch 1",
+      "prepare round 1 batch 2",
+    ]);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("stops on the current structured batch result", async () => {
+    const workflow = Object.create(TvSchedulePreparationWorkflow.prototype) as TvSchedulePreparationWorkflow;
+    const doStep = vi.fn(async (name: string) => {
+      if (name === "load preparation plan") return { stop: false, batchCount: 1 };
+      if (name === "prepare round 1 batch 1") return { stop: true };
+      throw new Error(`unexpected step: ${name}`);
+    });
+    const sleep = vi.fn();
+
+    await workflow.run(
+      { payload: { runId: "run", householdId: "household" } } as any,
+      { do: doStep, sleep } as any,
+    );
+
+    expect(doStep).toHaveBeenCalledTimes(2);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it("exposes automatic preparation status without a manual start endpoint", async () => {
     const { created } = await arrangeShows(1);
     const endpoint = `https://kids.test/api/households/${secretFrom(created)}/tv-preparation`;
@@ -2407,11 +2464,10 @@ describe("scheduled Channel state retention", () => {
       .bind("household", "torrent", 1).all<{ detail: string }>();
     expect(streamPlan.results.some((row) => row.detail.includes("stream_selections_identity_idx"))).toBe(true);
 
-    // The empty test database can legitimately reverse this join. The populated local migration
-    // fixture is checked separately with EXPLAIN; here, guard the required fallback index itself.
-    const episodeIndexes = await env.DB.prepare("PRAGMA index_list('canonical_show_episodes')")
-      .all<{ name: string }>();
-    expect(episodeIndexes.results.some((row) => row.name === "canonical_show_episodes_video_idx")).toBe(true);
+    const episodePlan = await env.DB.prepare(`EXPLAIN QUERY PLAN
+      SELECT show_imdb_id FROM canonical_show_episodes WHERE video_id = ?`)
+      .bind("tt1234567:1:1").all<{ detail: string }>();
+    expect(episodePlan.results.some((row) => row.detail.includes("canonical_show_episodes_video_idx"))).toBe(true);
   });
 
   it("runs a complete retention sweep only on the daily cron", async () => {
