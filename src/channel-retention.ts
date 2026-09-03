@@ -17,32 +17,36 @@ export interface ChannelRetentionResult {
   deleted: Record<string, number>;
 }
 
+export interface CompleteChannelRetentionResult {
+  households: number;
+  batches: number;
+  deleted: Record<string, number>;
+}
+
 function placeholders(count: number): string {
   return Array.from({ length: count }, () => "?").join(", ");
 }
 
-export async function pruneObsoleteChannelState(
+async function householdsAfter(
   db: D1Database,
-  now = new Date(),
-  householdLimit: number = CHANNEL_RETENTION.householdsPerSweep,
-  rowLimit: number = CHANNEL_RETENTION.rowsPerTablePerSweep,
-): Promise<ChannelRetentionResult> {
-  const cursor = await db.prepare("SELECT last_household_id FROM maintenance_cursors WHERE name = ?")
-    .bind(CURSOR_NAME).first<{ last_household_id: string | null }>();
-  const households = await db.prepare(`SELECT id FROM households
-    WHERE (? IS NULL OR id > ?) ORDER BY id LIMIT ?`)
-    .bind(cursor?.last_household_id ?? null, cursor?.last_household_id ?? null, householdLimit)
-    .all<{ id: string }>();
+  lastHouseholdId: string | null,
+  householdLimit: number,
+): Promise<string[]> {
+  const rows = lastHouseholdId === null
+    ? await db.prepare("SELECT id FROM households ORDER BY id LIMIT ?")
+      .bind(householdLimit).all<{ id: string }>()
+    : await db.prepare("SELECT id FROM households WHERE id > ? ORDER BY id LIMIT ?")
+      .bind(lastHouseholdId, householdLimit).all<{ id: string }>();
+  return rows.results.map((household) => household.id);
+}
 
-  if (households.results.length === 0) {
-    const timestamp = now.toISOString();
-    await db.prepare(`INSERT INTO maintenance_cursors (name, last_household_id, updated_at)
-      VALUES (?, NULL, ?) ON CONFLICT(name) DO UPDATE SET last_household_id = NULL, updated_at = excluded.updated_at`)
-      .bind(CURSOR_NAME, timestamp).run();
-    return { households: 0, wrapped: Boolean(cursor?.last_household_id), deleted: {} };
-  }
-
-  const householdIds = households.results.map((household) => household.id);
+async function pruneHouseholdBatch(
+  db: D1Database,
+  householdIds: string[],
+  now: Date,
+  rowLimit: number,
+): Promise<Record<string, number>> {
+  if (householdIds.length === 0) return {};
   const householdSql = placeholders(householdIds.length);
   const cutoff = new Date(now.getTime() - CHANNEL_RETENTION.claimHours * 60 * 60 * 1000).toISOString();
   const timestamp = now.toISOString();
@@ -127,10 +131,59 @@ export async function pruneObsoleteChannelState(
     "unavailable_episodes",
   ];
   const results = await db.batch(statements);
-  const deleted = Object.fromEntries(results.map((result, index) => [tables[index], result.meta.changes]));
+  return Object.fromEntries(results.map((result, index) => [tables[index], result.meta.changes]));
+}
+
+export async function pruneObsoleteChannelState(
+  db: D1Database,
+  now = new Date(),
+  householdLimit: number = CHANNEL_RETENTION.householdsPerSweep,
+  rowLimit: number = CHANNEL_RETENTION.rowsPerTablePerSweep,
+): Promise<ChannelRetentionResult> {
+  const cursor = await db.prepare("SELECT last_household_id FROM maintenance_cursors WHERE name = ?")
+    .bind(CURSOR_NAME).first<{ last_household_id: string | null }>();
+  const householdIds = await householdsAfter(db, cursor?.last_household_id ?? null, householdLimit);
+
+  if (householdIds.length === 0) {
+    const timestamp = now.toISOString();
+    await db.prepare(`INSERT INTO maintenance_cursors (name, last_household_id, updated_at)
+      VALUES (?, NULL, ?) ON CONFLICT(name) DO UPDATE SET last_household_id = NULL, updated_at = excluded.updated_at`)
+      .bind(CURSOR_NAME, timestamp).run();
+    return { households: 0, wrapped: Boolean(cursor?.last_household_id), deleted: {} };
+  }
+
+  const timestamp = now.toISOString();
+  const deleted = await pruneHouseholdBatch(db, householdIds, now, rowLimit);
   await db.prepare(`INSERT INTO maintenance_cursors (name, last_household_id, updated_at)
     VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET
       last_household_id = excluded.last_household_id, updated_at = excluded.updated_at`)
     .bind(CURSOR_NAME, householdIds.at(-1), timestamp).run();
   return { households: householdIds.length, wrapped: false, deleted };
+}
+
+/** Daily maintenance walks the complete Household keyspace in bounded batches. It uses a
+ * local cursor so duplicate Cron delivery remains harmless and concurrent runs cannot make
+ * one another skip Households through the legacy persisted cursor. */
+export async function pruneAllObsoleteChannelState(
+  db: D1Database,
+  now = new Date(),
+  householdLimit: number = CHANNEL_RETENTION.householdsPerSweep,
+  rowLimit: number = CHANNEL_RETENTION.rowsPerTablePerSweep,
+): Promise<CompleteChannelRetentionResult> {
+  let lastHouseholdId: string | null = null;
+  let households = 0;
+  let batches = 0;
+  const deleted: Record<string, number> = {};
+  while (true) {
+    const householdIds = await householdsAfter(db, lastHouseholdId, householdLimit);
+    if (householdIds.length === 0) break;
+    const batchDeleted = await pruneHouseholdBatch(db, householdIds, now, rowLimit);
+    for (const [table, count] of Object.entries(batchDeleted)) {
+      deleted[table] = (deleted[table] ?? 0) + count;
+    }
+    households += householdIds.length;
+    batches += 1;
+    lastHouseholdId = householdIds.at(-1) ?? null;
+  }
+  return { households, batches, deleted };
 }

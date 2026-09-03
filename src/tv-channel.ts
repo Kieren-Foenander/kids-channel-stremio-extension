@@ -9,6 +9,7 @@ export interface TvCurrentProgramme {
   programmeId: string;
   imdbId: string;
   showTitle: string;
+  releaseInfo?: string;
   description?: string;
   poster?: string;
   background?: string;
@@ -19,6 +20,7 @@ interface ShowRow {
   programme_id: string;
   imdb_id: string;
   show_title: string;
+  release_info: string | null;
   description: string | null;
   poster: string | null;
   background: string | null;
@@ -40,6 +42,7 @@ interface ScheduleRow extends EpisodeRow {
   position: number;
   imdb_id: string;
   show_title: string;
+  release_info: string | null;
   description: string | null;
   poster: string | null;
   background: string | null;
@@ -80,6 +83,7 @@ interface Show {
   programmeId: string;
   imdbId: string;
   title: string;
+  releaseInfo?: string;
   description?: string;
   poster?: string;
   background?: string;
@@ -109,6 +113,7 @@ function programmeFromRow(row: ScheduleRow): TvScheduledProgramme {
     programmeId: row.programme_id,
     imdbId: row.imdb_id,
     showTitle: row.show_title,
+    releaseInfo: row.release_info ?? undefined,
     description: row.description ?? undefined,
     poster: row.poster ?? undefined,
     background: row.background ?? undefined,
@@ -119,6 +124,7 @@ function programmeFromRow(row: ScheduleRow): TvScheduledProgramme {
 async function loadShows(db: D1Database, householdId: string, channelId: string): Promise<Show[]> {
   const showRows = await db.prepare(`SELECT programme.id AS programme_id, programme.imdb_id,
       canonical.title AS show_title, canonical.description, canonical.poster, canonical.background,
+      canonical.release_info,
       assignment.next_video_id
     FROM approved_programmes programme
     JOIN canonical_shows canonical ON canonical.imdb_id = programme.imdb_id
@@ -147,6 +153,7 @@ async function loadShows(db: D1Database, householdId: string, channelId: string)
       programmeId: row.programme_id,
       imdbId: row.imdb_id,
       title: row.show_title,
+      releaseInfo: row.release_info ?? undefined,
       description: row.description ?? undefined,
       poster: row.poster ?? undefined,
       background: row.background ?? undefined,
@@ -208,6 +215,7 @@ function project(
       programmeId: show.programmeId,
       imdbId: show.imdbId,
       showTitle: show.title,
+      releaseInfo: show.releaseInfo,
       description: show.description,
       poster: show.poster,
       background: show.background,
@@ -250,6 +258,7 @@ async function scheduleRows(
 ): Promise<TvScheduledProgramme[]> {
   const rows = await db.prepare(`SELECT schedule.channel_id, schedule.position, schedule.programme_id, programme.imdb_id,
       canonical.title AS show_title, canonical.description, canonical.poster, canonical.background,
+      canonical.release_info,
       episode.video_id, episode.season, episode.episode, episode.title AS episode_title,
       episode.released_at, episode.overview
     FROM channel_schedule schedule

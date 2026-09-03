@@ -27,5 +27,8 @@
       "name": "kids-channels-test-tv-preparation",
       "class_name": "TvSchedulePreparationWorkflow"
     }
-  ]
+  ],
+  "triggers": {
+    "crons": ["*/15 * * * *", "0 3 * * *"]
+  }
 }

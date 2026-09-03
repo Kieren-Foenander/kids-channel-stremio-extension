@@ -30,6 +30,7 @@ export interface StreamSelectionOptions {
   maxCacheChecks?: number;
   cacheCheckTimeoutMs?: number;
   onOutcome?: (outcome: StreamSelectionOutcome) => void;
+  programme?: StreamSelectionProgramme;
 }
 
 export type StreamSelectionOutcome =
@@ -64,7 +65,7 @@ export interface DiscoveryCandidate {
   providerRank?: number;
 }
 
-interface CanonicalProgramme {
+export interface StreamSelectionProgramme {
   programmeId: string;
   imdbId: string;
   title: string;
@@ -159,7 +160,7 @@ async function canonicalProgramme(
   householdId: string,
   contentType: StreamContentType,
   videoId: string,
-): Promise<CanonicalProgramme | null> {
+): Promise<StreamSelectionProgramme | null> {
   if (contentType === "movie") {
     const row = await db.prepare(`SELECT id, imdb_id, title, release_info
       FROM approved_programmes
@@ -176,10 +177,11 @@ async function canonicalProgramme(
 
   const row = await db.prepare(`SELECT p.id, p.imdb_id, canonical.title, canonical.release_info,
       e.season, e.episode
-    FROM approved_programmes p
+    FROM canonical_show_episodes e
+    JOIN approved_programmes p
+      ON p.imdb_id = e.show_imdb_id AND p.household_id = ? AND p.content_type = 'show'
     JOIN canonical_shows canonical ON canonical.imdb_id = p.imdb_id
-    JOIN show_episodes e ON e.programme_id = p.id
-    WHERE p.household_id = ? AND p.content_type = 'show' AND e.video_id = ?`)
+    WHERE e.video_id = ?`)
     .bind(householdId, videoId)
     .first<{
       id: string;
@@ -265,7 +267,7 @@ function structuredEpisodeMatch(result: ZileanResult, season: number, episode: n
   return seasons.includes(season) && (episodes.length === 0 || episodes.includes(episode));
 }
 
-function zileanCandidates(value: unknown, programme: CanonicalProgramme): DiscoveryCandidate[] {
+function zileanCandidates(value: unknown, programme: StreamSelectionProgramme): DiscoveryCandidate[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry, providerRank): DiscoveryCandidate[] => {
     if (typeof entry !== "object" || entry === null) return [];
@@ -290,7 +292,7 @@ function zileanCandidates(value: unknown, programme: CanonicalProgramme): Discov
   });
 }
 
-function knabenCandidates(value: unknown, programme: CanonicalProgramme): DiscoveryCandidate[] {
+function knabenCandidates(value: unknown, programme: StreamSelectionProgramme): DiscoveryCandidate[] {
   if (typeof value !== "object" || value === null || !("hits" in value) || !Array.isArray(value.hits)) return [];
   return value.hits.flatMap((entry, providerRank): DiscoveryCandidate[] => {
     if (typeof entry !== "object" || entry === null) return [];
@@ -360,7 +362,7 @@ async function providerJson(url: string, init?: RequestInit): Promise<unknown> {
   return response.json();
 }
 
-async function discover(programme: CanonicalProgramme, env: StreamSelectionEnv): Promise<{
+async function discover(programme: StreamSelectionProgramme, env: StreamSelectionEnv): Promise<{
   candidates: DiscoveryCandidate[];
   providerAvailable: boolean;
 }> {
@@ -438,7 +440,7 @@ class TorrentTerminalError extends Error {
   }
 }
 
-function selectedFile(files: TorrentFile[], programme: CanonicalProgramme): TorrentFile {
+function selectedFile(files: TorrentFile[], programme: StreamSelectionProgramme): TorrentFile {
   const videos = files.filter((file) => /\.(mkv|mp4|m4v|avi|webm|ts)$/i.test(file.path));
   const candidates = programme.season !== undefined && programme.episode !== undefined
     ? videos.filter((file) => releaseMatchesEpisode(file.path, programme.season!, programme.episode!))
@@ -450,7 +452,7 @@ function selectedFile(files: TorrentFile[], programme: CanonicalProgramme): Torr
 
 async function cachedCandidate(
   candidate: DiscoveryCandidate,
-  programme: CanonicalProgramme,
+  programme: StreamSelectionProgramme,
   token: string,
   env: StreamSelectionEnv,
   cachedOnly: boolean,
@@ -702,7 +704,7 @@ function selectionFromCandidate(
   householdId: string,
   contentType: StreamContentType,
   videoId: string,
-  programme: CanonicalProgramme,
+  programme: StreamSelectionProgramme,
   candidate: DiscoveryCandidate,
   torrent: { torrentId: string; file: TorrentFile },
   now: Date,
@@ -757,7 +759,7 @@ export async function selectCachedStream(
       await deleteTorBoxTorrent(torBoxToken, env, existing.selection.torrentId);
     } catch { /* an excluded remote torrent must not block reselection */ }
   }
-  const programme = await canonicalProgramme(db, householdId, contentType, videoId);
+  const programme = options.programme ?? await canonicalProgramme(db, householdId, contentType, videoId);
   if (!programme) {
     report({ status: "no_candidates", candidateCount: 0 });
     return null;

@@ -4,7 +4,6 @@ import { selectCachedStream, type StreamSelectionEnv, type StreamSelectionOutcom
 import { tvChannelSchedule, type TvScheduledProgramme } from "./tv-channel";
 import { channelsForHousehold } from "./channels";
 
-const ROUND_INTERVAL = "5 minutes";
 const MAX_ROUNDS = 96;
 const ITEMS_PER_STEP = 5;
 const MAX_ITEM_BATCHES = 5;
@@ -65,6 +64,8 @@ interface ItemRow {
   position: number;
   programme_id: string;
   video_id: string;
+  show_imdb_id: string | null;
+  release_info: string | null;
   show_title: string;
   season: number;
   episode: number;
@@ -75,6 +76,7 @@ interface ItemRow {
   filename: string | null;
   info_hash: string | null;
   message: string | null;
+  next_attempt_at: string | null;
   updated_at: string;
 }
 
@@ -138,14 +140,17 @@ export async function createTvPreparationRun(
   }
   try {
     await db.batch(selected.map((programme, sequence) => db.prepare(`INSERT INTO tv_preparation_items
-      (run_id, channel_id, position, sequence, programme_id, video_id, show_title, season, episode, episode_title, status, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
+      (run_id, channel_id, position, sequence, programme_id, video_id, show_imdb_id, release_info,
+       show_title, season, episode, episode_title, status, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)`).bind(
       id,
       programme.channelId,
       programme.position,
       sequence,
       programme.programmeId,
       programme.episode.id,
+      programme.imdbId,
+      programme.releaseInfo ?? null,
       programme.showTitle,
       programme.episode.season,
       programme.episode.episode,
@@ -279,8 +284,7 @@ async function householdPreparationSchedule(
 ): Promise<TvScheduledProgramme[]> {
   const channels = await channelsForHousehold(db, householdId, "tv");
   const schedules = await Promise.all(channels.map((channel) =>
-    tvChannelSchedule(db, householdId, channel.id, configuredSeed).then((schedule) =>
-      schedule.slice(0, AUTOMATIC_PREPARATION_COUNT))));
+    tvChannelSchedule(db, householdId, channel.id, configuredSeed, AUTOMATIC_PREPARATION_COUNT)));
   const flattened: TvScheduledProgramme[] = [];
   for (let position = 0; position < AUTOMATIC_PREPARATION_COUNT; position += 1) {
     for (const schedule of schedules) {
@@ -407,40 +411,82 @@ export async function ensureAutomaticTvPreparationForAll(env: AutomaticTvPrepara
   }
 }
 
+export function tvPreparationRetryDelayMinutes(
+  outcome: StreamSelectionOutcome | undefined,
+  attempt: number,
+): number {
+  if (outcome?.status === "downloading") return 5;
+  if (attempt <= 3) return 5;
+  if (attempt <= 7) return 15;
+  return 30;
+}
+
+function releaseYear(value: string | null): number | undefined {
+  const match = value?.match(/\b(19|20)\d{2}\b/);
+  return match ? Number(match[0]) : undefined;
+}
+
 async function processBatch(
   env: TvPreparationWorkflowEnv,
   runId: string,
   householdId: string,
   token: string,
   batchIndex: number,
-): Promise<boolean> {
-  const run = await tvPreparationRun(env.DB, householdId, runId);
-  if (!run || run.status === "cancelled" || run.status === "failed" || run.status === "completed") return true;
-  const now = new Date();
-  if (Date.parse(run.deadlineAt) <= now.getTime()) {
-    await finishRun(env.DB, runId, now, "Preparation window ended");
-    return true;
+): Promise<{ stop: boolean }> {
+  const run = await env.DB.prepare("SELECT * FROM tv_preparation_runs WHERE household_id = ? AND id = ?")
+    .bind(householdId, runId).first<RunRow>();
+  if (!run || run.status === "cancelled" || run.status === "failed" || run.status === "completed") {
+    return { stop: true };
   }
-  const items = run.items
-    .slice(batchIndex * ITEMS_PER_STEP, (batchIndex + 1) * ITEMS_PER_STEP)
-    .filter((candidate) => !["ready", "unavailable", "cancelled"].includes(candidate.status));
+  const now = new Date();
+  if (Date.parse(run.deadline_at) <= now.getTime()) {
+    await finishRun(env.DB, runId, now, "Preparation window ended");
+    return { stop: true };
+  }
+  const sequenceStart = batchIndex * ITEMS_PER_STEP;
+  const { results: items } = await env.DB.prepare(`SELECT * FROM tv_preparation_items
+    WHERE run_id = ? AND sequence >= ? AND sequence < ?
+      AND status NOT IN ('ready', 'unavailable', 'cancelled')
+      AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+    ORDER BY sequence`).bind(
+    runId,
+    sequenceStart,
+    sequenceStart + ITEMS_PER_STEP,
+    now.toISOString(),
+  ).all<ItemRow>();
   for (const item of items) {
     let outcome: StreamSelectionOutcome | undefined;
     const selection = await selectCachedStream(
-      env.DB, householdId, "series", item.videoId, token, env, now, new Set(),
-      { maxCacheChecks: 10, cacheCheckTimeoutMs: 1_000, onOutcome: (value) => { outcome = value; } },
+      env.DB, householdId, "series", item.video_id, token, env, now, new Set(),
+      {
+        maxCacheChecks: 10,
+        cacheCheckTimeoutMs: 1_000,
+        onOutcome: (value) => { outcome = value; },
+        programme: item.show_imdb_id ? {
+          programmeId: item.programme_id,
+          imdbId: item.show_imdb_id,
+          title: item.show_title,
+          year: releaseYear(item.release_info),
+          season: item.season,
+          episode: item.episode,
+        } : undefined,
+      },
     );
     const stored = await env.DB.prepare(`SELECT download_pending, quality, filename, info_hash FROM stream_selections
       WHERE household_id = ? AND content_type = 'series' AND video_id = ?`)
-      .bind(householdId, item.videoId).first<SelectionStateRow>();
+      .bind(householdId, item.video_id).first<SelectionStateRow>();
     const status: TvPreparationItemStatus = selection || (stored && stored.download_pending !== 1)
       ? "ready"
       : stored
         ? "downloading"
         : "trying";
     const message = tvPreparationOutcomeMessage(outcome);
+    const attempt = item.attempts + 1;
+    const nextAttemptAt = status === "ready"
+      ? null
+      : new Date(now.getTime() + tvPreparationRetryDelayMinutes(outcome, attempt) * 60 * 1000).toISOString();
     await env.DB.prepare(`UPDATE tv_preparation_items SET status = ?, attempts = attempts + 1,
-      quality = ?, filename = ?, info_hash = ?, message = ?, updated_at = ?
+      quality = ?, filename = ?, info_hash = ?, message = ?, next_attempt_at = ?, updated_at = ?
       WHERE run_id = ? AND channel_id = ? AND position = ? AND EXISTS (
         SELECT 1 FROM tv_preparation_runs run
         WHERE run.id = tv_preparation_items.run_id AND run.status IN ('queued', 'running')
@@ -451,21 +497,46 @@ async function processBatch(
         selection?.filename ?? stored?.filename ?? null,
         selection?.infoHash ?? stored?.info_hash ?? null,
         message,
+        nextAttemptAt,
         now.toISOString(),
         runId,
-        item.channelId,
+        item.channel_id,
         item.position,
       ).run();
   }
-  const unfinished = await env.DB.prepare(`SELECT COUNT(*) AS count FROM tv_preparation_items
-    WHERE run_id = ? AND status NOT IN ('ready', 'unavailable', 'cancelled')`).bind(runId).first<{ count: number }>();
-  if ((unfinished?.count ?? 0) === 0) {
-    await finishRun(env.DB, runId, now);
-    return true;
+  return { stop: false };
+}
+
+export async function finishTvPreparationRound(
+  db: D1Database,
+  householdId: string,
+  runId: string,
+  now = new Date(),
+): Promise<{ complete: boolean; sleepMs: number }> {
+  const run = await db.prepare("SELECT * FROM tv_preparation_runs WHERE household_id = ? AND id = ?")
+    .bind(householdId, runId).first<RunRow>();
+  if (!run || run.status === "cancelled" || run.status === "failed" || run.status === "completed") {
+    return { complete: true, sleepMs: 0 };
   }
-  await env.DB.prepare("UPDATE tv_preparation_runs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status != 'cancelled'")
+  if (Date.parse(run.deadline_at) <= now.getTime()) {
+    await finishRun(db, runId, now, "Preparation window ended");
+    return { complete: true, sleepMs: 0 };
+  }
+  const unfinished = await db.prepare(`SELECT COUNT(*) AS count,
+      MIN(COALESCE(next_attempt_at, ?)) AS next_attempt_at
+    FROM tv_preparation_items
+    WHERE run_id = ? AND status NOT IN ('ready', 'unavailable', 'cancelled')`)
+    .bind(now.toISOString(), runId).first<{ count: number; next_attempt_at: string | null }>();
+  if ((unfinished?.count ?? 0) === 0) {
+    await finishRun(db, runId, now);
+    return { complete: true, sleepMs: 0 };
+  }
+  await db.prepare("UPDATE tv_preparation_runs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status != 'cancelled'")
     .bind(now.toISOString(), now.toISOString(), runId).run();
-  return false;
+  const fallback = now.getTime() + 5 * 60 * 1000;
+  const requestedWake = unfinished?.next_attempt_at ? Date.parse(unfinished.next_attempt_at) : fallback;
+  const wakeAt = Math.min(Number.isFinite(requestedWake) ? requestedWake : fallback, Date.parse(run.deadline_at));
+  return { complete: false, sleepMs: Math.max(1_000, wakeAt - now.getTime()) };
 }
 
 async function finishRun(db: D1Database, runId: string, now: Date, unfinishedMessage?: string): Promise<void> {
@@ -483,19 +554,34 @@ export class TvSchedulePreparationWorkflow extends WorkflowEntrypoint<TvPreparat
   async run(event: Readonly<WorkflowEvent<TvPreparationWorkflowParams>>, step: WorkflowStep): Promise<void> {
     const { runId, householdId } = event.payload;
     try {
+      const plan = await step.do("load preparation plan", async () => {
+        const run = await this.env.DB.prepare("SELECT requested_count, status FROM tv_preparation_runs WHERE household_id = ? AND id = ?")
+          .bind(householdId, runId).first<{ requested_count: number; status: TvPreparationRunStatus }>();
+        return {
+          stop: !run || ["cancelled", "failed", "completed"].includes(run.status),
+          batchCount: Math.ceil((run?.requested_count ?? 0) / ITEMS_PER_STEP),
+        };
+      });
+      if (plan.stop || plan.batchCount === 0) return;
       for (let round = 0; round < MAX_ROUNDS; round += 1) {
+        // Retain all five historical step names so active pre-deploy instances can replay their
+        // cached boolean results. Surplus steps in new instances return without touching D1.
         for (let batch = 0; batch < MAX_ITEM_BATCHES; batch += 1) {
-          const complete = await step.do(`prepare round ${round + 1} batch ${batch + 1}`, { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "10 minutes" },
+          const result = await step.do(`prepare round ${round + 1} batch ${batch + 1}`, { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" }, timeout: "10 minutes" },
             async () => {
+              if (batch >= plan.batchCount) return { stop: false };
               if (!this.env.CONFIG_SECRET) throw new Error("Configuration secret is unavailable");
               // Keep the decrypted credential inside the step callback so it is never persisted as Workflow output.
               const token = await loadTorBoxCredential(this.env.DB, householdId, this.env.CONFIG_SECRET);
               if (!token) throw new Error("TorBox is not configured");
               return processBatch(this.env, runId, householdId, token, batch);
-            });
-          if (complete) return;
+            }) as boolean | { stop: boolean };
+          if (result === true || (typeof result === "object" && result.stop)) return;
         }
-        await step.sleep(`wait for round ${round + 2}`, ROUND_INTERVAL);
+        const roundStatus = await step.do(`finish round ${round + 1}`, () =>
+          finishTvPreparationRound(this.env.DB, householdId, runId));
+        if (roundStatus.complete) return;
+        await step.sleep(`wait for round ${round + 2}`, roundStatus.sleepMs);
       }
       await step.do("finish preparation window", () => finishRun(this.env.DB, runId, new Date(), "Preparation window ended"));
     } catch (error) {

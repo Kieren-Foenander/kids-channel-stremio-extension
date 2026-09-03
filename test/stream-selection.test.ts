@@ -7,7 +7,7 @@ import {
   selectCachedStream,
   type DiscoveryCandidate,
 } from "../src/stream-selection";
-import { tvPreparationOutcomeMessage } from "../src/tv-preparation";
+import { tvPreparationOutcomeMessage, tvPreparationRetryDelayMinutes } from "../src/tv-preparation";
 
 const selectionEnv = {
   ZILEAN_ORIGIN: "https://zilean.test",
@@ -155,6 +155,15 @@ describe("Preparation Run source reporting", () => {
     expect(tvPreparationOutcomeMessage({ status: "no_candidates", candidateCount: 0 })).toContain("No matching torrent sources");
     expect(tvPreparationOutcomeMessage({ status: "candidate_rejected", candidateCount: 2, reason: "file_mismatch" })).toContain("next round will try another");
     expect(tvPreparationOutcomeMessage({ status: "temporarily_unavailable", candidateCount: 1 })).toContain("could not inspect");
+  });
+
+  it("keeps downloads responsive while progressively backing off repeated source misses", () => {
+    expect(tvPreparationRetryDelayMinutes({ status: "downloading", candidateCount: 1 }, 91)).toBe(5);
+    expect(tvPreparationRetryDelayMinutes({ status: "no_candidates", candidateCount: 0 }, 1)).toBe(5);
+    expect(tvPreparationRetryDelayMinutes({ status: "no_candidates", candidateCount: 0 }, 3)).toBe(5);
+    expect(tvPreparationRetryDelayMinutes({ status: "no_candidates", candidateCount: 0 }, 4)).toBe(15);
+    expect(tvPreparationRetryDelayMinutes({ status: "candidates_exhausted", candidateCount: 2 }, 7)).toBe(15);
+    expect(tvPreparationRetryDelayMinutes({ status: "temporarily_unavailable", candidateCount: 0 }, 8)).toBe(30);
   });
 });
 
