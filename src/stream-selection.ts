@@ -325,14 +325,18 @@ function knabenCandidates(value: unknown, programme: StreamSelectionProgramme): 
     if (programme.season !== undefined && programme.episode !== undefined) {
       // No-year releases are common. Accept an exact show title before the season
       // marker, but reject explicit conflicting years and similarly named shows.
-      const marker = /(?:^|[^a-z0-9])(?:s\d+|\d+x\d+|season[ ._-]*\d+)/i.exec(title);
+      const releaseTitle = title.replace(/^(?:\[[^\]\r\n]+\][ ._-]*)+/, "");
+      const marker = /(?:^|[^a-z0-9])(?:s\d+|\d{1,2}x\d{1,3}(?=[^a-z0-9]|$)|season[ ._-]*\d+)/i.exec(releaseTitle);
       if (!marker) return [];
-      const prefix = title.slice(0, marker.index).toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
+      const prefix = releaseTitle.slice(0, marker.index).toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
       const suffix = prefix.startsWith(normalizedProgrammeTitle) ? prefix.slice(normalizedProgrammeTitle.length).trim() : null;
-      if (suffix === null || (suffix !== "" && suffix !== String(programme.year))) return [];
-      const seasonPack = new RegExp(`(?:^|[^a-z0-9])(?:s0*${programme.season}|season[ ._-]*0*${programme.season})(?:[^a-z0-9]|$)`, "i").test(title)
-        && !/(?:s\d+[ ._-]*e\d+|\d+x\d+|\bepisodes?\b)/i.test(title);
-      if (!releaseMatchesEpisode(title, programme.season, programme.episode) && !seasonPack) return [];
+      if (suffix === null || (suffix !== "" && (
+        !/^(19|20)\d{2}$/.test(suffix)
+        || (programme.year !== undefined && suffix !== String(programme.year))
+      ))) return [];
+      const seasonPack = new RegExp(`(?:^|[^a-z0-9])(?:s0*${programme.season}|season[ ._-]*0*${programme.season})(?:[^a-z0-9]|$)`, "i").test(releaseTitle)
+        && !/(?:^|[^a-z0-9])(?:s\d+[ ._-]*e\d+|\d{1,2}x\d{1,3})(?:[^a-z0-9]|$)|\bepisodes?\b/i.test(releaseTitle);
+      if (!releaseMatchesEpisode(releaseTitle, programme.season, programme.episode) && !seasonPack) return [];
     } else {
       if (!normalizedTitle.includes(normalizedProgrammeTitle)) return [];
       if (programme.year !== undefined && !new RegExp(`(?:^|\\D)${programme.year}(?:\\D|$)`).test(title)) return [];

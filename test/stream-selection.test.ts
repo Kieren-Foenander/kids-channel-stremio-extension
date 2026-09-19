@@ -317,6 +317,35 @@ describe("TV sourcing resilience", () => {
     expect(calls.queries).toContain("Example Show S01");
   });
 
+  it.each(["Example Show 2024 S01E02", "Example Show 2024 S01 Complete", "Example Show S01E02"])("admits %s when the canonical year is unknown", async (title) => {
+    await env.DB.prepare("UPDATE canonical_shows SET release_info = NULL WHERE imdb_id = 'tt1234567'").run();
+    mockSources({ title });
+    expect(await select()).toMatchObject({ fileId: 2 });
+  });
+
+  it("still rejects unrelated title suffixes when the canonical year is unknown", async () => {
+    await env.DB.prepare("UPDATE canonical_shows SET release_info = NULL WHERE imdb_id = 'tt1234567'").run();
+    const calls = mockSources({ title: "Example Show Extra S01E02" });
+    expect(await select()).toBeNull();
+    expect(calls.created).toHaveLength(0);
+  });
+
+  it.each(["1920x1080", "1280x720"])("inspects season packs containing a %s resolution", async (resolution) => {
+    mockSources({ title: `Example Show S01 Complete ${resolution}` });
+    expect(await select()).toMatchObject({ fileId: 2 });
+  });
+
+  it.each(["[Group] Example Show 2024 S01E02", "[Group][WEB] Example Show S01 Complete"])("accepts leading release tags: %s", async (title) => {
+    mockSources({ title });
+    expect(await select()).toMatchObject({ fileId: 2 });
+  });
+
+  it.each(["Example Show S01 1x03", "Example Show S01 01x003", "[Group] Example Show Extra S01E02", "[Group] Example Show 1999 S01E02"])("preserves identity rejection for %s", async (title) => {
+    const calls = mockSources({ title });
+    expect(await select()).toBeNull();
+    expect(calls.created).toHaveLength(0);
+  });
+
   it.each(["Example Show 1999 S01E02", "Example Show Extra S01E02", "Example Show S02 Complete", "Example Show S01E03"])("rejects conflicting identity: %s", async (title) => {
     const calls = mockSources({ title });
     expect(await select()).toBeNull();

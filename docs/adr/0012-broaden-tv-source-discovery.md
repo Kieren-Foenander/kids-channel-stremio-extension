@@ -2,10 +2,13 @@
 
 TV discovery searches Knaben for both the episode and its season, without requiring
 that release titles include the show's premiere year. Before admitting a candidate,
-its normalized title before the season marker must equal the canonical show title,
-optionally followed by the canonical premiere year. Explicit conflicting years,
+leading bracketed release-group tags are ignored, and the normalized title before the
+season marker must equal the canonical show title, optionally followed by a four-digit
+year. A supplied year must match when the canonical premiere year is known; absent
+canonical metadata imposes no year constraint. Explicit conflicting years,
 similarly named shows, and other individual episodes are rejected. A season pack is
 only a discovery candidate: its actual files must contain the exact requested episode.
+Resolution labels such as `1920x1080` do not count as individual episode markers.
 Zilean's IMDb-based discovery remains in place. Movie queries and their year checks
 remain unchanged.
 
@@ -40,8 +43,10 @@ with TorBox; a concurrent new remote allocation can still race cleanup.
 
 Playback selection diagnostics report failed discovery searches, cache-lookup status,
 cached candidate count, actual cache inspections, and rejection counts without including
-credentials, magnet links, or download URLs. The Parent Page distinguishes waiting for
-files from downloading and describes exact-file rejections.
+credentials, magnet links, or download URLs. The Parent Page message distinguishes waiting for
+files from downloading and describes exact-file rejections. The persisted preparation
+item status and aggregate badge/count retain `downloading` for both states, preserving
+the existing database status constraint and API contract; neither state counts as ready.
 
 This refines ADRs 0007 and 0009's discovery, candidate inspection, and retry decisions.
 ADR 0010's five-programme window, eight-hour run limit, and schedule/progress semantics
