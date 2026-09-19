@@ -4,9 +4,11 @@ import {
   qualityFromRelease,
   rankCandidates,
   releaseMatchesEpisode,
+  preparedStreamSelection,
   selectCachedStream,
   type DiscoveryCandidate,
 } from "../src/stream-selection";
+import { resolveCachedStream, StreamSelectionGoneError, streamSelectionContext } from "../src/stream-resolution";
 import { tvPreparationOutcomeMessage, tvPreparationRetryDelayMinutes } from "../src/tv-preparation";
 
 const selectionEnv = {
@@ -263,5 +265,161 @@ describe("TorBox stream selection", () => {
     expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(Date.now() + 120_000)))
       .toMatchObject({ torrentId: "61", fileId: 2 });
     expect(uncachedCreates).toBe(1);
+  });
+});
+
+// Exercise discovery, TorBox inspection, and persisted state through the public selector.
+describe("TV sourcing resilience", () => {
+  const hash = "d".repeat(40);
+  function mockSources(options: {
+    title?: string;
+    zilean?: Array<Record<string, unknown>>;
+    cachedHashes?: string[];
+    files?: () => Array<{ id: number; name: string; size: number }>;
+    uncached?: boolean;
+    cacheFailure?: boolean;
+  } = {}) {
+    const created: Array<{ hash: string; cachedOnly: boolean }> = [];
+    const deleted: number[] = [];
+    const queries: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") return Response.json(options.zilean ?? []);
+      if (url.hostname === "knaben.test") {
+        queries.push(JSON.parse(String(init?.body)).query);
+        return Response.json({ hits: options.title ? [{ title: options.title, hash, seeders: 100 }] : [] });
+      }
+      if (url.pathname.endsWith("/torrents/checkcached")) {
+        if (options.cacheFailure) return new Response("unavailable", { status: 503 });
+        return torBox((options.cachedHashes ?? [hash]).map((hash) => ({ hash, size: 1000, files: [] })));
+      }
+      if (url.pathname.endsWith("/torrents/createtorrent")) {
+        const cachedOnly = (init?.body as FormData).get("add_only_if_cached") === "true";
+        created.push({ hash: magnetHash(init), cachedOnly });
+        if (cachedOnly && (options.uncached || (options.cachedHashes && !options.cachedHashes.includes(magnetHash(init))))) {
+          return torBox({ success: false, error: "TORRENT_NOT_CACHED" }, false);
+        }
+        return torBox({ torrent_id: 91 });
+      }
+      if (url.pathname.endsWith("/torrents/mylist")) return torBox(torrent(91, hash,
+        options.files?.() ?? [{ id: 2, name: "/Example.Show.S01E02.mkv", size: 1000 }], true));
+      if (url.pathname.endsWith("/torrents/controltorrent")) { deleted.push(91); return torBox(true); }
+      throw new Error(`unexpected request ${url.pathname}`);
+    });
+    return { created, deleted, queries };
+  }
+  const select = (now?: Date) => selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, now);
+
+  it.each(["Example Show S01E02 1080p", "Example Show 2024 S01 Complete 1080p"])("finds %s through Knaben", async (title) => {
+    const calls = mockSources({ title });
+    expect(await select()).toMatchObject({ fileId: 2 });
+    expect(calls.queries).toContain("Example Show S01E02");
+    expect(calls.queries).toContain("Example Show S01");
+  });
+
+  it.each(["Example Show 1999 S01E02", "Example Show Extra S01E02", "Example Show S02 Complete", "Example Show S01E03"])("rejects conflicting identity: %s", async (title) => {
+    const calls = mockSources({ title });
+    expect(await select()).toBeNull();
+    expect(calls.created).toHaveLength(0);
+  });
+
+  it("finds a cached source below the first ten quality-ranked candidates", async () => {
+    const entries = Array.from({ length: 11 }, (_, index) => ({
+      raw_title: `Example.Show.S01E02.${index < 10 ? "1080p" : "720p"}`,
+      info_hash: index.toString(16).padStart(40, "0"), seasons: [1], episodes: [2],
+    }));
+    const cachedHash = String(entries[10].info_hash);
+    const calls = mockSources({ zilean: entries, cachedHashes: [cachedHash] });
+    expect(await select()).toMatchObject({ infoHash: cachedHash });
+    expect(calls.created).toEqual([{ hash: cachedHash, cachedOnly: true }]);
+  });
+
+  it("retains slow metadata, then verifies the exact file before promotion", async () => {
+    let files: Array<{ id: number; name: string; size: number }> = [];
+    const calls = mockSources({ title: "Example Show 2024 S01E02", uncached: true, files: () => files });
+    vi.useFakeTimers();
+    const first = select();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(await first).toBeNull();
+    expect(calls.deleted).toHaveLength(0);
+    expect(await env.DB.prepare("SELECT download_pending FROM stream_selections").first()).toMatchObject({ download_pending: 1 });
+    expect(await preparedStreamSelection(env.DB, "household", "series", "tt1234567:1:2")).toBeNull();
+    expect(await streamSelectionContext(env.DB, "household", { torrentId: "91", fileId: -1 })).toBeNull();
+    await expect(resolveCachedStream(env.DB, "household", { torrentId: "91", fileId: -1 }, "tb-token", selectionEnv))
+      .rejects.toBeInstanceOf(StreamSelectionGoneError);
+    expect(await select(new Date(Date.now() + 5 * 60000))).toBeNull();
+    files = [{ id: 2, name: "/Example.Show.S01E02.mkv", size: 1000 }];
+    expect(await select(new Date(Date.now() + 6 * 60000))).toMatchObject({ fileId: 2 });
+    expect(calls.created.filter((call) => !call.cachedOnly)).toHaveLength(1);
+  });
+
+  it("rejects delayed metadata for the wrong episode without promoting it", async () => {
+    let files: Array<{ id: number; name: string; size: number }> = [];
+    const calls = mockSources({ title: "Example Show S01E02", uncached: true, files: () => files });
+    vi.useFakeTimers();
+    const first = select();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(await first).toBeNull();
+    files = [{ id: 3, name: "/Example.Show.S01E03.mkv", size: 1000 }];
+    expect(await select(new Date(Date.now() + 5 * 60000))).toBeNull();
+    expect(await env.DB.prepare("SELECT reason FROM stream_candidate_failures").first()).toMatchObject({ reason: "file_mismatch" });
+    expect(await preparedStreamSelection(env.DB, "household", "series", "tt1234567:1:2")).toBeNull();
+    expect(calls.deleted).toHaveLength(1);
+  });
+
+  it("bounds metadata waiting and uses a short retry cooldown", async () => {
+    const calls = mockSources({ title: "Example Show S01E02", uncached: true, files: () => [] });
+    vi.useFakeTimers();
+    const first = select();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(await first).toBeNull();
+    const expired = new Date(Date.now() + 15 * 60000);
+    expect(await select(expired)).toBeNull();
+    expect(await env.DB.prepare("SELECT reason, retry_at FROM stream_candidate_failures").first())
+      .toMatchObject({ reason: "metadata_timeout", retry_at: new Date(expired.getTime() + 15 * 60000).toISOString() });
+    expect(calls.deleted).toHaveLength(1);
+    expect(await env.DB.prepare("SELECT * FROM stream_selections").first()).toBeNull();
+  });
+
+  it("falls back to bounded cache inspection when batch availability is unavailable", async () => {
+    mockSources({ title: "Example Show S01E02", cacheFailure: true });
+    const onOutcome = vi.fn();
+    expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(), new Set(), { onOutcome }))
+      .toMatchObject({ fileId: 2 });
+    expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      status: "ready", diagnostics: expect.objectContaining({ cacheLookup: "unavailable", cacheChecks: 1 }),
+    }));
+  });
+
+  it("keeps movie discovery year-specific and never starts an uncached movie", async () => {
+    await env.DB.prepare(`INSERT INTO approved_programmes
+      (id, household_id, imdb_id, content_type, title, release_info, genres_json, approved_at)
+      VALUES ('movie', 'household', 'tt7654321', 'movie', 'Example Movie', '2024', '[]', 'now')`).run();
+    const calls = mockSources({ title: "Example Movie 2024 1080p", uncached: true });
+    expect(await selectCachedStream(env.DB, "household", "movie", "tt7654321", "tb-token", selectionEnv)).toBeNull();
+    expect(calls.queries).toEqual(["Example Movie 2024"]);
+    expect(calls.created).toEqual([{ hash, cachedOnly: true }]);
+  });
+
+  it("does not retry a file mismatch as an uncached download in the same request", async () => {
+    const calls = mockSources({ title: "Example Show 2024 S01E02", files: () => [
+      { id: 3, name: "/Example.Show.S01E03.mkv", size: 1000 },
+    ] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await select()).toBeNull();
+    expect(calls.created.filter((call) => !call.cachedOnly)).toHaveLength(0);
+  });
+
+  it("preserves a season pack used by another episode when inspection rejects a missing file", async () => {
+    const calls = mockSources({ title: "Example Show S01 Complete" });
+    expect(await select()).toMatchObject({ torrentId: "91", fileId: 2 });
+    await env.DB.prepare(`INSERT INTO show_episodes
+      (programme_id, video_id, season, episode, title, released_at)
+      VALUES ('programme', 'tt1234567:1:3', 1, 3, 'Third', '2024-01-02')`).run();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:3", "tb-token", selectionEnv)).toBeNull();
+    expect(calls.deleted).toHaveLength(0);
+    expect(await preparedStreamSelection(env.DB, "household", "series", "tt1234567:1:2"))
+      .toMatchObject({ torrentId: "91", fileId: 2 });
   });
 });

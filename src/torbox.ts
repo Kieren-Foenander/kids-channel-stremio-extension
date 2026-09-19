@@ -121,6 +121,26 @@ export async function createTorBoxTorrent(
   }));
 }
 
+/** Cache availability is advisory; create + mylist still verify the selected file. */
+export async function cachedTorBoxHashes(
+  token: string,
+  env: TorBoxEnv,
+  hashes: string[],
+): Promise<Set<string>> {
+  const requested = new Set(hashes.slice(0, 100).map((hash) => hash.toLowerCase()));
+  if (requested.size === 0) return new Set();
+  const query = new URLSearchParams({ hash: [...requested].join(","), format: "list", list_files: "false" });
+  const data = await torBoxJson(token, env, `/torrents/checkcached?${query}`);
+  if (!Array.isArray(data)) throw new TorBoxRequestError(502, "INVALID_RESPONSE", "Invalid cache availability response");
+  const cached = new Set<string>();
+  for (const entry of data) {
+    const hash = record(entry)?.hash;
+    if (typeof hash !== "string") throw new TorBoxRequestError(502, "INVALID_RESPONSE", "Invalid cached torrent hash");
+    if (requested.has(hash.toLowerCase())) cached.add(hash.toLowerCase());
+  }
+  return cached;
+}
+
 function torrentFile(value: unknown): TorBoxFile | null {
   const file = record(value);
   const id = file?.id;

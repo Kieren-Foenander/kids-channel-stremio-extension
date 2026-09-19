@@ -91,9 +91,15 @@ export function tvPreparationOutcomeMessage(outcome?: StreamSelectionOutcome): s
   if (!outcome) return "Looking for a usable source";
   if (outcome.status === "no_candidates") return "No matching torrent sources found; searching again next round";
   if (outcome.status === "candidates_exhausted") return "Known sources are temporarily exhausted; searching again next round";
-  if (outcome.status === "candidate_rejected") return "Source rejected; the next round will try another source";
+  if (outcome.status === "candidate_rejected") {
+    const reason = outcome.reason === "file_mismatch" ? "Source did not contain the exact episode"
+      : outcome.reason === "metadata_timeout" ? "Source took too long to provide episode files"
+      : "Source rejected";
+    return `${reason}; the next round will try another source`;
+  }
   if (outcome.status === "temporarily_unavailable") return "TorBox could not inspect this source; it will be retried";
   if (outcome.status === "downloading") return "TorBox is downloading this source";
+  if (outcome.status === "waiting_metadata") return "TorBox is finding the episode files; checking again shortly";
   return "Cached by TorBox";
 }
 
@@ -415,7 +421,7 @@ export function tvPreparationRetryDelayMinutes(
   outcome: StreamSelectionOutcome | undefined,
   attempt: number,
 ): number {
-  if (outcome?.status === "downloading") return 5;
+  if (outcome?.status === "downloading" || outcome?.status === "waiting_metadata") return 5;
   if (attempt <= 3) return 5;
   if (attempt <= 7) return 15;
   return 30;
