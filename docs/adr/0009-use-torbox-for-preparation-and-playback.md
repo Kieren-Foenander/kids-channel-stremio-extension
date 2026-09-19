@@ -8,6 +8,8 @@ Playback verifies that the stored TorBox torrent and file are still ready, reque
 
 TorBox permits simultaneous use from multiple IP addresses and devices, so Preparation Runs may continue while the Household watches the Channel. TorBox plan limits, active download slots, and fair-use controls still apply. The Parent Page no longer presents the Real-Debrid idle-account warning or the experimental provider probe.
 
+ADR 0012 refines discovery, batch cache checks, metadata waiting, and shared season-pack cleanup while preserving exact episode verification.
+
 ADR 0010 replaces manual Preparation Run controls with automatic rolling warm-up while retaining the TorBox selection and playback decisions in this ADR.
 
 Consequences:

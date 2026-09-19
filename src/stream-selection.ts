@@ -1,6 +1,7 @@
+import { deleteUnreferencedStreamTorrent } from "./stream-cleanup";
 import {
+  cachedTorBoxHashes,
   createTorBoxTorrent,
-  deleteTorBoxTorrent,
   getTorBoxTorrent,
   TorBoxRequestError,
   torBoxTorrentIsTerminal,
@@ -18,6 +19,9 @@ const MAX_CACHE_CHECKS = 10;
 const SELECTION_TTL_MS = 24 * 60 * 60 * 1000;
 const DOWNLOAD_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 const CANDIDATE_RETRY_DELAY_MS = 24 * 60 * 60 * 1000;
+const METADATA_TIMEOUT_MS = 15 * 60 * 1000;
+// Only valid with download_pending = 1. Never a playable TorBox file identifier.
+const UNMATCHED_FILE_ID = -1;
 
 export type StreamContentType = "series" | "movie";
 
@@ -33,13 +37,23 @@ export interface StreamSelectionOptions {
   programme?: StreamSelectionProgramme;
 }
 
-export type StreamSelectionOutcome =
+export interface StreamDiscoveryDiagnostics {
+  failedSearches: string[];
+  cacheLookup: "available" | "unavailable";
+  cachedCandidates: number;
+  cacheChecks: number;
+  rejections: Record<string, number>;
+}
+
+export type StreamSelectionOutcome = (
   | { status: "ready"; candidateCount: number }
   | { status: "downloading"; candidateCount: number }
+  | { status: "waiting_metadata"; candidateCount: number }
   | { status: "no_candidates"; candidateCount: 0 }
   | { status: "candidates_exhausted"; candidateCount: number }
   | { status: "candidate_rejected"; candidateCount: number; reason: string }
-  | { status: "temporarily_unavailable"; candidateCount: number };
+  | { status: "temporarily_unavailable"; candidateCount: number }
+) & { diagnostics?: StreamDiscoveryDiagnostics };
 
 export interface StreamSelection {
   householdId: string;
@@ -115,6 +129,11 @@ interface StoredSelectionState {
   downloadPending: boolean;
 }
 
+function pendingOutcome(state: StoredSelectionState): "ready" | "downloading" | "waiting_metadata" {
+  return !state.downloadPending ? "ready"
+    : state.selection.fileId === UNMATCHED_FILE_ID ? "waiting_metadata" : "downloading";
+}
+
 function storedSelection(row: StoredSelection): StreamSelection {
   return {
     householdId: row.household_id,
@@ -144,7 +163,7 @@ export async function preparedStreamSelection(
 ): Promise<StreamSelection | null> {
   const row = await db.prepare(`SELECT * FROM stream_selections
     WHERE household_id = ? AND content_type = ? AND video_id = ?
-      AND download_pending = 0 AND stale_at > ?`)
+      AND download_pending = 0 AND file_id >= 0 AND stale_at > ?`)
     .bind(householdId, contentType, videoId, now.toISOString())
     .first<StoredSelection>();
   return row ? storedSelection(row) : null;
@@ -303,13 +322,25 @@ function knabenCandidates(value: unknown, programme: StreamSelectionProgramme): 
     if (!hash || !title) return [];
     const normalizedTitle = title.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
     const normalizedProgrammeTitle = programme.title.toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
-    if (!normalizedTitle.includes(normalizedProgrammeTitle)) return [];
-    if (programme.year !== undefined && !new RegExp(`(?:^|\\D)${programme.year}(?:\\D|$)`).test(title)) return [];
-    if (
-      programme.season !== undefined
-      && programme.episode !== undefined
-      && !releaseMatchesEpisode(title, programme.season, programme.episode)
-    ) return [];
+    if (programme.season !== undefined && programme.episode !== undefined) {
+      // No-year releases are common. Accept an exact show title before the season
+      // marker, but reject explicit conflicting years and similarly named shows.
+      const releaseTitle = title.replace(/^(?:\[[^\]\r\n]+\][ ._-]*)+/, "");
+      const marker = /(?:^|[^a-z0-9])(?:s\d+|\d{1,2}x\d{1,3}(?=[^a-z0-9]|$)|season[ ._-]*\d+)/i.exec(releaseTitle);
+      if (!marker) return [];
+      const prefix = releaseTitle.slice(0, marker.index).toLowerCase().replaceAll(/[^a-z0-9]+/g, " ").trim();
+      const suffix = prefix.startsWith(normalizedProgrammeTitle) ? prefix.slice(normalizedProgrammeTitle.length).trim() : null;
+      if (suffix === null || (suffix !== "" && (
+        !/^(19|20)\d{2}$/.test(suffix)
+        || (programme.year !== undefined && suffix !== String(programme.year))
+      ))) return [];
+      const seasonPack = new RegExp(`(?:^|[^a-z0-9])(?:s0*${programme.season}|season[ ._-]*0*${programme.season})(?:[^a-z0-9]|$)`, "i").test(releaseTitle)
+        && !/(?:^|[^a-z0-9])(?:s\d+[ ._-]*e\d+|\d{1,2}x\d{1,3})(?:[^a-z0-9]|$)|\bepisodes?\b/i.test(releaseTitle);
+      if (!releaseMatchesEpisode(releaseTitle, programme.season, programme.episode) && !seasonPack) return [];
+    } else {
+      if (!normalizedTitle.includes(normalizedProgrammeTitle)) return [];
+      if (programme.year !== undefined && !new RegExp(`(?:^|\\D)${programme.year}(?:\\D|$)`).test(title)) return [];
+    }
     return [{
       infoHash: hash,
       magnet: suppliedMagnet ?? magnetFor(hash, title),
@@ -365,6 +396,7 @@ async function providerJson(url: string, init?: RequestInit): Promise<unknown> {
 async function discover(programme: StreamSelectionProgramme, env: StreamSelectionEnv): Promise<{
   candidates: DiscoveryCandidate[];
   providerAvailable: boolean;
+  failedSearches: string[];
 }> {
   const zileanUrl = new URL("/dmm/filtered", env.ZILEAN_ORIGIN || ZILEAN_ORIGIN);
   zileanUrl.searchParams.set("ImdbId", programme.imdbId);
@@ -376,30 +408,35 @@ async function discover(programme: StreamSelectionProgramme, env: StreamSelectio
     : "";
   const yearQuery = programme.year ? ` ${programme.year}` : "";
   const knabenUrl = new URL("/v1", env.KNABEN_ORIGIN || KNABEN_ORIGIN);
+  const queries = programme.season !== undefined
+    ? [`${programme.title}${episodeQuery}`, `${programme.title} S${String(programme.season).padStart(2, "0")}`]
+    : [`${programme.title}${yearQuery}`];
   const results = await Promise.allSettled([
     providerJson(zileanUrl.toString()),
-    providerJson(knabenUrl.toString(), {
+    ...queries.map((query) => providerJson(knabenUrl.toString(), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         search_type: "100%",
         search_field: "title",
-        query: `${programme.title}${yearQuery}${episodeQuery}`,
+        query,
         order_by: "seeders",
         order_direction: "desc",
         size: 50,
         hide_unsafe: true,
         hide_xxx: true,
       }),
-    }),
+    })),
   ]);
   const candidates = [
     ...(results[0].status === "fulfilled" ? zileanCandidates(results[0].value, programme) : []),
-    ...(results[1].status === "fulfilled" ? knabenCandidates(results[1].value, programme) : []),
+    ...results.slice(1).flatMap((result) => result.status === "fulfilled" ? knabenCandidates(result.value, programme) : []),
   ];
   return {
     candidates: rankCandidates(candidates),
     providerAvailable: results.some((result) => result.status === "fulfilled"),
+    failedSearches: results.flatMap((result, index) => result.status === "rejected"
+      ? [index === 0 ? "zilean" : index === 1 ? "knaben_episode" : "knaben_season"] : []),
   };
 }
 
@@ -456,10 +493,11 @@ async function cachedCandidate(
   token: string,
   env: StreamSelectionEnv,
   cachedOnly: boolean,
+  cleanup: (torrentId: string) => Promise<void>,
   cacheCheckTimeoutMs = CACHE_CHECK_TIMEOUT_MS,
 ): Promise<{
   torrentId: string;
-  file: TorrentFile;
+  file: TorrentFile | null;
   downloadPending: boolean;
   progress: number;
 } | { rejectedReason: string } | null> {
@@ -489,6 +527,9 @@ async function cachedCandidate(
     );
     return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
+    if (!cachedOnly && programme.season !== undefined && error instanceof TorrentDownloadPendingError && addedId && stage === "load-files") {
+      return { torrentId: addedId, file: null, downloadPending: true, progress: error.info?.progress ?? 0 };
+    }
     if (error instanceof TorrentDownloadPendingError && addedId && matchedFile && stage === "confirm-download") {
       return {
         torrentId: addedId,
@@ -521,7 +562,7 @@ async function cachedCandidate(
       reason: error instanceof Error ? error.message : "unknown error",
     }));
     if (addedId) {
-      try { await deleteTorBoxTorrent(token, env, addedId); } catch { /* best-effort cleanup */ }
+      try { await cleanup(addedId); } catch { /* best-effort cleanup */ }
     }
     return rejectedReason ? { rejectedReason } : null;
   }
@@ -552,7 +593,7 @@ async function quarantineInfoHash(
       hash,
       reason,
       now.toISOString(),
-      new Date(now.getTime() + CANDIDATE_RETRY_DELAY_MS).toISOString(),
+      new Date(now.getTime() + (reason === "metadata_timeout" ? METADATA_TIMEOUT_MS : CANDIDATE_RETRY_DELAY_MS)).toISOString(),
     )
     .run();
 }
@@ -597,6 +638,7 @@ async function cachedSelection(
   torBoxToken: string,
   env: StreamSelectionEnv,
   now: Date,
+  programmeHint?: StreamSelectionProgramme,
 ): Promise<StoredSelectionState | null> {
   const row = await db.prepare(`SELECT * FROM stream_selections
     WHERE household_id = ? AND content_type = ? AND video_id = ?`)
@@ -605,7 +647,7 @@ async function cachedSelection(
   if (!row) return null;
   if (Date.parse(row.stale_at) > now.getTime()) {
     const selection = storedSelection(row);
-    if (row.download_pending !== 1) return { selection, downloadPending: false };
+    if (row.download_pending !== 1 && row.file_id >= 0) return { selection, downloadPending: false };
     let info: TorrentInfo;
     try {
       info = await getTorBoxTorrent(torBoxToken, env, row.torrent_id, true);
@@ -616,13 +658,40 @@ async function cachedSelection(
       }));
       return { selection, downloadPending: true };
     }
-    if (info.ready) {
+    let rejection: string | null = null;
+    if (row.file_id === UNMATCHED_FILE_ID) {
+      if (torBoxTorrentIsTerminal(info)) {
+        rejection = info.status;
+      } else if (info.files.length > 0) {
+        const programme = programmeHint ?? await canonicalProgramme(db, householdId, contentType, videoId);
+        let file: TorrentFile | null = null;
+        try { if (programme) file = selectedFile(info.files, programme); } catch { /* definitive file mismatch */ }
+        if (!file) {
+          rejection = "file_mismatch";
+        } else {
+          // Even a ready torrent must pass matching before the placeholder is replaced.
+          selection.fileId = file.id;
+          selection.filename = file.path.replace(/^.*\//, "");
+          row.last_progress_at = now.toISOString();
+          await db.prepare(`UPDATE stream_selections SET file_id = ?, filename = ?, last_progress_at = ?
+            WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ? AND download_pending = 1`)
+            .bind(file.id, selection.filename, row.last_progress_at, householdId, contentType, videoId, row.torrent_id).run();
+        }
+      } else if (now.getTime() - Date.parse(row.selected_at) < METADATA_TIMEOUT_MS) {
+        return { selection, downloadPending: true };
+      } else {
+        rejection = "metadata_timeout";
+      }
+    }
+    if (!rejection && info.ready && selection.fileId >= 0) {
       await db.prepare(`UPDATE stream_selections SET download_pending = 0
         WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
         .bind(householdId, contentType, videoId, row.torrent_id).run();
       return { selection, downloadPending: false };
     }
-    if (!torBoxTorrentIsTerminal(info)) {
+    if (rejection) {
+      await quarantineCandidate(db, row, rejection, now);
+    } else if (!torBoxTorrentIsTerminal(info)) {
       const lastHealthyAt = Date.parse(row.last_progress_at ?? row.selected_at);
       if (info.progress > row.last_progress || info.speed > 0) {
         await db.prepare(`UPDATE stream_selections
@@ -649,7 +718,7 @@ async function cachedSelection(
     await db.prepare(`DELETE FROM stream_selections
       WHERE household_id = ? AND content_type = ? AND video_id = ? AND torrent_id = ?`)
       .bind(householdId, contentType, videoId, row.torrent_id).run();
-    try { await deleteTorBoxTorrent(torBoxToken, env, row.torrent_id); } catch { /* allow a new candidate */ }
+    try { await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, row.torrent_id); } catch { /* allow a new candidate */ }
     return null;
   }
   if (row.download_pending === 1) await quarantineCandidate(db, row, "expired", now);
@@ -658,7 +727,7 @@ async function cachedSelection(
     .bind(householdId, contentType, videoId)
     .run();
   try {
-    await deleteTorBoxTorrent(torBoxToken, env, row.torrent_id);
+    await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, row.torrent_id);
   } catch { /* stale local state must not block reselection */ }
   return null;
 }
@@ -706,7 +775,7 @@ function selectionFromCandidate(
   videoId: string,
   programme: StreamSelectionProgramme,
   candidate: DiscoveryCandidate,
-  torrent: { torrentId: string; file: TorrentFile },
+  torrent: { torrentId: string; file: TorrentFile | null },
   now: Date,
 ): StreamSelection {
   return {
@@ -716,8 +785,8 @@ function selectionFromCandidate(
     videoId,
     torrentId: torrent.torrentId,
     infoHash: candidate.infoHash,
-    fileId: torrent.file.id,
-    filename: torrent.file.path.replace(/^.*\//, ""),
+    fileId: torrent.file?.id ?? UNMATCHED_FILE_ID,
+    filename: torrent.file?.path.replace(/^.*\//, "") ?? "",
     quality: candidate.quality,
     seeders: candidate.seeders,
     selectedAt: now.toISOString(),
@@ -736,7 +805,10 @@ export async function selectCachedStream(
   excludedInfoHashes: ReadonlySet<string> = new Set(),
   options: StreamSelectionOptions = {},
 ): Promise<StreamSelection | null> {
-  const report = options.onOutcome ?? (() => undefined);
+  let diagnostics: StreamDiscoveryDiagnostics | undefined;
+  const report = (outcome: StreamSelectionOutcome) => options.onOutcome?.(
+    diagnostics ? { ...outcome, diagnostics } : outcome,
+  );
   const existing = await cachedSelection(
     db,
     householdId,
@@ -745,9 +817,10 @@ export async function selectCachedStream(
     torBoxToken,
     env,
     now,
+    options.programme,
   );
   if (existing && !excludedInfoHashes.has(existing.selection.infoHash)) {
-    report({ status: existing.downloadPending ? "downloading" : "ready", candidateCount: 1 });
+    report({ status: pendingOutcome(existing), candidateCount: 1 });
     return existing.downloadPending ? null : existing.selection;
   }
   if (existing) {
@@ -756,7 +829,7 @@ export async function selectCachedStream(
       .bind(householdId, contentType, videoId)
       .run();
     try {
-      await deleteTorBoxTorrent(torBoxToken, env, existing.selection.torrentId);
+      await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, existing.selection.torrentId);
     } catch { /* an excluded remote torrent must not block reselection */ }
   }
   const programme = options.programme ?? await canonicalProgramme(db, householdId, contentType, videoId);
@@ -767,6 +840,7 @@ export async function selectCachedStream(
 
   const quarantinedHashes = await quarantinedInfoHashes(db, householdId, contentType, videoId, now);
   const discovery = await discover(programme, env);
+  diagnostics = { failedSearches: discovery.failedSearches, cacheLookup: "unavailable", cachedCandidates: 0, cacheChecks: 0, rejections: {} };
   const candidates = discovery.candidates;
   const eligibleCandidates = candidates.filter((candidate) =>
     !excludedInfoHashes.has(candidate.infoHash) && !quarantinedHashes.has(candidate.infoHash));
@@ -774,15 +848,32 @@ export async function selectCachedStream(
   let temporarilyUnavailable = false;
   const maxCacheChecks = Math.max(1, Math.min(MAX_CACHE_CHECKS, options.maxCacheChecks ?? MAX_CACHE_CHECKS));
   const cacheCheckTimeoutMs = Math.max(POLL_INTERVAL_MS, options.cacheCheckTimeoutMs ?? CACHE_CHECK_TIMEOUT_MS);
-  for (const candidate of eligibleCandidates.slice(0, maxCacheChecks)) {
-    const cached = await cachedCandidate(candidate, programme, torBoxToken, env, true, cacheCheckTimeoutMs);
+  // Broaden cache discovery without creating more torrents. On lookup failure,
+  // preserve the existing bounded inspection path (including stale cache misses).
+  let cacheCandidates = eligibleCandidates;
+  try {
+    const cachedHashes = await cachedTorBoxHashes(torBoxToken, env, eligibleCandidates.slice(0, 100).map((candidate) => candidate.infoHash));
+    diagnostics.cacheLookup = "available";
+    diagnostics.cachedCandidates = cachedHashes.size;
+    cacheCandidates = [
+      ...eligibleCandidates.filter((candidate) => cachedHashes.has(candidate.infoHash)),
+      ...eligibleCandidates.filter((candidate) => !cachedHashes.has(candidate.infoHash)),
+    ];
+  } catch { /* Cache lookup is an optimization, never a playback dependency. */ }
+  const cleanup = (torrentId: string) => deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, torrentId);
+  const rejectedHashes = new Set<string>();
+  for (const candidate of cacheCandidates.slice(0, maxCacheChecks)) {
+    diagnostics.cacheChecks += 1;
+    const cached = await cachedCandidate(candidate, programme, torBoxToken, env, true, cleanup, cacheCheckTimeoutMs);
     if (!cached) {
       temporarilyUnavailable = true;
       continue;
     }
     if ("rejectedReason" in cached) {
+      diagnostics.rejections[cached.rejectedReason] = (diagnostics.rejections[cached.rejectedReason] ?? 0) + 1;
       if (cached.rejectedReason === "not_cached") continue;
       lastRejectedReason = cached.rejectedReason;
+      rejectedHashes.add(candidate.infoHash);
       await quarantineInfoHash(
         db,
         householdId,
@@ -800,24 +891,26 @@ export async function selectCachedStream(
       const stored = await storeSelection(db, selection, cached.downloadPending, cached.progress);
       if (stored.selection.torrentId !== selection.torrentId) {
         try {
-          await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
+          await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, selection.torrentId);
         } catch { /* the concurrent winner remains valid */ }
       }
-      report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
+      report({ status: pendingOutcome(stored), candidateCount: candidates.length });
       return stored.downloadPending ? null : stored.selection;
     } catch (error) {
       try {
-        await deleteTorBoxTorrent(torBoxToken, env, cached.torrentId);
+        await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, cached.torrentId);
       } catch { /* preserve the storage error */ }
       throw error;
     }
   }
-  if (contentType === "series" && eligibleCandidates.length > 0) {
-    const candidate = eligibleCandidates[0];
-    const pending = await cachedCandidate(candidate, programme, torBoxToken, env, false, cacheCheckTimeoutMs);
+  const downloadCandidate = eligibleCandidates.find((candidate) => !rejectedHashes.has(candidate.infoHash));
+  if (contentType === "series" && downloadCandidate) {
+    const candidate = downloadCandidate;
+    const pending = await cachedCandidate(candidate, programme, torBoxToken, env, false, cleanup, cacheCheckTimeoutMs);
     if (!pending) {
       temporarilyUnavailable = true;
     } else if ("rejectedReason" in pending) {
+      diagnostics.rejections[pending.rejectedReason] = (diagnostics.rejections[pending.rejectedReason] ?? 0) + 1;
       lastRejectedReason = pending.rejectedReason;
       await quarantineInfoHash(
         db,
@@ -843,14 +936,14 @@ export async function selectCachedStream(
         const stored = await storeSelection(db, selection, pending.downloadPending, pending.progress);
         if (stored.selection.torrentId !== selection.torrentId) {
           try {
-            await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
+            await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, selection.torrentId);
           } catch { /* the concurrent winner remains valid */ }
         }
-        report({ status: stored.downloadPending ? "downloading" : "ready", candidateCount: candidates.length });
+        report({ status: pendingOutcome(stored), candidateCount: candidates.length });
         return stored.downloadPending ? null : stored.selection;
       } catch (error) {
         try {
-          await deleteTorBoxTorrent(torBoxToken, env, selection.torrentId);
+          await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, selection.torrentId);
         } catch { /* preserve the storage error */ }
         throw error;
       }

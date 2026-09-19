@@ -54,3 +54,24 @@ pnpm exec wrangler d1 execute kids-channels --remote \
 
 Do not diagnose an account-wide Free-plan overage solely from database size or
 Household count. Billing is based on rows scanned and written by queries.
+
+## TV source discovery
+
+`selectionOutcome.status = waiting_metadata` means TorBox has accepted an uncached TV
+source but has not supplied episode files yet. The selection is not playable. Subsequent
+checks allow fifteen minutes before treating missing metadata as a timeout; this timeout
+has a fifteen-minute retry cooldown rather than the twenty-four-hour definitive-failure
+cooldown. Transient TorBox status failures preserve pending state.
+
+When discovery ran, `selectionOutcome.diagnostics` includes:
+
+- `failedSearches`: discovery requests that failed (a partial outage can coexist with results).
+- `cacheLookup`: whether the advisory batch cache lookup succeeded.
+- `cachedCandidates`: eligible hashes reported cached, among at most 100 checked.
+- `cacheChecks`: cached-only candidate inspections actually attempted (at most ten).
+- `rejections`: counts by reason, including `not_cached`, `file_mismatch`, and `metadata_timeout`.
+
+Compare these alongside `candidateCount` and the final outcome to distinguish search
+coverage from cache misses or failed inspection. Reused selections do not run discovery
+and therefore omit this diagnostics object. The Worker still cannot observe whether
+Stremio ultimately plays bytes after a successful CDN redirect.

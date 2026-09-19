@@ -1,5 +1,5 @@
+import { deleteUnreferencedStreamTorrent } from "./stream-cleanup";
 import {
-  deleteTorBoxTorrent,
   getTorBoxTorrent,
   requestTorBoxDownload,
   TorBoxRequestError,
@@ -44,7 +44,7 @@ export async function streamSelectionContext(
   now = Date.now(),
 ): Promise<StreamSelectionContext | null> {
   const row = await db.prepare(`SELECT content_type, video_id, info_hash, stale_at FROM stream_selections
-    WHERE household_id = ? AND torrent_id = ? AND file_id = ?`)
+    WHERE household_id = ? AND torrent_id = ? AND file_id = ? AND download_pending = 0 AND file_id >= 0`)
     .bind(householdId, identity.torrentId, identity.fileId)
     .first<StoredSelection>();
   if (!row || Date.parse(row.stale_at) <= now) return null;
@@ -62,7 +62,7 @@ async function selectionIsCurrent(
   now: number,
 ): Promise<boolean> {
   const row = await db.prepare(`SELECT stale_at FROM stream_selections
-    WHERE household_id = ? AND torrent_id = ? AND file_id = ?`)
+    WHERE household_id = ? AND torrent_id = ? AND file_id = ? AND download_pending = 0 AND file_id >= 0`)
     .bind(householdId, identity.torrentId, identity.fileId)
     .first<StoredSelection>();
   return Boolean(row && Date.parse(row.stale_at) > now);
@@ -88,7 +88,7 @@ export async function discardStreamSelection(
 ): Promise<void> {
   await invalidateStreamSelection(db, householdId, identity);
   try {
-    await deleteTorBoxTorrent(torBoxToken, env, identity.torrentId);
+    await deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, identity.torrentId);
   } catch { /* a dead remote torrent must not block local failover */ }
 }
 
