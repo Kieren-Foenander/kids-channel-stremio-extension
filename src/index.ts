@@ -97,6 +97,7 @@ export interface Env {
   ZILEAN_ORIGIN?: string;
   KNABEN_ORIGIN?: string;
   AUTOMATIC_TV_PREPARATION_DISABLED?: string;
+  PLAYBACK_SELECTION_BUDGET_MS?: string;
   TV_PREPARATION: Workflow<TvPreparationWorkflowParams>;
 }
 
@@ -110,6 +111,41 @@ const jsonHeaders = {
 };
 
 const MAX_RESOLUTION_ATTEMPTS = 3;
+// Stremio players give up on (or silently keep waiting for) a playback URL that takes
+// too long to answer. A TV programme has a graceful fallback, so it gets a short budget
+// and leaves slow sourcing to Preparation Runs. A movie has no fallback, so it may wait
+// longer, but never for the minutes that full candidate inspection can take.
+const TV_PLAYBACK_SELECTION_BUDGET_MS = 6_000;
+const MOVIE_PLAYBACK_SELECTION_BUDGET_MS = 20_000;
+// Covers an in-flight provider request that started just before the budget ran out.
+const PLAYBACK_RESPONSE_GRACE_MS = 3_000;
+const PLAYBACK_TIME_LIMIT_REACHED = Symbol("playback time limit reached");
+
+function playbackSelectionBudgetMs(env: Env, contentType: StreamContentType): number {
+  const configured = Number(env.PLAYBACK_SELECTION_BUDGET_MS);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return contentType === "series" ? TV_PLAYBACK_SELECTION_BUDGET_MS : MOVIE_PLAYBACK_SELECTION_BUDGET_MS;
+}
+
+/** Answer Stremio within the limit. Unfinished work continues after the response so a
+ * selection that completes late is still stored for the next attempt. */
+async function withinPlaybackTimeLimit<T>(
+  ctx: ExecutionContext,
+  work: Promise<T>,
+  limitMs: number,
+): Promise<T | typeof PLAYBACK_TIME_LIMIT_REACHED> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<typeof PLAYBACK_TIME_LIMIT_REACHED>((resolve) => {
+    timer = setTimeout(() => resolve(PLAYBACK_TIME_LIMIT_REACHED), limitMs);
+  });
+  try {
+    const result = await Promise.race([work, limit]);
+    if (result === PLAYBACK_TIME_LIMIT_REACHED) ctx.waitUntil(work.then(() => undefined, () => undefined));
+    return result;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   return new Response(JSON.stringify(value), {
@@ -247,44 +283,64 @@ async function playChannelProgramme(
       return playbackResponse("TorBox is not configured for this Household.", 503);
     }
     let selectionOutcome: StreamSelectionOutcome | null = null;
-    const selection = await selectCachedStream(
-      env.DB,
-      household.id,
-      contentType,
-      videoId,
-      torBoxToken,
-      env,
-      new Date(),
-      new Set(),
-      { onOutcome: (outcome) => { selectionOutcome = outcome; } },
-    );
-    if (!selection) {
-      logPlayback("warn", "selection_unavailable", {
+    const budgetMs = playbackSelectionBudgetMs(env, contentType);
+    const deadline = Date.now() + budgetMs;
+    let abandoned = false;
+    const handoff = (async () => {
+      const selection = await selectCachedStream(
+        env.DB,
+        household.id,
+        contentType,
+        videoId,
+        torBoxToken,
+        env,
+        new Date(),
+        new Set(),
+        { onOutcome: (outcome) => { selectionOutcome = outcome; }, deadline },
+      );
+      // A late selection is stored for the next attempt; a download URL would be wasted.
+      if (!selection || abandoned) return null;
+      const directLink = await resolveStreamWithFailover(
+        env,
+        household.id,
+        { torrentId: selection.torrentId, fileId: selection.fileId },
+        {
+          contentType: selection.contentType,
+          videoId: selection.videoId,
+          infoHash: selection.infoHash,
+        },
+        torBoxToken,
+        request.headers.get("cf-connecting-ip") ?? undefined,
+        deadline,
+      );
+      return { selection, directLink };
+    })();
+    const result = await withinPlaybackTimeLimit(ctx, handoff, budgetMs + PLAYBACK_RESPONSE_GRACE_MS);
+    if (result === PLAYBACK_TIME_LIMIT_REACHED) abandoned = true;
+    if (result === PLAYBACK_TIME_LIMIT_REACHED || !result) {
+      // Any null result after the deadline may be incomplete (an interrupted search or an
+      // unconfirmed cached file), so a movie is asked to retry rather than told it is missing.
+      const timedOut = result === PLAYBACK_TIME_LIMIT_REACHED || Date.now() >= deadline;
+      logPlayback("warn", timedOut ? "selection_timed_out" : "selection_unavailable", {
         handoffId,
         householdId: household.id,
         channelId: channel.id,
         contentType,
         videoId,
         selectionOutcome,
+        budgetMs,
       });
-      if (contentType !== "series") return playbackResponse("Movie stream is unavailable.", 404);
+      if (contentType !== "series") {
+        return timedOut
+          ? playbackResponse("Movie stream is still being prepared. Try again shortly.", 503)
+          : playbackResponse("Movie stream is unavailable.", 404);
+      }
       await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       queueAutomaticTvPreparation(env, ctx, household.id);
       await deferUnavailableTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
       return programmeUnavailable(request);
     }
-    const directLink = await resolveStreamWithFailover(
-      env,
-      household.id,
-      { torrentId: selection.torrentId, fileId: selection.fileId },
-      {
-        contentType: selection.contentType,
-        videoId: selection.videoId,
-        infoHash: selection.infoHash,
-      },
-      torBoxToken,
-      request.headers.get("cf-connecting-ip") ?? undefined,
-    );
+    const { selection, directLink } = result;
     if (contentType === "series") {
       await clearUnavailableTvProgramme(env.DB, household.id, videoId);
       await requestTvProgramme(env.DB, household.id, channel.id, videoId, env.TV_SCHEDULE_SEED);
@@ -327,6 +383,7 @@ async function resolveStreamWithFailover(
   initialContext: StreamSelectionContext | null,
   torBoxToken: string,
   userIp?: string,
+  deadline?: number,
 ): Promise<string> {
   let currentIdentity = initialIdentity;
   let context = initialContext;
@@ -345,7 +402,8 @@ async function resolveStreamWithFailover(
     } catch (error) {
       if (error instanceof TorBoxResolutionError
         && (error.status === null || error.status >= 500)
-        && attempt < MAX_RESOLUTION_ATTEMPTS - 1) {
+        && attempt < MAX_RESOLUTION_ATTEMPTS - 1
+        && !(deadline !== undefined && Date.now() >= deadline)) {
         console.warn(JSON.stringify({
           message: "stream resolution retry",
           householdId,
@@ -367,6 +425,7 @@ async function resolveStreamWithFailover(
         env,
         new Date(),
         excludedInfoHashes,
+        { deadline },
       );
       if (!alternative) throw error;
       currentIdentity = { torrentId: alternative.torrentId, fileId: alternative.fileId };
@@ -1265,14 +1324,30 @@ export default {
           return addonJson({ error: "TorBox is not configured for this Household." }, 503, { "cache-control": "no-store" });
         }
         const context = await streamSelectionContext(env.DB, household.id, identity);
-        const directLink = await resolveStreamWithFailover(
+        const budgetMs = playbackSelectionBudgetMs(env, context?.contentType ?? "series");
+        const directLink = await withinPlaybackTimeLimit(ctx, resolveStreamWithFailover(
           env,
           household.id,
           identity,
           context,
           torBoxToken,
           request.headers.get("cf-connecting-ip") ?? undefined,
-        );
+          Date.now() + budgetMs,
+        ), budgetMs + PLAYBACK_RESPONSE_GRACE_MS);
+        if (directLink === PLAYBACK_TIME_LIMIT_REACHED) {
+          logPlayback("warn", "resolve_timed_out", {
+            handoffId,
+            householdId: household.id,
+            contentType: context?.contentType,
+            videoId: context?.videoId,
+            budgetMs,
+          });
+          return addonJson(
+            { error: "TorBox is responding slowly. Try again." },
+            503,
+            { "cache-control": "no-store", "retry-after": "5" },
+          );
+        }
         logPlayback("log", "cdn_handoff", {
           handoffId,
           householdId: household.id,

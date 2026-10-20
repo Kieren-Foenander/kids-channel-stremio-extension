@@ -59,13 +59,14 @@ async function torBoxJson(
   env: TorBoxEnv,
   path: string,
   init?: RequestInit,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ): Promise<unknown> {
   const headers = new Headers(init?.headers);
   headers.set("authorization", `Bearer ${token}`);
   const response = await fetch(`${origin(env)}${path}`, {
     ...init,
     headers,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, timeoutMs))),
   });
   let body: unknown = null;
   try { body = await response.json(); } catch { /* an empty error response is handled below */ }
@@ -126,11 +127,12 @@ export async function cachedTorBoxHashes(
   token: string,
   env: TorBoxEnv,
   hashes: string[],
+  timeoutMs?: number,
 ): Promise<Set<string>> {
   const requested = new Set(hashes.slice(0, 100).map((hash) => hash.toLowerCase()));
   if (requested.size === 0) return new Set();
   const query = new URLSearchParams({ hash: [...requested].join(","), format: "list", list_files: "false" });
-  const data = await torBoxJson(token, env, `/torrents/checkcached?${query}`);
+  const data = await torBoxJson(token, env, `/torrents/checkcached?${query}`, undefined, timeoutMs);
   if (!Array.isArray(data)) throw new TorBoxRequestError(502, "INVALID_RESPONSE", "Invalid cache availability response");
   const cached = new Set<string>();
   for (const entry of data) {
@@ -167,10 +169,11 @@ export async function getTorBoxTorrent(
   env: TorBoxEnv,
   torrentId: string,
   fresh = false,
+  timeoutMs?: number,
 ): Promise<TorBoxTorrent> {
   const query = new URLSearchParams({ id: torrentId });
   if (fresh) query.set("bypass_cache", "true");
-  const data = torrentData(await torBoxJson(token, env, `/torrents/mylist?${query}`));
+  const data = torrentData(await torBoxJson(token, env, `/torrents/mylist?${query}`, undefined, timeoutMs));
   const id = data.id;
   if (!((typeof id === "number" && Number.isInteger(id)) || (typeof id === "string" && /^\d+$/.test(id)))) {
     throw new TorBoxRequestError(502, "INVALID_RESPONSE", "TorBox returned invalid torrent information");

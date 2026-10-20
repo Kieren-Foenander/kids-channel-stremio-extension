@@ -97,7 +97,7 @@ export function tvPreparationOutcomeMessage(outcome?: StreamSelectionOutcome): s
       : "Source rejected";
     return `${reason}; the next round will try another source`;
   }
-  if (outcome.status === "temporarily_unavailable") return "TorBox could not inspect this source; it will be retried";
+  if (outcome.status === "temporarily_unavailable" || outcome.status === "deadline_reached") return "TorBox could not inspect this source; it will be retried";
   if (outcome.status === "downloading") return "TorBox is downloading this source";
   if (outcome.status === "waiting_metadata") return "TorBox is finding the episode files; checking again shortly";
   return "Cached by TorBox";

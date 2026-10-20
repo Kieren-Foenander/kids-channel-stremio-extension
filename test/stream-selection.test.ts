@@ -410,6 +410,53 @@ describe("TV sourcing resilience", () => {
     expect(await env.DB.prepare("SELECT * FROM stream_selections").first()).toBeNull();
   });
 
+  it("starts no provider work once the playback deadline has passed", async () => {
+    mockSources({ title: "Example Show S01E02" });
+    const onOutcome = vi.fn();
+    expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(), new Set(), {
+      onOutcome, deadline: Date.now() - 1,
+    })).toBeNull();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+    expect(onOutcome).toHaveBeenCalledWith({ status: "deadline_reached", candidateCount: 0 });
+  });
+
+  it("does not treat a partly interrupted search as definitive", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") return Response.json([]);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    });
+    const onOutcome = vi.fn();
+    expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(), new Set(), {
+      onOutcome, deadline: Date.now() + 100,
+    })).toBeNull();
+    expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({ status: "deadline_reached", candidateCount: 0 }));
+  });
+
+  it("stops inspecting at the deadline without quarantining an interrupted candidate", async () => {
+    const entries = ["1", "2", "3"].map((digit) => ({
+      raw_title: `Example.Show.S01E02.1080p.${digit}`, info_hash: digit.repeat(40), seasons: [1], episodes: [2],
+    }));
+    const calls = mockSources({ zilean: entries, cachedHashes: entries.map((entry) => entry.info_hash), files: () => [] });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers();
+    const onOutcome = vi.fn();
+    const selection = selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(), new Set(), {
+      onOutcome, deadline: Date.now() + 2_000,
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(await selection).toBeNull();
+    expect(calls.created).toEqual([{ hash: entries[0].info_hash, cachedOnly: true }]);
+    expect(calls.deleted).toHaveLength(1);
+    expect(await env.DB.prepare("SELECT * FROM stream_candidate_failures").first()).toBeNull();
+    expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({
+      status: "deadline_reached",
+      diagnostics: expect.objectContaining({ cacheChecks: 1 }),
+    }));
+  });
+
   it("falls back to bounded cache inspection when batch availability is unavailable", async () => {
     mockSources({ title: "Example Show S01E02", cacheFailure: true });
     const onOutcome = vi.fn();

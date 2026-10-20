@@ -1740,6 +1740,63 @@ describe("rolling TV Channel Schedule", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
   });
 
+  it("answers slow TV sourcing with holding media and finishes cleanup afterwards", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const slowId = before.meta.behaviorHints.defaultVideoId as string;
+    const nextId = before.meta.videos[1].id as string;
+    const showTitle = slowId.startsWith("tt9000001:") ? "Show 1" : "Show 2";
+    const hash = "e".repeat(40);
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const torBoxRequests: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) {
+        return Response.json({ hits: [{ title: `${showTitle} S01E01 1080p`, hash, seeders: 10 }] });
+      }
+      torBoxRequests.push(url.pathname.replace(/^.*\/torrents\//, ""));
+      if (url.pathname.endsWith("/torrents/checkcached")) return Response.json({ success: true, data: [{ hash }] });
+      if (url.pathname.endsWith("/torrents/createtorrent")) return Response.json({ success: true, data: { torrent_id: 77 } });
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 77, hash, download_state: "cached", download_present: true, download_finished: true,
+        files: [{ id: 1, name: `/${showTitle}.S01E09.mkv`, size: 1_000 }],
+      } });
+      if (url.pathname.endsWith("/torrents/controltorrent")) {
+        // Cleanup is never cut short, so it is the slow step that outlasts the response.
+        await cleanup;
+        return Response.json({ success: true, data: true });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const ctx = createExecutionContext();
+    const startedAt = Date.now();
+    const bumper = await handler.fetch(
+      new Request(before.meta.videos[0].streams[0].url),
+      { ...env, PLAYBACK_SELECTION_BUDGET_MS: "500" },
+      ctx,
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(6_000);
+    expect(bumper.status).toBe(200);
+    expect(bumper.headers.get("content-type")).toBe("video/mp4");
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(nextId);
+    expect(await env.DB.prepare("SELECT video_id FROM unavailable_episodes WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ video_id: slowId });
+
+    releaseCleanup();
+    await waitOnExecutionContext(ctx);
+    expect(torBoxRequests).toEqual(["checkcached", "createtorrent", "mylist", "controltorrent"]);
+    expect(await env.DB.prepare("SELECT info_hash, reason FROM stream_candidate_failures").first())
+      .toMatchObject({ info_hash: hash, reason: "file_mismatch" });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_selections").first())
+      .toMatchObject({ count: 0 });
+  }, 10_000);
+
   it("keeps an advertised desktop schedule valid across consecutive unavailable programmes", async () => {
     const { created, base } = await arrangeShows(5);
     await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
@@ -2147,6 +2204,46 @@ describe("Movie Channel rotation and sign-off", () => {
     expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toMatch(/^tt800000[1-3]$/);
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_rotation WHERE cycle = 0 AND consumed_at IS NOT NULL").first())
       .toMatchObject({ count: 3 });
+  });
+
+  it.each([
+    ["every search is interrupted", "searches"],
+    ["one search finishes empty while another is interrupted", "partial"],
+    ["a matched cached file is still unconfirmed", "confirmation"],
+  ])("asks for a movie retry when %s at the deadline", async (_label, scenario) => {
+    const { created, base } = await arrangeMovies(1);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const movie = (await metadata(base)).meta.videos[0] as { streams: Array<{ url: string }> };
+    const hash = "c".repeat(40);
+    const untilAborted = (init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (scenario === "searches") return untilAborted(init);
+      if (url.hostname.includes("zilean")) {
+        return Response.json(scenario === "partial" ? [] : [{ raw_title: "Movie 1 1080p", info_hash: hash }]);
+      }
+      if (url.hostname.includes("knaben")) return scenario === "partial" ? untilAborted(init) : Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/checkcached")) return Response.json({ success: true, data: [{ hash }] });
+      if (url.pathname.endsWith("/torrents/createtorrent")) return Response.json({ success: true, data: { torrent_id: 66 } });
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 66, hash, download_state: "downloading", download_present: false, download_finished: false,
+        files: [{ id: 1, name: "/Movie 1 1080p.mkv", size: 1_000 }],
+      } });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const response = await handler.fetch(
+      new Request(movie.streams[0].url),
+      { ...env, PLAYBACK_SELECTION_BUDGET_MS: "300" },
+      createExecutionContext(),
+    );
+
+    expect(response.status).toBe(503);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM movie_advancements").first())
+      .toMatchObject({ count: 0 });
   });
 
   it("does not consume the Current Programme when Stremio probes the sign-off URL", async () => {
