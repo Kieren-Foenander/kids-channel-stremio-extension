@@ -417,7 +417,7 @@ describe("TV sourcing resilience", () => {
       onOutcome, deadline: Date.now() - 1,
     })).toBeNull();
     expect(globalThis.fetch).not.toHaveBeenCalled();
-    expect(onOutcome).toHaveBeenCalledWith({ status: "temporarily_unavailable", candidateCount: 0 });
+    expect(onOutcome).toHaveBeenCalledWith({ status: "deadline_reached", candidateCount: 0 });
   });
 
   it("stops inspecting at the deadline without quarantining an interrupted candidate", async () => {
@@ -437,8 +437,8 @@ describe("TV sourcing resilience", () => {
     expect(calls.deleted).toHaveLength(1);
     expect(await env.DB.prepare("SELECT * FROM stream_candidate_failures").first()).toBeNull();
     expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({
-      status: "temporarily_unavailable",
-      diagnostics: expect.objectContaining({ cacheChecks: 1, deadlineReached: true }),
+      status: "deadline_reached",
+      diagnostics: expect.objectContaining({ cacheChecks: 1 }),
     }));
   });
 

@@ -46,7 +46,6 @@ export interface StreamDiscoveryDiagnostics {
   cachedCandidates: number;
   cacheChecks: number;
   rejections: Record<string, number>;
-  deadlineReached?: true;
 }
 
 export type StreamSelectionOutcome = (
@@ -57,6 +56,7 @@ export type StreamSelectionOutcome = (
   | { status: "candidates_exhausted"; candidateCount: number }
   | { status: "candidate_rejected"; candidateCount: number; reason: string }
   | { status: "temporarily_unavailable"; candidateCount: number }
+  | { status: "deadline_reached"; candidateCount: number }
 ) & { diagnostics?: StreamDiscoveryDiagnostics };
 
 export interface StreamSelection {
@@ -463,11 +463,20 @@ async function waitForTorrent(
   id: string,
   ready: (info: TorrentInfo) => boolean,
   timeoutMs: number,
+  deadline?: number,
 ): Promise<TorrentInfo> {
   const startedAt = performance.now();
   let lastInfo: TorrentInfo | null = null;
   do {
-    const info = await getTorBoxTorrent(token, env, id, true);
+    // Past the deadline the torrent is left as it is: still pending, never misjudged.
+    if (deadlineReached(deadline)) break;
+    let info: TorrentInfo;
+    try {
+      info = await getTorBoxTorrent(token, env, id, true, remainingMs(deadline, REQUEST_TIMEOUT_MS));
+    } catch (error) {
+      if (deadlineReached(deadline)) break;
+      throw error;
+    }
     lastInfo = info;
     if (ready(info)) return info;
     if (torBoxTorrentIsTerminal(info)) {
@@ -518,8 +527,9 @@ async function cachedCandidate(
   let addedId: string | null = null;
   let matchedFile: TorrentFile | null = null;
   let stage = cachedOnly ? "add-cached-torrent" : "add-torrent";
-  const metadataTimeoutMs = remainingMs(deadline, REQUEST_TIMEOUT_MS);
   try {
+    // Creation is never cut short: an aborted create may still allocate a torrent that
+    // nothing would then clean up. Every later wait fits within the deadline.
     addedId = await createTorBoxTorrent(token, env, candidate.magnet, cachedOnly);
     stage = "load-files";
     const beforeSelection = await waitForTorrent(
@@ -527,7 +537,8 @@ async function cachedCandidate(
       env,
       addedId,
       (info) => info.files.length > 0,
-      metadataTimeoutMs,
+      REQUEST_TIMEOUT_MS,
+      deadline,
     );
     stage = "match-file";
     const file = selectedFile(beforeSelection.files, programme);
@@ -538,7 +549,8 @@ async function cachedCandidate(
       env,
       addedId,
       (info) => info.ready,
-      remainingMs(deadline, cacheCheckTimeoutMs),
+      cacheCheckTimeoutMs,
+      deadline,
     );
     return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
@@ -557,7 +569,7 @@ async function cachedCandidate(
     // not be quarantined as a metadata timeout.
     const interruptedByDeadline = error instanceof TorrentDownloadPendingError
       && stage === "load-files"
-      && metadataTimeoutMs < REQUEST_TIMEOUT_MS;
+      && deadlineReached(deadline);
     const notCached = error instanceof TorBoxRequestError
       && (/cache/i.test(error.code ?? "") || /not cached/i.test(error.message));
     if (cachedOnly && notCached) return { rejectedReason: "not_cached" };
@@ -859,7 +871,7 @@ export async function selectCachedStream(
   }
 
   if (deadlineReached(options.deadline)) {
-    report({ status: "temporarily_unavailable", candidateCount: 0 });
+    report({ status: "deadline_reached", candidateCount: 0 });
     return null;
   }
   const quarantinedHashes = await quarantinedInfoHashes(db, householdId, contentType, videoId, now);
@@ -876,7 +888,12 @@ export async function selectCachedStream(
   // preserve the existing bounded inspection path (including stale cache misses).
   let cacheCandidates = eligibleCandidates;
   try {
-    const cachedHashes = await cachedTorBoxHashes(torBoxToken, env, eligibleCandidates.slice(0, 100).map((candidate) => candidate.infoHash));
+    const cachedHashes = await cachedTorBoxHashes(
+      torBoxToken,
+      env,
+      eligibleCandidates.slice(0, 100).map((candidate) => candidate.infoHash),
+      remainingMs(options.deadline, REQUEST_TIMEOUT_MS),
+    );
     diagnostics.cacheLookup = "available";
     diagnostics.cachedCandidates = cachedHashes.size;
     cacheCandidates = [
@@ -887,11 +904,7 @@ export async function selectCachedStream(
   const cleanup = (torrentId: string) => deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, torrentId);
   const rejectedHashes = new Set<string>();
   for (const candidate of cacheCandidates.slice(0, maxCacheChecks)) {
-    if (deadlineReached(options.deadline)) {
-      diagnostics.deadlineReached = true;
-      temporarilyUnavailable = true;
-      break;
-    }
+    if (deadlineReached(options.deadline)) break;
     diagnostics.cacheChecks += 1;
     const cached = await cachedCandidate(
       candidate, programme, torBoxToken, env, true, cleanup, cacheCheckTimeoutMs, options.deadline,
@@ -935,10 +948,7 @@ export async function selectCachedStream(
     }
   }
   const downloadCandidate = eligibleCandidates.find((candidate) => !rejectedHashes.has(candidate.infoHash));
-  if (contentType === "series" && downloadCandidate && deadlineReached(options.deadline)) {
-    diagnostics.deadlineReached = true;
-    temporarilyUnavailable = true;
-  } else if (contentType === "series" && downloadCandidate) {
+  if (contentType === "series" && downloadCandidate && !deadlineReached(options.deadline)) {
     const candidate = downloadCandidate;
     const pending = await cachedCandidate(
       candidate, programme, torBoxToken, env, false, cleanup, cacheCheckTimeoutMs, options.deadline,
@@ -985,7 +995,10 @@ export async function selectCachedStream(
       }
     }
   }
-  if (candidates.length === 0) report({
+  // Only a completed search with no results is definitive once the deadline has passed.
+  if (deadlineReached(options.deadline) && !(candidates.length === 0 && discovery.providerAvailable)) {
+    report({ status: "deadline_reached", candidateCount: candidates.length });
+  } else if (candidates.length === 0) report({
     status: discovery.providerAvailable ? "no_candidates" : "temporarily_unavailable",
     candidateCount: 0,
   });

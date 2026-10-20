@@ -318,7 +318,8 @@ async function playChannelProgramme(
     const result = await withinPlaybackTimeLimit(ctx, handoff, budgetMs + PLAYBACK_RESPONSE_GRACE_MS);
     if (result === PLAYBACK_TIME_LIMIT_REACHED) abandoned = true;
     if (result === PLAYBACK_TIME_LIMIT_REACHED || !result) {
-      const timedOut = result === PLAYBACK_TIME_LIMIT_REACHED;
+      const timedOut = result === PLAYBACK_TIME_LIMIT_REACHED
+        || (selectionOutcome as StreamSelectionOutcome | null)?.status === "deadline_reached";
       logPlayback("warn", timedOut ? "selection_timed_out" : "selection_unavailable", {
         handoffId,
         householdId: household.id,
@@ -400,7 +401,8 @@ async function resolveStreamWithFailover(
     } catch (error) {
       if (error instanceof TorBoxResolutionError
         && (error.status === null || error.status >= 500)
-        && attempt < MAX_RESOLUTION_ATTEMPTS - 1) {
+        && attempt < MAX_RESOLUTION_ATTEMPTS - 1
+        && !(deadline !== undefined && Date.now() >= deadline)) {
         console.warn(JSON.stringify({
           message: "stream resolution retry",
           householdId,
@@ -1321,15 +1323,30 @@ export default {
           return addonJson({ error: "TorBox is not configured for this Household." }, 503, { "cache-control": "no-store" });
         }
         const context = await streamSelectionContext(env.DB, household.id, identity);
-        const directLink = await resolveStreamWithFailover(
+        const budgetMs = playbackSelectionBudgetMs(env, context?.contentType ?? "series");
+        const directLink = await withinPlaybackTimeLimit(ctx, resolveStreamWithFailover(
           env,
           household.id,
           identity,
           context,
           torBoxToken,
           request.headers.get("cf-connecting-ip") ?? undefined,
-          Date.now() + playbackSelectionBudgetMs(env, context?.contentType ?? "series"),
-        );
+          Date.now() + budgetMs,
+        ), budgetMs + PLAYBACK_RESPONSE_GRACE_MS);
+        if (directLink === PLAYBACK_TIME_LIMIT_REACHED) {
+          logPlayback("warn", "resolve_timed_out", {
+            handoffId,
+            householdId: household.id,
+            contentType: context?.contentType,
+            videoId: context?.videoId,
+            budgetMs,
+          });
+          return addonJson(
+            { error: "TorBox is responding slowly. Try again." },
+            503,
+            { "cache-control": "no-store", "retry-after": "5" },
+          );
+        }
         logPlayback("log", "cdn_handoff", {
           handoffId,
           householdId: household.id,

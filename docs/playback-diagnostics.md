@@ -13,7 +13,8 @@ The playback events distinguish the important boundaries:
 | --- | --- |
 | `head_probe` | Stremio checked an inline URL without starting playback. The Channel did not advance. |
 | `selection_unavailable` | Kids Channels could not obtain a ready exact-match TorBox selection. Inspect `selectionOutcome`. |
-| `selection_timed_out` | Sourcing did not finish within the playback budget (`budgetMs`). A TV programme was deferred behind holding media and sourcing continued in the background; a movie returned 503. |
+| `selection_timed_out` | Sourcing did not finish within the playback budget (`budgetMs`). A TV programme was deferred behind holding media; a movie returned 503. Unfinished work completed in the background. |
+| `resolve_timed_out` | A compatibility `/resolve` request exceeded the playback budget and returned 503 without invalidating the selection. |
 | `failed` | Selection or TorBox download-link resolution failed before the Channel advanced. Inspect `torBoxStatus`, `retryAfter`, and `reason`. |
 | `cdn_handoff` | TorBox issued a download URL and Kids Channels returned it to Stremio. `cdnHost`, `colo`, and `country` identify the delivery route without logging the signed URL or client IP. |
 | `resolve_failed` | A compatibility `/resolve` request failed before reaching the TorBox CDN. |
@@ -71,8 +72,10 @@ When discovery ran, `selectionOutcome.diagnostics` includes:
 - `cachedCandidates`: eligible hashes reported cached, among at most 100 checked.
 - `cacheChecks`: cached-only candidate inspections actually attempted (at most ten).
 - `rejections`: counts by reason, including `not_cached`, `file_mismatch`, and `metadata_timeout`.
-- `deadlineReached`: present when the playback budget stopped inspection before every
-  candidate was tried. Candidates interrupted by the deadline are not quarantined.
+
+`selectionOutcome.status = deadline_reached` means the playback budget stopped discovery
+or inspection before a definitive answer. Candidates interrupted by the deadline are not
+quarantined.
 
 Compare these alongside `candidateCount` and the final outcome to distinguish search
 coverage from cache misses or failed inspection. Reused selections do not run discovery
