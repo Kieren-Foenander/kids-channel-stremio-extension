@@ -35,6 +35,9 @@ export interface StreamSelectionOptions {
   cacheCheckTimeoutMs?: number;
   onOutcome?: (outcome: StreamSelectionOutcome) => void;
   programme?: StreamSelectionProgramme;
+  /** Epoch milliseconds after which no further discovery or candidate inspection starts.
+   * Playback sets this so a slow provider cannot hold Stremio's request open. */
+  deadline?: number;
 }
 
 export interface StreamDiscoveryDiagnostics {
@@ -43,6 +46,7 @@ export interface StreamDiscoveryDiagnostics {
   cachedCandidates: number;
   cacheChecks: number;
   rejections: Record<string, number>;
+  deadlineReached?: true;
 }
 
 export type StreamSelectionOutcome = (
@@ -387,13 +391,21 @@ export function rankCandidates(candidates: DiscoveryCandidate[]): DiscoveryCandi
     || left.infoHash.localeCompare(right.infoHash));
 }
 
-async function providerJson(url: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+function remainingMs(deadline: number | undefined, limitMs: number): number {
+  return deadline === undefined ? limitMs : Math.min(limitMs, deadline - Date.now());
+}
+
+function deadlineReached(deadline: number | undefined): boolean {
+  return deadline !== undefined && Date.now() >= deadline;
+}
+
+async function providerJson(url: string, init?: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): Promise<unknown> {
+  const response = await fetch(url, { ...init, signal: AbortSignal.timeout(Math.max(1, timeoutMs)) });
   if (!response.ok) throw new Error(`discovery provider returned HTTP ${response.status}`);
   return response.json();
 }
 
-async function discover(programme: StreamSelectionProgramme, env: StreamSelectionEnv): Promise<{
+async function discover(programme: StreamSelectionProgramme, env: StreamSelectionEnv, deadline?: number): Promise<{
   candidates: DiscoveryCandidate[];
   providerAvailable: boolean;
   failedSearches: string[];
@@ -411,8 +423,9 @@ async function discover(programme: StreamSelectionProgramme, env: StreamSelectio
   const queries = programme.season !== undefined
     ? [`${programme.title}${episodeQuery}`, `${programme.title} S${String(programme.season).padStart(2, "0")}`]
     : [`${programme.title}${yearQuery}`];
+  const timeoutMs = remainingMs(deadline, REQUEST_TIMEOUT_MS);
   const results = await Promise.allSettled([
-    providerJson(zileanUrl.toString()),
+    providerJson(zileanUrl.toString(), undefined, timeoutMs),
     ...queries.map((query) => providerJson(knabenUrl.toString(), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -426,7 +439,7 @@ async function discover(programme: StreamSelectionProgramme, env: StreamSelectio
         hide_unsafe: true,
         hide_xxx: true,
       }),
-    })),
+    }, timeoutMs)),
   ]);
   const candidates = [
     ...(results[0].status === "fulfilled" ? zileanCandidates(results[0].value, programme) : []),
@@ -495,6 +508,7 @@ async function cachedCandidate(
   cachedOnly: boolean,
   cleanup: (torrentId: string) => Promise<void>,
   cacheCheckTimeoutMs = CACHE_CHECK_TIMEOUT_MS,
+  deadline?: number,
 ): Promise<{
   torrentId: string;
   file: TorrentFile | null;
@@ -504,6 +518,7 @@ async function cachedCandidate(
   let addedId: string | null = null;
   let matchedFile: TorrentFile | null = null;
   let stage = cachedOnly ? "add-cached-torrent" : "add-torrent";
+  const metadataTimeoutMs = remainingMs(deadline, REQUEST_TIMEOUT_MS);
   try {
     addedId = await createTorBoxTorrent(token, env, candidate.magnet, cachedOnly);
     stage = "load-files";
@@ -512,7 +527,7 @@ async function cachedCandidate(
       env,
       addedId,
       (info) => info.files.length > 0,
-      REQUEST_TIMEOUT_MS,
+      metadataTimeoutMs,
     );
     stage = "match-file";
     const file = selectedFile(beforeSelection.files, programme);
@@ -523,7 +538,7 @@ async function cachedCandidate(
       env,
       addedId,
       (info) => info.ready,
-      cacheCheckTimeoutMs,
+      remainingMs(deadline, cacheCheckTimeoutMs),
     );
     return { torrentId: addedId, file, downloadPending: false, progress: downloaded.progress };
   } catch (error) {
@@ -538,6 +553,11 @@ async function cachedCandidate(
         progress: error.info?.progress ?? 0,
       };
     }
+    // A deadline-shortened metadata wait says nothing about the candidate, so it must
+    // not be quarantined as a metadata timeout.
+    const interruptedByDeadline = error instanceof TorrentDownloadPendingError
+      && stage === "load-files"
+      && metadataTimeoutMs < REQUEST_TIMEOUT_MS;
     const notCached = error instanceof TorBoxRequestError
       && (/cache/i.test(error.code ?? "") || /not cached/i.test(error.message));
     if (cachedOnly && notCached) return { rejectedReason: "not_cached" };
@@ -545,7 +565,7 @@ async function cachedCandidate(
       && error.status >= 400
       && error.status < 500
       && ![401, 403, 429].includes(error.status);
-    const rejectedReason = error instanceof TorrentTerminalError
+    const rejectedReason = interruptedByDeadline ? null : error instanceof TorrentTerminalError
       ? error.status
       : error instanceof TorrentDownloadPendingError && stage === "load-files"
         ? "metadata_timeout"
@@ -838,8 +858,12 @@ export async function selectCachedStream(
     return null;
   }
 
+  if (deadlineReached(options.deadline)) {
+    report({ status: "temporarily_unavailable", candidateCount: 0 });
+    return null;
+  }
   const quarantinedHashes = await quarantinedInfoHashes(db, householdId, contentType, videoId, now);
-  const discovery = await discover(programme, env);
+  const discovery = await discover(programme, env, options.deadline);
   diagnostics = { failedSearches: discovery.failedSearches, cacheLookup: "unavailable", cachedCandidates: 0, cacheChecks: 0, rejections: {} };
   const candidates = discovery.candidates;
   const eligibleCandidates = candidates.filter((candidate) =>
@@ -863,8 +887,15 @@ export async function selectCachedStream(
   const cleanup = (torrentId: string) => deleteUnreferencedStreamTorrent(db, householdId, torBoxToken, env, torrentId);
   const rejectedHashes = new Set<string>();
   for (const candidate of cacheCandidates.slice(0, maxCacheChecks)) {
+    if (deadlineReached(options.deadline)) {
+      diagnostics.deadlineReached = true;
+      temporarilyUnavailable = true;
+      break;
+    }
     diagnostics.cacheChecks += 1;
-    const cached = await cachedCandidate(candidate, programme, torBoxToken, env, true, cleanup, cacheCheckTimeoutMs);
+    const cached = await cachedCandidate(
+      candidate, programme, torBoxToken, env, true, cleanup, cacheCheckTimeoutMs, options.deadline,
+    );
     if (!cached) {
       temporarilyUnavailable = true;
       continue;
@@ -904,9 +935,14 @@ export async function selectCachedStream(
     }
   }
   const downloadCandidate = eligibleCandidates.find((candidate) => !rejectedHashes.has(candidate.infoHash));
-  if (contentType === "series" && downloadCandidate) {
+  if (contentType === "series" && downloadCandidate && deadlineReached(options.deadline)) {
+    diagnostics.deadlineReached = true;
+    temporarilyUnavailable = true;
+  } else if (contentType === "series" && downloadCandidate) {
     const candidate = downloadCandidate;
-    const pending = await cachedCandidate(candidate, programme, torBoxToken, env, false, cleanup, cacheCheckTimeoutMs);
+    const pending = await cachedCandidate(
+      candidate, programme, torBoxToken, env, false, cleanup, cacheCheckTimeoutMs, options.deadline,
+    );
     if (!pending) {
       temporarilyUnavailable = true;
     } else if ("rejectedReason" in pending) {

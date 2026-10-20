@@ -1740,6 +1740,49 @@ describe("rolling TV Channel Schedule", () => {
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM channel_advancements").first()).toMatchObject({ count: 1 });
   });
 
+  it("answers a slow TV source search with holding media and finishes sourcing afterwards", async () => {
+    const { created, base } = await arrangeShows(2);
+    await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
+    const before = await metadata(base);
+    const slowId = before.meta.behaviorHints.defaultVideoId as string;
+    const nextId = before.meta.videos[1].id as string;
+    const showTitle = slowId.startsWith("tt9000001:") ? "Show 1" : "Show 2";
+    let releaseCacheLookup!: () => void;
+    const cacheLookup = new Promise<void>((resolve) => { releaseCacheLookup = resolve; });
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname.includes("zilean")) return Response.json([]);
+      if (url.hostname.includes("knaben")) {
+        return Response.json({ hits: [{ title: `${showTitle} S01E01 1080p`, hash: "e".repeat(40), seeders: 10 }] });
+      }
+      if (url.pathname.endsWith("/torrents/checkcached")) {
+        await cacheLookup;
+        return Response.json({ success: true, data: [] });
+      }
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
+
+    const ctx = createExecutionContext();
+    const startedAt = Date.now();
+    const bumper = await handler.fetch(
+      new Request(before.meta.videos[0].streams[0].url),
+      { ...env, PLAYBACK_SELECTION_BUDGET_MS: "50" },
+      ctx,
+    );
+
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+    expect(bumper.status).toBe(200);
+    expect(bumper.headers.get("content-type")).toBe("video/mp4");
+    expect((await metadata(base)).meta.behaviorHints.defaultVideoId).toBe(nextId);
+    expect(await env.DB.prepare("SELECT video_id FROM unavailable_episodes WHERE household_id = ?")
+      .bind(created.householdId).first()).toMatchObject({ video_id: slowId });
+
+    releaseCacheLookup();
+    await waitOnExecutionContext(ctx);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM stream_candidate_failures").first())
+      .toMatchObject({ count: 0 });
+  }, 10_000);
+
   it("keeps an advertised desktop schedule valid across consecutive unavailable programmes", async () => {
     const { created, base } = await arrangeShows(5);
     await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
