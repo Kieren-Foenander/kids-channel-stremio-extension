@@ -996,7 +996,7 @@ export async function selectCachedStream(
     }
   }
   // Only a completed search with no results is definitive once the deadline has passed.
-  if (deadlineReached(options.deadline) && !(candidates.length === 0 && discovery.providerAvailable)) {
+  if (deadlineReached(options.deadline) && !(candidates.length === 0 && discovery.failedSearches.length === 0)) {
     report({ status: "deadline_reached", candidateCount: candidates.length });
   } else if (candidates.length === 0) report({
     status: discovery.providerAvailable ? "no_candidates" : "temporarily_unavailable",

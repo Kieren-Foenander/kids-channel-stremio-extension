@@ -22,8 +22,10 @@ requested for a selection that completes after the response.
 
 When the budget expires, the selector reports `deadline_reached` and a TV programme
 follows the existing Unavailable Episode path: holding media, deferral, and Preparation
-Run reconciliation. A movie returns 503 so a retry can use the selection stored in the
-background. Transient resolution retries and alternate-hash failover stop at the
+Run reconciliation. A movie returns 503 whenever selection ends after the deadline without
+a stream, because an interrupted search or an unconfirmed cached file is not definitive;
+a retry can use the selection stored in the background. The selector reports
+`deadline_reached` unless every search completed with no results. Transient resolution retries and alternate-hash failover stop at the
 deadline. The `/resolve` route uses the same budget and response limit, returning 503
 without invalidating the selection.
 

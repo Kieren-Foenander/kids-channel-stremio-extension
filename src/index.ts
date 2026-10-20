@@ -318,8 +318,9 @@ async function playChannelProgramme(
     const result = await withinPlaybackTimeLimit(ctx, handoff, budgetMs + PLAYBACK_RESPONSE_GRACE_MS);
     if (result === PLAYBACK_TIME_LIMIT_REACHED) abandoned = true;
     if (result === PLAYBACK_TIME_LIMIT_REACHED || !result) {
-      const timedOut = result === PLAYBACK_TIME_LIMIT_REACHED
-        || (selectionOutcome as StreamSelectionOutcome | null)?.status === "deadline_reached";
+      // Any null result after the deadline may be incomplete (an interrupted search or an
+      // unconfirmed cached file), so a movie is asked to retry rather than told it is missing.
+      const timedOut = result === PLAYBACK_TIME_LIMIT_REACHED || Date.now() >= deadline;
       logPlayback("warn", timedOut ? "selection_timed_out" : "selection_unavailable", {
         handoffId,
         householdId: household.id,

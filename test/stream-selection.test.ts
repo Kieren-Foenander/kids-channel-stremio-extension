@@ -420,6 +420,21 @@ describe("TV sourcing resilience", () => {
     expect(onOutcome).toHaveBeenCalledWith({ status: "deadline_reached", candidateCount: 0 });
   });
 
+  it("does not treat a partly interrupted search as definitive", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (url.hostname === "zilean.test") return Response.json([]);
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
+      });
+    });
+    const onOutcome = vi.fn();
+    expect(await selectCachedStream(env.DB, "household", "series", "tt1234567:1:2", "tb-token", selectionEnv, new Date(), new Set(), {
+      onOutcome, deadline: Date.now() + 100,
+    })).toBeNull();
+    expect(onOutcome).toHaveBeenCalledWith(expect.objectContaining({ status: "deadline_reached", candidateCount: 0 }));
+  });
+
   it("stops inspecting at the deadline without quarantining an interrupted candidate", async () => {
     const entries = ["1", "2", "3"].map((digit) => ({
       raw_title: `Example.Show.S01E02.1080p.${digit}`, info_hash: digit.repeat(40), seasons: [1], episodes: [2],

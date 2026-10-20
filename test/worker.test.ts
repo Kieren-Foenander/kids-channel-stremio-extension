@@ -2206,18 +2206,38 @@ describe("Movie Channel rotation and sign-off", () => {
       .toMatchObject({ count: 3 });
   });
 
-  it("asks for a movie retry when sourcing runs out of time", async () => {
+  it.each([
+    ["every search is interrupted", "searches"],
+    ["one search finishes empty while another is interrupted", "partial"],
+    ["a matched cached file is still unconfirmed", "confirmation"],
+  ])("asks for a movie retry when %s at the deadline", async (_label, scenario) => {
     const { created, base } = await arrangeMovies(1);
     await storeTorBoxCredential(env.DB, created.householdId, "household-rd-token", env.CONFIG_SECRET);
     const movie = (await metadata(base)).meta.videos[0] as { streams: Array<{ url: string }> };
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(globalThis, "fetch").mockImplementation((_input, init) => new Promise((_resolve, reject) => {
+    const hash = "c".repeat(40);
+    const untilAborted = (init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener("abort", () => reject(init.signal!.reason));
-    }));
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      if (scenario === "searches") return untilAborted(init);
+      if (url.hostname.includes("zilean")) {
+        return Response.json(scenario === "partial" ? [] : [{ raw_title: "Movie 1 1080p", info_hash: hash }]);
+      }
+      if (url.hostname.includes("knaben")) return scenario === "partial" ? untilAborted(init) : Response.json({ hits: [] });
+      if (url.pathname.endsWith("/torrents/checkcached")) return Response.json({ success: true, data: [{ hash }] });
+      if (url.pathname.endsWith("/torrents/createtorrent")) return Response.json({ success: true, data: { torrent_id: 66 } });
+      if (url.pathname.endsWith("/torrents/mylist")) return Response.json({ success: true, data: {
+        id: 66, hash, download_state: "downloading", download_present: false, download_finished: false,
+        files: [{ id: 1, name: "/Movie 1 1080p.mkv", size: 1_000 }],
+      } });
+      throw new Error(`unexpected outbound request: ${url}`);
+    });
 
     const response = await handler.fetch(
       new Request(movie.streams[0].url),
-      { ...env, PLAYBACK_SELECTION_BUDGET_MS: "50" },
+      { ...env, PLAYBACK_SELECTION_BUDGET_MS: "300" },
       createExecutionContext(),
     );
 
